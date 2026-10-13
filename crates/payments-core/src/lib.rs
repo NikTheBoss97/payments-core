@@ -1,0 +1,1 @@
+//! payments-core: a payment processing backend built around a double-entry ledger.
