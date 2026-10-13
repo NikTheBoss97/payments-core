@@ -1,3 +1,5 @@
+<!-- Author: Nicola Antonello -->
+
 # payments-core
 
 A payment processing backend where money is never lost, duplicated, or created,
