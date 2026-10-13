@@ -1,3 +1,5 @@
+# Author: Nicola Antonello
+
 # Force LF everywhere. sqlx checksums migration files, so a CRLF checkout on
 # Windows would otherwise be flagged as a modified migration on Linux.
 * text=auto eol=lf

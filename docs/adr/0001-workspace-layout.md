@@ -1,3 +1,5 @@
+<!-- Author: Nicola Antonello -->
+
 # ADR-0001: Workspace layout
 
 - Status: accepted
