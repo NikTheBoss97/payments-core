@@ -1,3 +1,5 @@
+# Author: Nicola Antonello
+
 # Local development database. Credentials are for local use only.
 services:
   postgres:

@@ -1,3 +1,5 @@
+# Author: Nicola Antonello
+
 [toolchain]
 channel = "stable"
 components = ["rustfmt", "clippy"]

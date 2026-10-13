@@ -1,3 +1,5 @@
+# Author: Nicola Antonello
+
 [package]
 name = "payments-core"
 version = "0.1.0"

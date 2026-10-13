@@ -1,3 +1,5 @@
+<!-- Author: Nicola Antonello -->
+
 # payments-core: Design
 
 This is a living document. Decisions behind it are recorded in [`adr/`](adr/).
