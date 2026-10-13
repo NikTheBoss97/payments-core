@@ -27,3 +27,6 @@ rustc-ice-*.txt
 
 # Local environment
 .env
+
+# Claude Code project instructions, kept local
+CLAUDE.md
