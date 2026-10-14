@@ -101,6 +101,10 @@ jobs:
           key: sqlx-cli-${{ runner.os }}-${{ env.SQLX_REV }}
       - name: Install sqlx-cli
         if: steps.sqlx-cli.outputs.cache-hit != 'true'
+        # -D warnings is this project's policy for its own code. Applied to
+        # a third-party tool, a new deprecation in Rust stable breaks the build.
+        env:
+          RUSTFLAGS: ""
         run: >-
           cargo install sqlx-cli
           --git https://github.com/transact-rs/sqlx --rev "$SQLX_REV"
