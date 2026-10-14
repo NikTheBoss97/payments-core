@@ -13,6 +13,8 @@ services:
     volumes:
       # From 18 on, the image keeps its data under /var/lib/postgresql/18/docker.
       - pgdata:/var/lib/postgresql
+      # Run once, on first start with an empty volume (ADR-0008).
+      - ./docker/postgres/roles.sql:/docker-entrypoint-initdb.d/roles.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U payments -d payments"]
       interval: 2s
