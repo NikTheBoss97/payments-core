@@ -3,7 +3,7 @@
 # Local development database. Credentials are for local use only.
 services:
   postgres:
-    image: postgres:17-alpine
+    image: postgres:18-alpine
     environment:
       POSTGRES_USER: payments
       POSTGRES_PASSWORD: payments
@@ -11,7 +11,8 @@ services:
     ports:
       - "5432:5432"
     volumes:
-      - pgdata:/var/lib/postgresql/data
+      # From 18 on, the image keeps its data under /var/lib/postgresql/18/docker.
+      - pgdata:/var/lib/postgresql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U payments -d payments"]
       interval: 2s
