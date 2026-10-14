@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO currencies (code, decimals) VALUES ('XTS', 2)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "05c887c482f47eb7c274b1da12f446cd79c2f690125ba4c8f17e225df64dee86"
+}
