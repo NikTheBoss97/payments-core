@@ -47,6 +47,11 @@ jobs:
       DATABASE_URL: postgres://payments:payments@localhost:5432/payments
     steps:
       - uses: actions/checkout@v4
+      - name: Create database roles (ADR-0008)
+        run: >-
+          docker exec -i ${{ job.services.postgres.id }}
+          psql -U payments -d payments -v ON_ERROR_STOP=1
+          < docker/postgres/roles.sql
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace --locked
