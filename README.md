@@ -26,7 +26,8 @@ invariants, and [`docs/adr/`](docs/adr/) for the decisions behind them.
 
 ## Quickstart
 
-Requires Rust (stable) and Docker.
+Built with Rust, tokio, axum, sqlx and PostgreSQL 18. Requires Rust (stable)
+and Docker.
 
 ```sh
 cp .env.example .env
@@ -73,10 +74,10 @@ first reads.
 
 ### Transactions, isolation and coordination
 
-- ★ PostgreSQL, [Chapter 13: Concurrency Control](https://www.postgresql.org/docs/17/mvcc.html) (PostgreSQL 17 docs). What each isolation level guarantees, row and advisory locks, and serialization failures.
+- ★ PostgreSQL, [Chapter 13: Concurrency Control](https://www.postgresql.org/docs/18/mvcc.html) (PostgreSQL 18 docs). What each isolation level guarantees, row and advisory locks, and serialization failures.
 - Hal Berenson et al., [A Critique of ANSI SQL Isolation Levels](https://doi.org/10.1145/223784.223785) (SIGMOD, 1995). Precise definitions of lost updates, write skew and snapshot isolation.
 - Dan R. K. Ports and Kevin Grittner, [Serializable Snapshot Isolation in PostgreSQL](https://vldb.org/pvldb/vol5/p1850_danrkports_vldb2012.pdf) (PVLDB, 2012). How PostgreSQL implements SERIALIZABLE, and what it costs compared with snapshot isolation.
-- Peter Bailis et al., [Coordination Avoidance in Database Systems](https://www.vldb.org/pvldb/vol8/p185-bailis.pdf) (PVLDB, 2014). Which invariants survive concurrency without coordination: appending rows does, keeping a balance non-negative does not.
+- Peter Bailis et al., [Coordination Avoidance in Database Systems](https://www.vldb.org/pvldb/vol8/p185-bailis.pdf) (PVLDB, 2014). Which invariants can be kept without coordination: a foreign key under inserts can, a non-negative balance under withdrawals cannot.
 - Joseph M. Hellerstein and Peter Alvaro, [Keeping CALM: When Distributed Consistency Is Easy](https://doi.org/10.1145/3369736) (Communications of the ACM, 2020). Explains the CALM theorem: monotonic programs need no coordination.
 - Todd Warszawski and Peter Bailis, [ACIDRain: Concurrency-Related Attacks on Database-Backed Web Applications](https://doi.org/10.1145/3035918.3064037) (SIGMOD, 2017). How concurrent requests corrupt inventory and overspend gift cards in real e-commerce applications.
 
