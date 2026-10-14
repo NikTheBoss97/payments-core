@@ -14,6 +14,8 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings
+  # Compile query! macros against the committed .sqlx cache (ADR-0006).
+  SQLX_OFFLINE: "true"
 
 jobs:
   lint:
@@ -55,3 +57,57 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace --locked
+
+  # Fails when the committed .sqlx cache no longer matches what the
+  # migrations produce. Offline builds cannot notice that (ADR-0006).
+  sqlx-cache:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_USER: payments
+          POSTGRES_PASSWORD: payments
+          POSTGRES_DB: payments
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U payments -d payments"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 15
+    env:
+      DATABASE_URL: postgres://payments:payments@localhost:5432/payments
+      # The sqlx commit pinned in Cargo.toml; sqlx-cli must match it.
+      SQLX_REV: f1e94ec34dd5f11ad6488a3a8ac7988439a3f757
+    steps:
+      - uses: actions/checkout@v4
+      - name: Create database roles (ADR-0008)
+        run: >-
+          docker exec -i ${{ job.services.postgres.id }}
+          psql -U payments -d payments -v ON_ERROR_STOP=1
+          < docker/postgres/roles.sql
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # The sqlx repository has no Cargo.lock, so the CLI build cannot be
+      # locked; the built binary is cached under the commit hash instead.
+      - name: Restore sqlx-cli
+        id: sqlx-cli
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/sqlx
+            ~/.cargo/bin/cargo-sqlx
+          key: sqlx-cli-${{ runner.os }}-${{ env.SQLX_REV }}
+      - name: Install sqlx-cli
+        if: steps.sqlx-cli.outputs.cache-hit != 'true'
+        run: >-
+          cargo install sqlx-cli
+          --git https://github.com/transact-rs/sqlx --rev "$SQLX_REV"
+          --no-default-features --features postgres,rustls
+      - name: Apply migrations
+        working-directory: crates/payments-core
+        run: sqlx migrate run
+      - name: Check the offline cache
+        working-directory: crates/payments-core
+        run: cargo sqlx prepare --check -- --all-targets

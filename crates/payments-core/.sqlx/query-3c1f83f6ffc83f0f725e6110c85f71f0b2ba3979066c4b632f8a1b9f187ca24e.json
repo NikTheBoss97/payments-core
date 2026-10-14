@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SET ROLE payments_app",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "3c1f83f6ffc83f0f725e6110c85f71f0b2ba3979066c4b632f8a1b9f187ca24e"
+}
