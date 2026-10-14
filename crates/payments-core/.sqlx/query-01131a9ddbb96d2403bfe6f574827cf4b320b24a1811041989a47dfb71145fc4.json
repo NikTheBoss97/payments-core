@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "TRUNCATE currencies",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "01131a9ddbb96d2403bfe6f574827cf4b320b24a1811041989a47dfb71145fc4"
+}

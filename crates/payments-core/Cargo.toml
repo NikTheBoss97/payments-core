@@ -10,5 +10,8 @@ publish.workspace = true
 
 [dependencies]
 
+[dev-dependencies]
+sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "postgres", "macros", "migrate"] }
+
 [lints]
 workspace = true

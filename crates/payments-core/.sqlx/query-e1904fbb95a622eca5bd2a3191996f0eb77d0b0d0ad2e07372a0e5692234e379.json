@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM currencies WHERE code = 'EUR'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "e1904fbb95a622eca5bd2a3191996f0eb77d0b0d0ad2e07372a0e5692234e379"
+}

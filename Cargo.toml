@@ -6,9 +6,19 @@ members = ["crates/*"]
 
 [workspace.package]
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.94"
 license = "MIT OR Apache-2.0"
 publish = false
+
+# sqlx 0.9.0 leaves a pooled connection inside an open transaction when
+# begin() is cancelled (sqlx #4393). Until 0.9.1 is released, every sqlx
+# crate comes from the commit that merged the fix (#4394). See ADR-0006.
+[patch.crates-io]
+sqlx = { git = "https://github.com/transact-rs/sqlx", rev = "f1e94ec34dd5f11ad6488a3a8ac7988439a3f757" }
+sqlx-core = { git = "https://github.com/transact-rs/sqlx", rev = "f1e94ec34dd5f11ad6488a3a8ac7988439a3f757" }
+sqlx-macros = { git = "https://github.com/transact-rs/sqlx", rev = "f1e94ec34dd5f11ad6488a3a8ac7988439a3f757" }
+sqlx-macros-core = { git = "https://github.com/transact-rs/sqlx", rev = "f1e94ec34dd5f11ad6488a3a8ac7988439a3f757" }
+sqlx-postgres = { git = "https://github.com/transact-rs/sqlx", rev = "f1e94ec34dd5f11ad6488a3a8ac7988439a3f757" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

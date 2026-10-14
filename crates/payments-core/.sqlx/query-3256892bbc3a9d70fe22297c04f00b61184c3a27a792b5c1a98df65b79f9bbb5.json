@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE currencies SET decimals = 3 WHERE code = 'EUR'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "3256892bbc3a9d70fe22297c04f00b61184c3a27a792b5c1a98df65b79f9bbb5"
+}
