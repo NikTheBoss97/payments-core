@@ -20,6 +20,14 @@ sqlx-macros = { git = "https://github.com/transact-rs/sqlx", rev = "f1e94ec34dd5
 sqlx-macros-core = { git = "https://github.com/transact-rs/sqlx", rev = "f1e94ec34dd5f11ad6488a3a8ac7988439a3f757" }
 sqlx-postgres = { git = "https://github.com/transact-rs/sqlx", rev = "f1e94ec34dd5f11ad6488a3a8ac7988439a3f757" }
 
+# Release builds wrap on integer overflow by default. Panic instead, so a
+# missed check aborts the database transaction rather than corrupting an
+# amount (ADR-0003). As in the dev and test profiles, this covers every
+# crate in the build, dependencies included; `cargo bench` inherits it.
+# CI runs crates/payments-core/tests/overflow_checks.rs in release to check it.
+[profile.release]
+overflow-checks = true
+
 [workspace.lints.rust]
 unsafe_code = "forbid"
 
