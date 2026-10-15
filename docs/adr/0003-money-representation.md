@@ -130,7 +130,11 @@ Rounding:
   then panics, and the open database transaction rolls back instead of
   committing. The setting covers every crate in the build, dependencies
   included, as the dev and test profiles already do. A test overflows on
-  purpose and CI runs it in release, so losing the setting fails CI.
+  purpose and CI runs it in release, so losing the setting fails CI. The
+  `money` module also forbids clippy's `arithmetic_side_effects` lint (its
+  module doc lists what the lint misses). The workspace does not deny it,
+  because an operator that overflows elsewhere panics through this
+  backstop, while a truncating `as` has none.
 - **SQL.** SQL never computes an amount that is stored: every amount written
   to the ledger comes from a bound `i64` parameter, never from an expression
   such as `amount * 0.029`. Aggregates that only read amounts, such as `SUM`
@@ -171,6 +175,9 @@ Rounding:
   clippy rejects a fallible conversion where an infallible `From` exists,
   and names the workspace lint that denies `as`. The decision, no `as`, is
   unchanged.
+- 2026-10-16: the Rust bullet records that the `money` module forbids
+  clippy's `arithmetic_side_effects` lint, and why the workspace does not
+  deny it. The decision is unchanged.
 
 ## References
 
