@@ -122,8 +122,9 @@ Rounding:
   and 1 (4 cents), and the allocation function gives 4 and 1.
 - **Rust.** An amount newtype that can only be built through validated
   constructors, including when it is deserialised. Arithmetic is checked,
-  sums accumulate in `i128`, and conversions use `TryFrom` rather than `as`,
-  which truncates silently. As a backstop, the root `Cargo.toml` sets
+  sums accumulate in `i128`, and conversions use `From` or `TryFrom` rather
+  than `as`, which truncates silently; the workspace denies clippy's
+  `as_conversions` lint. As a backstop, the root `Cargo.toml` sets
   `overflow-checks = true` under `[profile.release]` (Cargo's release
   default is `false`, under which overflow wraps silently). A missed check
   then panics, and the open database transaction rolls back instead of
@@ -165,6 +166,10 @@ Rounding:
 
 - 2026-10-16: the Rust bullet states that `overflow-checks` covers every
   crate in the build and that a CI test guards it. The decision is
+  unchanged.
+- 2026-10-16: the Rust bullet allows `From` as well as `TryFrom`, because
+  clippy rejects a fallible conversion where an infallible `From` exists,
+  and names the workspace lint that denies `as`. The decision, no `as`, is
   unchanged.
 
 ## References

@@ -33,3 +33,9 @@ unsafe_code = "forbid"
 
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }
+# `as` truncates and wraps silently, and overflow checks do not catch it:
+# convert with From or TryFrom instead (ADR-0003). A justified exception,
+# such as u64 to f64 in benchmark statistics, states its reason.
+as_conversions = "deny"
+# Every #[allow] or #[expect] says why, with reason = "...".
+allow_attributes_without_reason = "deny"
