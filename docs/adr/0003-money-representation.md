@@ -127,7 +127,9 @@ Rounding:
   `overflow-checks = true` under `[profile.release]` (Cargo's release
   default is `false`, under which overflow wraps silently). A missed check
   then panics, and the open database transaction rolls back instead of
-  committing.
+  committing. The setting covers every crate in the build, dependencies
+  included, as the dev and test profiles already do. A test overflows on
+  purpose and CI runs it in release, so losing the setting fails CI.
 - **SQL.** SQL never computes an amount that is stored: every amount written
   to the ledger comes from a bound `i64` parameter, never from an expression
   such as `amount * 0.029`. Aggregates that only read amounts, such as `SUM`
@@ -158,6 +160,12 @@ Rounding:
 - Amounts smaller than one minor unit, and crypto assets, are out of scope
   (DESIGN.md non-goals). Supporting them would change the newtype and the
   column, not the code around them.
+
+## Amendments
+
+- 2026-10-16: the Rust bullet states that `overflow-checks` covers every
+  crate in the build and that a CI test guards it. The decision is
+  unchanged.
 
 ## References
 

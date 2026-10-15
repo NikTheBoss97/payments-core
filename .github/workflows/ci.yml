@@ -57,6 +57,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace --locked
+      # Release builds wrap on integer overflow unless the root Cargo.toml
+      # turns the checks on. This test overflows on purpose and fails if they
+      # wrap (ADR-0003).
+      - run: cargo test -p payments-core --release --locked --test overflow_checks
 
   # Fails when the committed .sqlx cache no longer matches what the
   # migrations produce. Offline builds cannot notice that (ADR-0006).
