@@ -142,6 +142,9 @@ Append-only rows (I2):
 - 2026-10-17: the runtime role's `INSERT` on `accounts` and
   `ledger_transactions` covers every column except `recorded_at`, which only
   the database sets (ADR-0012).
+- 2026-10-17: the "dedicated error code" is one code per rule: `LG002` for
+  an incomplete ledger transaction and `LG003` for an unbalanced one
+  (ADR-0013).
 
 ## References
 
