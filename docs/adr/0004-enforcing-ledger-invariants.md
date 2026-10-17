@@ -2,7 +2,7 @@
 
 # ADR-0004: Enforcing the ledger invariants
 
-- Status: accepted
+- Status: accepted; partly superseded by ADR-0010
 - Date: 2026-10-14
 
 ## Context
@@ -131,6 +131,14 @@ Append-only rows (I2):
   setting or a temporary table, which any session can write.
 - The header must be inserted before its entries, because the entries'
   foreign key refers to it.
+
+## Amendments
+
+- 2026-10-17: ADR-0010 supersedes three parts of this decision. The header
+  declares its currency, its key `UNIQUE (id, entry_count)` becomes
+  `UNIQUE (id, entry_count, currency)`, the entries' key to the header
+  carries the currency as well, and the commit-time check no longer tests
+  the currency: a mixed-currency entry now fails at `INSERT`.
 
 ## References
 
