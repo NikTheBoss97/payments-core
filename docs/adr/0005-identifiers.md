@@ -96,6 +96,12 @@ what happened.
 - `uuid` 1.27, which fixed an ordering race in `now_v7` between threads,
   requires `rust-version` 1.89 or later.
 
+## Amendments
+
+- 2026-10-17: "No database defaults" covers identities, which the service
+  must know before any I/O. A recording time is an observation, which the
+  database stamps with `DEFAULT transaction_timestamp()` (ADR-0012).
+
 ## References
 
 - [RFC 9562: Universally Unique IDentifiers (UUIDs)](https://www.rfc-editor.org/rfc/rfc9562.html), IETF, 2024.

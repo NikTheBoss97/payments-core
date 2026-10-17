@@ -139,6 +139,9 @@ Append-only rows (I2):
   `UNIQUE (id, entry_count, currency)`, the entries' key to the header
   carries the currency as well, and the commit-time check no longer tests
   the currency: a mixed-currency entry now fails at `INSERT`.
+- 2026-10-17: the runtime role's `INSERT` on `accounts` and
+  `ledger_transactions` covers every column except `recorded_at`, which only
+  the database sets (ADR-0012).
 
 ## References
 
