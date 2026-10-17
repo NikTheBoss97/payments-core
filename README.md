@@ -56,12 +56,22 @@ first reads.
 - Martin Fowler, [Patterns for Accounting](https://martinfowler.com/eaaDev/AccountingNarrative.html) (draft, 2006). A balance as the sum of entries, and correcting mistakes with reversing entries instead of edits.
 - Ilya Ganelin, [Ledger: Stripe's system for tracking and validating money movement](https://stripe.dev/blog/ledger-stripe-system-for-tracking-and-validating-money-movement) (Stripe, 2024). An immutable event log, fund flows as state machines, and clearing accounts that must drain to zero.
 - Matt McNierney, [How to Scale a Ledger, Part VI: Concurrency Controls, Performance, and More](https://www.moderntreasury.com/journal/how-to-scale-a-ledger-part-vi) (Modern Treasury, 2023). The alternative to deriving balances on read: cached balances, balance locks and drift checks.
+- Mitchell Franklin, Patty Graybeal and Dixon Cooper, [Principles of Accounting, Volume 1: Financial Accounting](https://openstax.org/details/books/principles-financial-accounting) (OpenStax, 2019). Normal balances and the chart of accounts (chapter 3), and subsidiary ledgers that must agree with their control account (section 7.2).
+- Łukasz Strzałkowski, [Books, an immutable double-entry accounting database service](https://developer.squareup.com/blog/books-an-immutable-double-entry-accounting-database-service/) (Square, 2019). Square's ledger: journal entries that must balance to zero, in append-only tables. A useful contrast: it also caches balances, updated on every operation.
+- TigerBeetle, [Data Modeling](https://docs.tigerbeetle.com/coding/data-modeling/). How a ledger database groups accounts by currency (`ledger`) and type (`code`), and points at business records kept elsewhere through `user_data`.
 
 ### Immutability, logs and derived data
 
 - ★ Pat Helland, [Immutability Changes Everything](https://www.cidrdb.org/cidr2015/Papers/CIDR15_Paper16.pdf) (CIDR 2015). "The truth is the log": a bank balance is a fact derived from immutable records.
 - ★ Martin Kleppmann and Chris Riccomini, [Designing Data-Intensive Applications, 2nd edition](https://martin.kleppmann.com/2026/03/24/designing-data-intensive-applications-2e.html) (O'Reilly, 2026). Transactions and isolation levels (chapter 8), derived data, event sourcing and ID generation.
 - Martin Fowler, [Event Sourcing](https://martinfowler.com/eaaDev/EventSourcing.html) (2005). Store every change as an event, and rebuild state by replaying the events.
+
+### Time
+
+- ★ Martin Fowler, [Bitemporal History](https://martinfowler.com/articles/bitemporal-history.html) (2021). Actual history versus record history: when something happened versus when we learned of it, and why the record is append-only.
+- Krishna Kulkarni and Jan-Eike Michels, [Temporal features in SQL:2011](https://doi.org/10.1145/2380776.2380786) (SIGMOD Record, 2012). Application-time periods that users set, and system-versioned tables whose times the database assigns, from a timestamp fixed for the whole transaction.
+- PostgreSQL, [9.9.5. Current Date/Time](https://www.postgresql.org/docs/18/functions-datetime.html#FUNCTIONS-DATETIME-CURRENT) (PostgreSQL 18 docs). `now()` is the start of the current transaction, not the moment of the call or of the commit; `statement_timestamp()` and `clock_timestamp()` move.
+- TigerBeetle, [Time](https://docs.tigerbeetle.com/coding/time/). Why the ledger cluster assigns every timestamp itself: they all come from one clock, unique and totally ordered.
 
 ### Money and identifiers
 
@@ -80,6 +90,16 @@ first reads.
 - Peter Bailis et al., [Coordination Avoidance in Database Systems](https://www.vldb.org/pvldb/vol8/p185-bailis.pdf) (PVLDB, 2014). Which invariants can be kept without coordination: a foreign key under inserts can, a non-negative balance under withdrawals cannot.
 - Joseph M. Hellerstein and Peter Alvaro, [Keeping CALM: When Distributed Consistency Is Easy](https://doi.org/10.1145/3369736) (Communications of the ACM, 2020). Explains the CALM theorem: monotonic programs need no coordination.
 - Todd Warszawski and Peter Bailis, [ACIDRain: Concurrency-Related Attacks on Database-Backed Web Applications](https://doi.org/10.1145/3035918.3064037) (SIGMOD, 2017). How concurrent requests corrupt inventory and overspend gift cards in real e-commerce applications.
+
+### Schema design and database errors
+
+- ★ PostgreSQL, [5.5. Constraints](https://www.postgresql.org/docs/18/ddl-constraints.html) (PostgreSQL 18 docs). What each kind of constraint can check, why a foreign key must target a unique key (which lets a child row repeat its parent's values), and how NULLs slip past unique and check constraints.
+- PostgreSQL, [5.8. Privileges](https://www.postgresql.org/docs/18/ddl-priv.html) (PostgreSQL 18 docs). Privileges granted per column, which leave a column such as a recording time to its default.
+- Bill Karwin, [SQL Antipatterns, Volume 1: Avoiding the Pitfalls of Database Programming](https://pragprog.com/titles/bksap1/sql-antipatterns-volume-1/) (Pragmatic Bookshelf, 2022). Includes Polymorphic Associations: why no foreign key can check a `(type, id)` pair, and what to do instead.
+- Craig Kerstiens, [Enums vs Check Constraints in Postgres](https://www.crunchydata.com/blog/enums-vs-check-constraints-in-postgres) (Crunchy Data, 2022). A short case for a `CHECK` constraint over an enum type for a closed set of values.
+- PostgreSQL, [Appendix A. PostgreSQL Error Codes](https://www.postgresql.org/docs/18/errcodes-appendix.html) (PostgreSQL 18 docs). Five-character SQLSTATEs, whose first two characters name a class that a program can act on without knowing the exact code.
+- PostgreSQL, [41.9. Errors and Messages](https://www.postgresql.org/docs/18/plpgsql-errors-and-messages.html) (PostgreSQL 18 docs). Raising errors with a custom SQLSTATE from PL/pgSQL, and why codes ending in 000 are categories.
+- Google, [AIP-193: Errors](https://google.aip.dev/193) (API Improvement Proposals). Messages are for people and machine-readable reasons are for programs, so clients never need to parse a message.
 
 ### Idempotency, messaging and webhooks
 
@@ -122,6 +142,10 @@ first reads.
 - Jeffrey Dean and Luiz André Barroso, [The Tail at Scale](https://doi.org/10.1145/2408776.2408794) (Communications of the ACM, 2013). Why tail latency matters at scale, and techniques that tolerate latency variability.
 - Brendan Gregg, [Thinking Methodically about Performance](https://doi.org/10.1145/2405116.2413037) (ACM Queue, 2012). The USE method: check utilization, saturation and errors for every resource.
 - Gernot Heiser, [Systems Benchmarking Crimes](https://gernot-heiser.org/benchmarking-crimes.html). A checklist of misleading benchmarking practices to avoid.
+
+### Recording decisions
+
+- Michael Nygard, [Documenting Architecture Decisions](https://www.cognitect.com/blog/2011/11/15/documenting-architecture-decisions) (Cognitect, 2011). The original ADR format: context, decision, status and consequences, with a reversed decision kept and marked superseded.
 
 ## License
 
