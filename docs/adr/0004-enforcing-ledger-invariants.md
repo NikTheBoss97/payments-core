@@ -2,7 +2,7 @@
 
 # ADR-0004: Enforcing the ledger invariants
 
-- Status: accepted
+- Status: accepted; partly superseded by ADR-0010
 - Date: 2026-10-14
 
 ## Context
@@ -131,6 +131,20 @@ Append-only rows (I2):
   setting or a temporary table, which any session can write.
 - The header must be inserted before its entries, because the entries'
   foreign key refers to it.
+
+## Amendments
+
+- 2026-10-17: ADR-0010 supersedes three parts of this decision. The header
+  declares its currency, its key `UNIQUE (id, entry_count)` becomes
+  `UNIQUE (id, entry_count, currency)`, the entries' key to the header
+  carries the currency as well, and the commit-time check no longer tests
+  the currency: a mixed-currency entry now fails at `INSERT`.
+- 2026-10-17: the runtime role's `INSERT` on `accounts` and
+  `ledger_transactions` covers every column except `recorded_at`, which only
+  the database sets (ADR-0012).
+- 2026-10-17: the "dedicated error code" is one code per rule: `LG002` for
+  an incomplete ledger transaction and `LG003` for an unbalanced one
+  (ADR-0013).
 
 ## References
 
