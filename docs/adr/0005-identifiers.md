@@ -113,6 +113,18 @@ what happened.
   cannot quietly serve two postings. Converting a `Uuid` into an ID checks
   version 7 and the RFC 9562 variant, exactly what the CHECK accepts:
   `uuid_extract_version` returns NULL for any other variant.
+- 2026-10-20: the runtime role gets `lock_timeout = '35s'` beside its
+  `idle_in_transaction_session_timeout = '30s'` (ADR-0008). `post()` is
+  idempotent (ADR-0015), so every posting may be a retry, and a role
+  default bounds its lock waits without an extra statement per posting.
+  The server ends a first attempt left idle in its transaction within 30
+  seconds, so a retry waiting for its rows outlasts it and then gets a
+  definite answer; the limit applies to each lock wait separately. A lock
+  timeout (`55P03`) leaves the outcome unknown. Role settings apply at
+  login, not after `SET ROLE`, so tests set their own values, and a catalog
+  test pins the role's settings. They are defaults, which the role can
+  change for itself, so a wrong value can only delay the answer, never
+  make it wrong.
 
 ## References
 
