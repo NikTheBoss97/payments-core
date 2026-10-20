@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SET CONSTRAINTS ALL IMMEDIATE",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "11bd90418a1000de688748966e9008e4f70ad3cbd2563da0544a0135fda5fee2"
+}

@@ -1,0 +1,26 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO ledger_entries (transaction_id, line_no, entry_count, account_id, currency, amount) VALUES ($1, $2, $3, $4, $5, $6)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Int4",
+        "Int4",
+        "Uuid",
+        {
+          "Custom": {
+            "name": "currency_code",
+            "kind": {
+              "Domain": "Text"
+            }
+          }
+        },
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "7e220b8af81255dc0b3b18b86d2445bcb86a345a3bd9c181ac85a788b6cc647b"
+}

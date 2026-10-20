@@ -12,7 +12,7 @@
     reason = "each test crate uses a different subset of these helpers"
 )]
 
-use sqlx::{PgConnection, PgPool};
+use sqlx::{PgConnection, PgPool, Postgres, Transaction};
 
 /// SQLSTATE raised by the append-only trigger (ADR-0004).
 pub const APPEND_ONLY: &str = "LG001";
@@ -39,6 +39,17 @@ pub async fn runtime_connection(pool: &PgPool) -> sqlx::Result<PgConnection> {
         .execute(&mut conn)
         .await?;
     Ok(conn)
+}
+
+/// A database transaction that acts as the runtime role until it ends.
+/// `SET LOCAL` lasts only until COMMIT or ROLLBACK, so the connection goes
+/// back to the pool with its own role.
+pub async fn runtime_transaction(pool: &PgPool) -> sqlx::Result<Transaction<'static, Postgres>> {
+    let mut tx = pool.begin().await?;
+    sqlx::query!("SET LOCAL ROLE payments_app")
+        .execute(&mut *tx)
+        .await?;
+    Ok(tx)
 }
 
 /// The SQLSTATE of a database error, or a panic if the error is not one.

@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT (SELECT count(*) FROM ledger_transactions) AS \"headers!\",\n                  (SELECT count(*) FROM ledger_entries) AS \"entries!\"",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "headers!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 1,
+        "name": "entries!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      null,
+      null
+    ]
+  },
+  "hash": "1d79d6b24b7790f4fd77b2059235cc0238857fd0b8c7aacdb11bc7f5408c2712"
+}

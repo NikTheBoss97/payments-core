@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "CREATE FUNCTION public.never_differs(bigint, numeric) RETURNS boolean LANGUAGE sql IMMUTABLE AS 'SELECT false'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "8f555303ec1940bcd995cb5016525955d4e8f1ccc567859a389fcdae3706aed5"
+}
