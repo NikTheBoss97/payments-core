@@ -6,22 +6,10 @@
 //! applied, connected as the bootstrap superuser, which owns the tables in
 //! development (ADR-0008).
 
+mod common;
+
+use common::{APPEND_ONLY, CHECK_VIOLATION, INSUFFICIENT_PRIVILEGE, sqlstate};
 use sqlx::PgPool;
-
-/// SQLSTATE raised by the append-only trigger (ADR-0004).
-const APPEND_ONLY: &str = "LG001";
-/// SQLSTATE for a violated CHECK constraint, including a domain's CHECK.
-const CHECK_VIOLATION: &str = "23514";
-/// SQLSTATE for a missing privilege.
-const INSUFFICIENT_PRIVILEGE: &str = "42501";
-
-/// The SQLSTATE of a database error, or a panic if the error is not one.
-fn sqlstate(err: sqlx::Error) -> String {
-    err.as_database_error()
-        .and_then(|e| e.code())
-        .map(|code| code.into_owned())
-        .unwrap_or_else(|| panic!("expected a database error, got {err:?}"))
-}
 
 #[sqlx::test]
 async fn seeded_currencies_carry_their_iso_decimals(pool: PgPool) -> sqlx::Result<()> {
