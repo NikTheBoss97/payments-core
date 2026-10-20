@@ -1,0 +1,26 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT currency AS \"currency!\" FROM ledger_entries\n            GROUP BY currency HAVING sum(amount) <> 0",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "currency!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "ledger_entries",
+            "name": "currency"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "390344d3e7709d74e6a3c77b739591b626f5e46bc953c702fd43e6cb5b9bad78"
+}

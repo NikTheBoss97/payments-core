@@ -65,8 +65,8 @@ async fn the_runtime_role_has_exactly_the_expected_privileges(pool: PgPool) -> s
     .await?;
     granted.sort();
 
-    // INSERT covers every column of accounts except recorded_at, which only
-    // the database sets (ADR-0012).
+    // INSERT covers every column of accounts and ledger_transactions except
+    // recorded_at, which only the database sets (ADR-0012).
     assert_eq!(
         granted,
         [
@@ -77,6 +77,12 @@ async fn the_runtime_role_has_exactly_the_expected_privileges(pool: PgPool) -> s
             "accounts.normal_side INSERT",
             "accounts.party INSERT",
             "currencies SELECT",
+            "ledger_entries INSERT",
+            "ledger_entries SELECT",
+            "ledger_transactions SELECT",
+            "ledger_transactions.currency INSERT",
+            "ledger_transactions.entry_count INSERT",
+            "ledger_transactions.id INSERT",
         ]
     );
     Ok(())
@@ -149,6 +155,31 @@ async fn every_guard_trigger_fires_always(pool: PgPool) -> sqlx::Result<()> {
         ("accounts", "accounts_no_truncate", "reject_change"),
         ("currencies", "currencies_append_only", "reject_change"),
         ("currencies", "currencies_no_truncate", "reject_change"),
+        (
+            "ledger_entries",
+            "ledger_entries_append_only",
+            "reject_change",
+        ),
+        (
+            "ledger_entries",
+            "ledger_entries_no_truncate",
+            "reject_change",
+        ),
+        (
+            "ledger_transactions",
+            "ledger_transactions_append_only",
+            "reject_change",
+        ),
+        (
+            "ledger_transactions",
+            "ledger_transactions_commit_check",
+            "check_ledger_transaction",
+        ),
+        (
+            "ledger_transactions",
+            "ledger_transactions_no_truncate",
+            "reject_change",
+        ),
     ]
     .into_iter()
     .map(|(table, trigger, function)| [table.into(), trigger.into(), "A".into(), function.into()])
@@ -190,7 +221,15 @@ async fn every_guard_function_has_a_pinned_search_path(pool: PgPool) -> sqlx::Re
     let pinned = "search_path=pg_catalog, public, pg_temp";
     assert_eq!(
         functions,
-        [("reject_change".to_owned(), pinned.to_owned(), false, false)]
+        [
+            (
+                "check_ledger_transaction".to_owned(),
+                pinned.to_owned(),
+                false,
+                false
+            ),
+            ("reject_change".to_owned(), pinned.to_owned(), false, false),
+        ]
     );
     Ok(())
 }
@@ -230,6 +269,16 @@ async fn every_column_has_its_type_and_is_not_null(pool: PgPool) -> sqlx::Result
             "accounts.recorded_at timestamp with time zone not null",
             "currencies.code currency_code not null",
             "currencies.decimals smallint not null",
+            "ledger_entries.account_id uuid not null",
+            "ledger_entries.amount bigint not null",
+            "ledger_entries.currency currency_code not null",
+            "ledger_entries.entry_count integer not null",
+            "ledger_entries.line_no integer not null",
+            "ledger_entries.transaction_id uuid not null",
+            "ledger_transactions.currency currency_code not null",
+            "ledger_transactions.entry_count integer not null",
+            "ledger_transactions.id uuid not null",
+            "ledger_transactions.recorded_at timestamp with time zone not null",
         ]
     );
     Ok(())

@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM ledger_entries",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "934b4881bb26cab236e3f868fd3d090b5747c40f857ded32389c70e309cafab5"
+}

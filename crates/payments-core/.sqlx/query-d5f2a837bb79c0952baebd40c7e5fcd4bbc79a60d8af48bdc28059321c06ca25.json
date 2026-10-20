@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO public.ledger_transactions (id, entry_count, currency) VALUES ($1, 2, 'EUR')",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "d5f2a837bb79c0952baebd40c7e5fcd4bbc79a60d8af48bdc28059321c06ca25"
+}

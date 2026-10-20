@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "TRUNCATE ledger_transactions CASCADE",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "eb80ce384f35072c5916fc87bbb3b3d4a3b32696840b64239fad7ad66ae5df4d"
+}

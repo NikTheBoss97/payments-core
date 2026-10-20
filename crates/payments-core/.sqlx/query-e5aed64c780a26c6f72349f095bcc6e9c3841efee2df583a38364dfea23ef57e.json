@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "TRUNCATE ledger_entries",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "e5aed64c780a26c6f72349f095bcc6e9c3841efee2df583a38364dfea23ef57e"
+}

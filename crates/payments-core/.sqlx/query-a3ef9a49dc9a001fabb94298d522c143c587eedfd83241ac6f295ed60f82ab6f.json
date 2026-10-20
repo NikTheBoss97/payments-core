@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE ledger_entries SET line_no = line_no",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "a3ef9a49dc9a001fabb94298d522c143c587eedfd83241ac6f295ed60f82ab6f"
+}
