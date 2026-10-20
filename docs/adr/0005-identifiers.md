@@ -101,6 +101,18 @@ what happened.
 - 2026-10-17: "No database defaults" covers identities, which the service
   must know before any I/O. A recording time is an observation, which the
   database stamps with `DEFAULT transaction_timestamp()` (ADR-0012).
+- 2026-10-20: "through an injectable generator" means that the ledger's
+  functions never create IDs: the caller creates each ID and passes it in
+  as a value, using `TransactionId::now_v7()` or `AccountId::now_v7()`, the
+  only calls to `Uuid::now_v7` in the library. Tests pass fixed IDs built
+  by a helper under `tests/`. Opening an account takes a candidate ID,
+  keeps the stored one when the business key already exists (ADR-0009),
+  and runs outside any posting's database transaction, so a ledger
+  transaction refers only to committed accounts and its retry stays
+  identical. `TransactionId` is neither `Copy` nor `Clone`, so one ID
+  cannot quietly serve two postings. Converting a `Uuid` into an ID checks
+  version 7 and the RFC 9562 variant, exactly what the CHECK accepts:
+  `uuid_extract_version` returns NULL for any other variant.
 
 ## References
 
