@@ -145,6 +145,12 @@ Append-only rows (I2):
 - 2026-10-17: the "dedicated error code" is one code per rule: `LG002` for
   an incomplete ledger transaction and `LG003` for an unbalanced one
   (ADR-0013).
+- 2026-10-18: on a table that a foreign key references, the owner-role test
+  runs `TRUNCATE ... CASCADE`. A plain `TRUNCATE` fails with `0A000` before
+  any `BEFORE TRUNCATE` trigger runs, so it would never reach the guard;
+  with `CASCADE`, the named table's trigger fires first. The append-only
+  error names its trigger, table and schema in their own fields (ADR-0013),
+  so the test can tell which trigger fired.
 
 ## References
 

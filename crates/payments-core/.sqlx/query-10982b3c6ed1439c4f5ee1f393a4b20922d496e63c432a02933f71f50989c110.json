@@ -1,0 +1,41 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO accounts (id, kind, party, currency, normal_side)\n           VALUES ($1, $2, $3, $4, $5)\n           RETURNING recorded_at = transaction_timestamp() AS \"at_transaction_start!\",\n                     recorded_at < statement_timestamp() AS \"before_the_insert!\"",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "at_transaction_start!",
+        "type_info": "Bool",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 1,
+        "name": "before_the_insert!",
+        "type_info": "Bool",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Text",
+        {
+          "Custom": {
+            "name": "currency_code",
+            "kind": {
+              "Domain": "Text"
+            }
+          }
+        },
+        "Text"
+      ]
+    },
+    "nullable": [
+      null,
+      null
+    ]
+  },
+  "hash": "10982b3c6ed1439c4f5ee1f393a4b20922d496e63c432a02933f71f50989c110"
+}
