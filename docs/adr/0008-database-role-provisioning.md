@@ -63,6 +63,14 @@ superuser.
 - The script holds a password for local use only, like the one in
   `docker-compose.yml`.
 
+## Amendments
+
+- 2026-10-20: `roles.sql` also sets `lock_timeout = '35s'` on the runtime
+  role, so that a retried posting waiting for a first attempt's rows
+  outlasts the 30-second idle timeout (ADR-0005). An existing local volume
+  picks it up after `docker compose down -v`, as for any change to the
+  script.
+
 ## References
 
 - PostgreSQL 18 manual, [Schemas](https://www.postgresql.org/docs/18/ddl-schemas.html) (privileges on `public`).
