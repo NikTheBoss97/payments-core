@@ -1,0 +1,25 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO accounts (id, kind, party, currency, normal_side, recorded_at) VALUES ($1, $2, $3, $4, $5, '2000-01-01 00:00:00+00')",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Text",
+        {
+          "Custom": {
+            "name": "currency_code",
+            "kind": {
+              "Domain": "Text"
+            }
+          }
+        },
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "90d05c53249579482e1072964588581908e56acbd772daaacd5f95c0f96703f6"
+}

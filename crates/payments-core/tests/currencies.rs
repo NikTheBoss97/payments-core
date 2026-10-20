@@ -76,7 +76,10 @@ async fn currencies_are_append_only_even_for_the_owner(pool: PgPool) -> sqlx::Re
         .unwrap_err();
     assert_guard(delete, APPEND_ONLY, "currencies_append_only", "currencies");
 
-    let truncate = sqlx::query!("TRUNCATE currencies")
+    // CASCADE also reaches accounts, whose foreign key refers to currencies:
+    // without it, PostgreSQL fails with 0A000 before any trigger runs. The
+    // triggers of the named table fire first, which the trigger name proves.
+    let truncate = sqlx::query!("TRUNCATE currencies CASCADE")
         .execute(&pool)
         .await
         .unwrap_err();

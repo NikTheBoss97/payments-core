@@ -112,12 +112,21 @@ Normal side:
 - The total of a kind is a `SUM` over its accounts, like a control account
   over its subsidiary ledger, and is never stored (ADR-0002).
 
+## Amendments
+
+- 2026-10-20: the `party` CHECK also rejects a label of exactly 32
+  hexadecimal digits, the form a UUID takes without its hyphens. Otherwise a
+  merchant whose ID begins with a letter would have a second accepted
+  spelling, so "exactly one spelling" needs both rules. The decision is
+  unchanged.
+
 ## References
 
 - PostgreSQL 18 manual, [Constraints](https://www.postgresql.org/docs/18/ddl-constraints.html) (unique constraints and NULLs; foreign-key targets).
 - PostgreSQL 18 manual, [INSERT](https://www.postgresql.org/docs/18/sql-insert.html) (`ON CONFLICT DO NOTHING`).
 - PostgreSQL 18 manual, [Transaction Isolation](https://www.postgresql.org/docs/18/transaction-iso.html) (`ON CONFLICT` at Read Committed).
 - PostgreSQL 18 manual, [Enumerated Types](https://www.postgresql.org/docs/18/datatype-enum.html).
+- PostgreSQL 18 manual, [UUID Type](https://www.postgresql.org/docs/18/datatype-uuid.html) (the input forms it accepts, including 32 digits without hyphens).
 - Mitchell Franklin, Patty Graybeal and Dixon Cooper, [Principles of Accounting, Volume 1: Financial Accounting](https://openstax.org/details/books/principles-financial-accounting) (OpenStax, 2019): normal balances and the chart of accounts (chapter 3), subsidiary ledgers and control accounts (section 7.2).
 - Modern Treasury, [Ledger Account object](https://docs.moderntreasury.com/platform/reference/ledger-account-object) (`normal_balance`).
 - TigerBeetle, [Data Modeling](https://docs.tigerbeetle.com/coding/data-modeling/) (`ledger`, `code`, `user_data`).

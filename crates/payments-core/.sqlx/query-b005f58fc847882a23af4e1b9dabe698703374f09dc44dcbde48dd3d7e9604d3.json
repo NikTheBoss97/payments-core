@@ -1,0 +1,42 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT t.tgrelid::regclass::text AS \"table!\",\n               t.tgname::text AS \"trigger!\",\n               t.tgenabled::text AS \"enabled!\",\n               p.proname::text AS \"function!\"\n          FROM pg_trigger t\n          JOIN pg_proc p ON p.oid = t.tgfoid\n         WHERE NOT t.tgisinternal\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "table!",
+        "type_info": "Text",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 1,
+        "name": "trigger!",
+        "type_info": "Text",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 2,
+        "name": "enabled!",
+        "type_info": "Text",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 3,
+        "name": "function!",
+        "type_info": "Text",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      null,
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "b005f58fc847882a23af4e1b9dabe698703374f09dc44dcbde48dd3d7e9604d3"
+}

@@ -1,0 +1,21 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT format('%s %s', c.relname, p.privilege) AS \"grant!\"\n          FROM pg_class c\n         CROSS JOIN unnest(ARRAY['SELECT', 'INSERT', 'UPDATE', 'DELETE', 'TRUNCATE',\n                                 'REFERENCES', 'TRIGGER', 'MAINTAIN']) AS p (privilege)\n         WHERE c.relnamespace = 'public'::regnamespace\n           AND c.relkind = 'r'\n           AND has_table_privilege('payments_app', c.oid, p.privilege)\n        UNION ALL\n        SELECT format('%s %s WITH GRANT OPTION', c.relname, p.privilege)\n          FROM pg_class c\n         CROSS JOIN unnest(ARRAY['SELECT', 'INSERT', 'UPDATE', 'DELETE', 'TRUNCATE',\n                                 'REFERENCES', 'TRIGGER', 'MAINTAIN']) AS p (privilege)\n         WHERE c.relnamespace = 'public'::regnamespace\n           AND c.relkind = 'r'\n           AND has_table_privilege('payments_app', c.oid, p.privilege || ' WITH GRANT OPTION')\n        UNION ALL\n        SELECT format('%s.%s %s', c.relname, a.attname, p.privilege)\n          FROM pg_attribute a\n          JOIN pg_class c ON c.oid = a.attrelid\n         CROSS JOIN unnest(ARRAY['SELECT', 'INSERT', 'UPDATE', 'REFERENCES']) AS p (privilege)\n         WHERE c.relnamespace = 'public'::regnamespace\n           AND c.relkind = 'r'\n           AND a.attnum > 0\n           AND NOT a.attisdropped\n           AND has_column_privilege('payments_app', c.oid, a.attnum, p.privilege)\n           AND NOT has_table_privilege('payments_app', c.oid, p.privilege)\n        UNION ALL\n        SELECT format('%s.%s %s WITH GRANT OPTION', c.relname, a.attname, p.privilege)\n          FROM pg_attribute a\n          JOIN pg_class c ON c.oid = a.attrelid\n         CROSS JOIN unnest(ARRAY['SELECT', 'INSERT', 'UPDATE', 'REFERENCES']) AS p (privilege)\n         WHERE c.relnamespace = 'public'::regnamespace\n           AND c.relkind = 'r'\n           AND a.attnum > 0\n           AND NOT a.attisdropped\n           AND has_column_privilege('payments_app', c.oid, a.attnum,\n                                    p.privilege || ' WITH GRANT OPTION')\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "grant!",
+        "type_info": "Text",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "2c425e07e0a004a5fadafb67cce64819cc97cbe6b6774edf1bc2c08f65ff1396"
+}

@@ -12,12 +12,34 @@
     reason = "each test crate uses a different subset of these helpers"
 )]
 
+use sqlx::{PgConnection, PgPool};
+
 /// SQLSTATE raised by the append-only trigger (ADR-0004).
 pub const APPEND_ONLY: &str = "LG001";
 /// SQLSTATE for a violated CHECK constraint, including a domain's CHECK.
 pub const CHECK_VIOLATION: &str = "23514";
+/// SQLSTATE for a violated foreign key.
+pub const FOREIGN_KEY_VIOLATION: &str = "23503";
 /// SQLSTATE for a missing privilege.
 pub const INSUFFICIENT_PRIVILEGE: &str = "42501";
+/// SQLSTATE for a NULL in a NOT NULL column. Its error names the column,
+/// not a constraint.
+pub const NOT_NULL_VIOLATION: &str = "23502";
+/// SQLSTATE for a duplicate key in a primary key or a unique constraint.
+pub const UNIQUE_VIOLATION: &str = "23505";
+
+/// A connection that acts as the runtime role, `payments_app`, which meets
+/// the same guards as the application (ADR-0004). `#[sqlx::test]` connects
+/// as a superuser, which skips privilege checks. The connection is detached
+/// from the pool, so the role cannot leak into a connection the pool hands
+/// out later in the same test.
+pub async fn runtime_connection(pool: &PgPool) -> sqlx::Result<PgConnection> {
+    let mut conn = pool.acquire().await?.detach();
+    sqlx::query!("SET ROLE payments_app")
+        .execute(&mut conn)
+        .await?;
+    Ok(conn)
+}
 
 /// The SQLSTATE of a database error, or a panic if the error is not one.
 pub fn sqlstate(err: sqlx::Error) -> String {
