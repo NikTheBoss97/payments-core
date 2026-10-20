@@ -1,0 +1,25 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO accounts (id, kind, party, currency, normal_side) VALUES ($1, $2, $3, $4, $5) ON CONFLICT (kind, party, currency) DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Text",
+        {
+          "Custom": {
+            "name": "currency_code",
+            "kind": {
+              "Domain": "Text"
+            }
+          }
+        },
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "86481eb0b013e5a36bca93fbe3e6b8b9179d8e22a9e9a12925d58528dc92aae4"
+}

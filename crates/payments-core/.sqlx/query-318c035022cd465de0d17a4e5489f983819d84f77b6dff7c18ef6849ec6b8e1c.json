@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "TRUNCATE currencies",
+  "query": "TRUNCATE currencies CASCADE",
   "describe": {
     "columns": [],
     "parameters": {
@@ -8,5 +8,5 @@
     },
     "nullable": []
   },
-  "hash": "01131a9ddbb96d2403bfe6f574827cf4b320b24a1811041989a47dfb71145fc4"
+  "hash": "318c035022cd465de0d17a4e5489f983819d84f77b6dff7c18ef6849ec6b8e1c"
 }

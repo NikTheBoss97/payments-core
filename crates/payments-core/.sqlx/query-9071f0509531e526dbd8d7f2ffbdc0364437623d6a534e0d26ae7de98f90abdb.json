@@ -1,0 +1,47 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT rolsuper AS \"superuser!\",\n               EXISTS (SELECT 1 FROM pg_auth_members WHERE member = r.oid)\n                   AS \"member_of_a_role!\",\n               has_schema_privilege('payments_app', 'public', 'CREATE')\n                   AS \"can_create_in_public!\",\n               has_parameter_privilege('payments_app', 'session_replication_role', 'SET')\n                   AS \"can_set_replication_role!\"\n          FROM pg_roles r\n         WHERE r.rolname = 'payments_app'\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "superuser!",
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "pg_roles",
+            "name": "rolsuper"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "member_of_a_role!",
+        "type_info": "Bool",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 2,
+        "name": "can_create_in_public!",
+        "type_info": "Bool",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 3,
+        "name": "can_set_replication_role!",
+        "type_info": "Bool",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      true,
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "9071f0509531e526dbd8d7f2ffbdc0364437623d6a534e0d26ae7de98f90abdb"
+}

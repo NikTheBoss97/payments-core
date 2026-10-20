@@ -1,0 +1,21 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT 1 AS \"slept!\" FROM pg_sleep(0.01)",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "slept!",
+        "type_info": "Int4",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "a620b55bf84ae336de1205fca502851552ad5b083f4b36445e72946e8501f038"
+}

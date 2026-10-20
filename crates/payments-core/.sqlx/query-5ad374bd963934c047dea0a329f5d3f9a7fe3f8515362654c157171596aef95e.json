@@ -1,0 +1,47 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT p.proname::text AS \"function!\",\n               COALESCE(array_to_string(p.proconfig, '; '), '') AS \"config!\",\n               p.prosecdef AS \"security_definer!\",\n               pg_has_role('payments_app', p.proowner, 'MEMBER') AS \"runtime_role_owns!\"\n          FROM pg_proc p\n         WHERE p.oid IN (SELECT tgfoid FROM pg_trigger WHERE NOT tgisinternal)\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "function!",
+        "type_info": "Text",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 1,
+        "name": "config!",
+        "type_info": "Text",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 2,
+        "name": "security_definer!",
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "pg_proc",
+            "name": "prosecdef"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "runtime_role_owns!",
+        "type_info": "Bool",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      null,
+      null,
+      false,
+      null
+    ]
+  },
+  "hash": "5ad374bd963934c047dea0a329f5d3f9a7fe3f8515362654c157171596aef95e"
+}

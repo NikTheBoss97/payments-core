@@ -14,7 +14,9 @@ publish.workspace = true
 # Only the std feature: the default fork, timeout and bit-set features are
 # unused and would add rusty-fork, tempfile and bit-set to the build.
 proptest = { version = "1.12.0", default-features = false, features = ["std"] }
-sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "postgres", "macros", "migrate"] }
+sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "postgres", "macros", "migrate", "uuid"] }
+# UUIDv7 IDs for the rows the database tests write (ADR-0005: 1.27 or later).
+uuid = { version = "1.28", features = ["v7"] }
 
 [lints]
 workspace = true

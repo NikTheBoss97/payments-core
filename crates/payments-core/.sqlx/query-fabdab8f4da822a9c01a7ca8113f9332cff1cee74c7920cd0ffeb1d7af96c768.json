@@ -1,0 +1,21 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT format('%s.%s %s%s', c.relname, a.attname,\n                      format_type(a.atttypid, a.atttypmod),\n                      CASE WHEN a.attnotnull THEN ' not null' ELSE '' END) AS \"column!\"\n          FROM pg_attribute a\n          JOIN pg_class c ON c.oid = a.attrelid\n         WHERE c.relnamespace = 'public'::regnamespace\n           AND c.relkind = 'r'\n           AND c.relname <> '_sqlx_migrations'\n           AND a.attnum > 0\n           AND NOT a.attisdropped\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "column!",
+        "type_info": "Text",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "fabdab8f4da822a9c01a7ca8113f9332cff1cee74c7920cd0ffeb1d7af96c768"
+}

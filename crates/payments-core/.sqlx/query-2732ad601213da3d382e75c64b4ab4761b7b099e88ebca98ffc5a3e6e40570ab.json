@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO accounts (id, kind, party, currency) VALUES ($1, 'cash', 'platform', 'EUR')",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "2732ad601213da3d382e75c64b4ab4761b7b099e88ebca98ffc5a3e6e40570ab"
+}
