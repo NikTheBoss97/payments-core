@@ -38,6 +38,7 @@ enforcement mechanism and a test that tries to break it.
 | PSP timeouts with unknown outcome                    |                                              |
 | Application bugs and manual SQL run as the runtime role, including code that bypasses the domain layer | A superuser or the migration role (the tables' owner) deliberately disabling the ledger's triggers or foreign-key checks |
 | Lost `COMMIT` acknowledgements (the service cannot tell whether PostgreSQL committed) |              |
+| A `COMMIT` answered with an error after it committed, when a cancel or terminate signal arrives during the commit ([ADR-0014](adr/0014-what-a-failed-commit-proves.md)) |              |
 
 ## Invariants
 

@@ -2,7 +2,7 @@
 
 # ADR-0004: Enforcing the ledger invariants
 
-- Status: accepted; partly superseded by ADR-0010
+- Status: accepted; partly superseded by ADR-0010 and ADR-0014
 - Date: 2026-10-14
 
 ## Context
@@ -158,6 +158,11 @@ Append-only rows (I2):
   needs a cast, so an exact operator in `public` could otherwise take
   `pg_catalog`'s place. The runtime role has no `CREATE` on `public` and
   owns no guard function, which catalog tests pin.
+- 2026-10-20: ADR-0014 supersedes the sentence "Any error PostgreSQL
+  returns for `COMMIT` means the database transaction rolled back". Only the
+  commit-time check's own codes (`LG002`, `LG003`) prove a rollback; any
+  other `COMMIT` error leaves the outcome unknown, to be settled as ADR-0005
+  describes.
 
 ## References
 

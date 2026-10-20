@@ -2,7 +2,7 @@
 
 # ADR-0013: SQLSTATE codes for database guards
 
-- Status: accepted
+- Status: accepted; partly superseded by ADR-0014
 - Date: 2026-10-17
 
 ## Context
@@ -70,6 +70,15 @@ constraints use one code per kind of constraint, such as `23514` for every
 - A future PostgreSQL release could define class `LG`. PostgreSQL 18 does
   not, nor does the development branch of the next release.
 - ADR-0004's "dedicated error code" now means one code per rule.
+
+## Amendments
+
+- 2026-10-20: ADR-0014 supersedes the last classification bullet. An error
+  returned for `COMMIT` proves a rollback only when it carries one of the
+  ledger's deferred-check codes (`LG002`, `LG003`): a cancel or terminate
+  signal held during the commit can arrive as `57014` or `57P01` after the
+  transaction committed. Any other `COMMIT` error leaves the outcome
+  unknown.
 
 ## References
 
