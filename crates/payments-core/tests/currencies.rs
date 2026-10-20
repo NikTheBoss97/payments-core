@@ -8,7 +8,9 @@
 
 mod common;
 
-use common::{APPEND_ONLY, CHECK_VIOLATION, INSUFFICIENT_PRIVILEGE, sqlstate};
+use common::{
+    APPEND_ONLY, CHECK_VIOLATION, INSUFFICIENT_PRIVILEGE, assert_guard, assert_violation, sqlstate,
+};
 use sqlx::PgPool;
 
 #[sqlx::test]
@@ -38,7 +40,8 @@ async fn malformed_codes_are_rejected(pool: PgPool) -> sqlx::Result<()> {
         .execute(&pool)
         .await
         .unwrap_err();
-        assert_eq!(sqlstate(err), CHECK_VIOLATION, "code {code:?}");
+        // The domain's CHECK, which every currency column shares.
+        assert_violation(err, CHECK_VIOLATION, "currency_code_check");
     }
     Ok(())
 }
@@ -53,7 +56,8 @@ async fn decimals_outside_zero_to_four_are_rejected(pool: PgPool) -> sqlx::Resul
         .execute(&pool)
         .await
         .unwrap_err();
-        assert_eq!(sqlstate(err), CHECK_VIOLATION, "decimals {decimals}");
+        // The name PostgreSQL generates for the column's unnamed CHECK.
+        assert_violation(err, CHECK_VIOLATION, "currencies_decimals_check");
     }
     Ok(())
 }
@@ -64,19 +68,24 @@ async fn currencies_are_append_only_even_for_the_owner(pool: PgPool) -> sqlx::Re
         .execute(&pool)
         .await
         .unwrap_err();
-    assert_eq!(sqlstate(update), APPEND_ONLY);
+    assert_guard(update, APPEND_ONLY, "currencies_append_only", "currencies");
 
     let delete = sqlx::query!("DELETE FROM currencies WHERE code = 'EUR'")
         .execute(&pool)
         .await
         .unwrap_err();
-    assert_eq!(sqlstate(delete), APPEND_ONLY);
+    assert_guard(delete, APPEND_ONLY, "currencies_append_only", "currencies");
 
     let truncate = sqlx::query!("TRUNCATE currencies")
         .execute(&pool)
         .await
         .unwrap_err();
-    assert_eq!(sqlstate(truncate), APPEND_ONLY);
+    assert_guard(
+        truncate,
+        APPEND_ONLY,
+        "currencies_no_truncate",
+        "currencies",
+    );
     Ok(())
 }
 
