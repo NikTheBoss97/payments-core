@@ -1,0 +1,30 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO ledger_transactions (id, entry_count, currency)\n           VALUES ($1, 2, 'EUR')\n           RETURNING recorded_at = transaction_timestamp() AS \"at_transaction_start!\",\n                     recorded_at < statement_timestamp() AS \"before_the_insert!\"",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "at_transaction_start!",
+        "type_info": "Bool",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 1,
+        "name": "before_the_insert!",
+        "type_info": "Bool",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null,
+      null
+    ]
+  },
+  "hash": "b5bf527e48d0dee0b419208e694d7a8f0d489db153a6979b2c7f2071798dd97f"
+}

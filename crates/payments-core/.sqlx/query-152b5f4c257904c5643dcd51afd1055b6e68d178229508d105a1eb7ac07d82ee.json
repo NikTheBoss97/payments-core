@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE ledger_transactions SET entry_count = entry_count",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "152b5f4c257904c5643dcd51afd1055b6e68d178229508d105a1eb7ac07d82ee"
+}

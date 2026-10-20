@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SET LOCAL session_replication_role = replica",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "9b45447270b9935320ddf3a23a0182f60824710d3ea5a66e340644064901adca"
+}

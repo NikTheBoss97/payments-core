@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "CREATE TEMPORARY TABLE ledger_entries (LIKE public.ledger_entries) ON COMMIT DROP",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "445511495a93f4e9390463b5906b1a44affcc7783bfc2112fe61eabf9a330f6e"
+}

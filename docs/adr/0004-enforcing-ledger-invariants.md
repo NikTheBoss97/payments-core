@@ -151,6 +151,13 @@ Append-only rows (I2):
   with `CASCADE`, the named table's trigger fires first. The append-only
   error names its trigger, table and schema in their own fields (ADR-0013),
   so the test can tell which trigger fired.
+- 2026-10-20: the pinned search path still lists `public`, so the trigger
+  functions compare only values for which `pg_catalog` has an operator of
+  exactly those types, writing `0::numeric` rather than `0`. PostgreSQL
+  prefers an exact match anywhere on the search path over an operator that
+  needs a cast, so an exact operator in `public` could otherwise take
+  `pg_catalog`'s place. The runtime role has no `CREATE` on `public` and
+  owns no guard function, which catalog tests pin.
 
 ## References
 
@@ -159,3 +166,5 @@ Append-only rows (I2):
 - PostgreSQL 18 manual, [ALTER TABLE](https://www.postgresql.org/docs/18/sql-altertable.html) (`ENABLE ALWAYS TRIGGER`).
 - PostgreSQL 18 manual, [Client Connection Defaults](https://www.postgresql.org/docs/18/runtime-config-client.html) (`session_replication_role`).
 - PostgreSQL 18 manual, [Schemas](https://www.postgresql.org/docs/18/ddl-schemas.html) (the schema search path).
+- PostgreSQL 18 manual, [Operators](https://www.postgresql.org/docs/18/typeconv-oper.html) (operator type resolution: an exact match wins wherever it sits on the search path).
+- PostgreSQL wiki, [A Guide to CVE-2018-1058: Protect Your Search Path](https://wiki.postgresql.org/wiki/A_Guide_to_CVE-2018-1058:_Protect_Your_Search_Path) (a function in `public` that takes over a call a built-in would answer through a cast).

@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "CREATE OPERATOR public.<> (LEFTARG = numeric, RIGHTARG = integer, FUNCTION = public.never_differs)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "c7ca64ce9acbc1a9a1e789a2e6f78b942b29f14facac95f4a701b0d13e0ac6f0"
+}

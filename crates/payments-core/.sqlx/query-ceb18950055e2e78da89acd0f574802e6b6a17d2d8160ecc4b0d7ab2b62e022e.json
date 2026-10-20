@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO ledger_transactions (id, entry_count, currency, recorded_at) VALUES ($1, 2, 'EUR', '2000-01-01 00:00:00+00')",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "ceb18950055e2e78da89acd0f574802e6b6a17d2d8160ecc4b0d7ab2b62e022e"
+}
