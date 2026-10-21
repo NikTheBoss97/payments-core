@@ -28,7 +28,7 @@ jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       # rustup comes with the runner image. Naming the channel makes it fetch
       # the latest stable, the toolchain that rust-toolchain.toml selects.
       - name: Install Rust
@@ -58,7 +58,7 @@ jobs:
     env:
       DATABASE_URL: postgres://payments:payments@localhost:5432/payments
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Create database roles (ADR-0008)
         run: >-
           docker exec -i ${{ job.services.postgres.id }}
@@ -98,7 +98,7 @@ jobs:
       # The sqlx commit pinned in Cargo.toml; sqlx-cli must match it.
       SQLX_REV: f1e94ec34dd5f11ad6488a3a8ac7988439a3f757
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Create database roles (ADR-0008)
         run: >-
           docker exec -i ${{ job.services.postgres.id }}
@@ -113,7 +113,7 @@ jobs:
       # locked; the built binary is cached under the commit hash instead.
       - name: Restore sqlx-cli
         id: sqlx-cli
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/bin/sqlx
