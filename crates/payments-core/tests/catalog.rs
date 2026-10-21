@@ -1,16 +1,16 @@
 // Author: Nicola Antonello
 
 //! Catalog tests: what the behavioural tests cannot see (ADR-0003,
-//! ADR-0004, ADR-0012).
+//! ADR-0004, ADR-0005, ADR-0012).
 //!
 //! `#[sqlx::test]` connects as a superuser, which skips privilege checks, so
 //! only the tests that switch to the runtime role, `payments_app`, meet
 //! them, and those notice only the grants they exercise. These tests read
 //! the catalogs instead. They pin the runtime role's table and column
-//! privileges and its grant options, check that it can neither create
-//! objects in the public schema nor act through another role, pin each guard
-//! trigger and the function it runs, and pin the type and nullability of
-//! every column.
+//! privileges, its grant options and its session defaults, check that it can
+//! neither create objects in the public schema nor act through another role,
+//! pin each guard trigger and the function it runs, and pin the type and
+//! nullability of every column.
 
 use sqlx::PgPool;
 
@@ -122,6 +122,34 @@ async fn the_runtime_role_cannot_switch_the_guards_off(pool: PgPool) -> sqlx::Re
     assert!(
         !role.can_set_replication_role,
         "payments_app can set session_replication_role"
+    );
+    Ok(())
+}
+
+#[sqlx::test]
+async fn the_runtime_role_has_exactly_its_session_defaults(pool: PgPool) -> sqlx::Result<()> {
+    // Role settings apply at login, not after SET ROLE, so the behaviour
+    // tests never see them (ADR-0005). The lock timeout bounds a retried
+    // posting's wait, and outlasts the idle timeout, so the retry outlives a
+    // first attempt left idle after a lost COMMIT. "*" means every database.
+    let mut settings = sqlx::query_scalar!(
+        r#"
+        SELECT format('%s %s', COALESCE(d.datname, '*'), c.setting) AS "setting!"
+          FROM pg_db_role_setting s
+          LEFT JOIN pg_database d ON d.oid = s.setdatabase
+         CROSS JOIN unnest(s.setconfig) AS c (setting)
+         WHERE s.setrole = 'payments_app'::regrole
+        "#
+    )
+    .fetch_all(&pool)
+    .await?;
+    settings.sort();
+    assert_eq!(
+        settings,
+        [
+            "* idle_in_transaction_session_timeout=30s",
+            "* lock_timeout=35s",
+        ]
     );
     Ok(())
 }

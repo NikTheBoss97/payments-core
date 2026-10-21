@@ -14,3 +14,9 @@ CREATE ROLE payments_app LOGIN PASSWORD 'payments_app'
 -- server notices. After a lost COMMIT, this bounds the wait to 30 seconds
 -- (ADR-0005).
 ALTER ROLE payments_app SET idle_in_transaction_session_timeout = '30s';
+
+-- A retried posting waits for a first attempt's rows (ADR-0005). The limit
+-- applies to each lock wait and is longer than the idle timeout above, so a
+-- retry outlasts a first attempt left idle after a lost COMMIT, then gets a
+-- definite answer.
+ALTER ROLE payments_app SET lock_timeout = '35s';
