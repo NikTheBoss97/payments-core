@@ -21,15 +21,20 @@ env:
   RUSTFLAGS: -D warnings
   # Compile query! macros against the committed .sqlx cache (ADR-0006).
   SQLX_OFFLINE: "true"
+  # The cache never restores incremental data, so producing it is wasted work.
+  CARGO_INCREMENTAL: "0"
 
 jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
+      # rustup comes with the runner image. Naming the channel makes it fetch
+      # the latest stable, the toolchain that rust-toolchain.toml selects.
+      - name: Install Rust
+        run: >-
+          rustup toolchain install stable --profile minimal
+          --component rustfmt,clippy --no-self-update
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --locked
@@ -59,7 +64,10 @@ jobs:
           docker exec -i ${{ job.services.postgres.id }}
           psql -U payments -d payments -v ON_ERROR_STOP=1
           < docker/postgres/roles.sql
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Rust
+        run: >-
+          rustup toolchain install stable --profile minimal
+          --component rustfmt,clippy --no-self-update
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace --locked
       # Release builds wrap on integer overflow unless the root Cargo.toml
@@ -96,7 +104,10 @@ jobs:
           docker exec -i ${{ job.services.postgres.id }}
           psql -U payments -d payments -v ON_ERROR_STOP=1
           < docker/postgres/roles.sql
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Rust
+        run: >-
+          rustup toolchain install stable --profile minimal
+          --component rustfmt,clippy --no-self-update
       - uses: Swatinem/rust-cache@v2
       # The sqlx repository has no Cargo.lock, so the CLI build cannot be
       # locked; the built binary is cached under the commit hash instead.
