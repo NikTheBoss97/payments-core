@@ -55,7 +55,7 @@ enforcement mechanism and a test that tries to break it.
 
 | Component        | Phase | Status  |
 |------------------|-------|---------|
-| Ledger           | 1     | in progress |
+| Ledger           | 1     | done    |
 | Payment lifecycle | 2    | planned |
 | Idempotency      | 3     | planned |
 | Mock PSP and webhooks | 4 | planned |

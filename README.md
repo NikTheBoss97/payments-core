@@ -15,7 +15,7 @@ invariants, and [`docs/adr/`](docs/adr/) for the decisions behind them.
 
 | Phase | Scope | Status |
 |-------|-------|--------|
-| 1 | Double-entry ledger | in progress |
+| 1 | Double-entry ledger | done |
 | 2 | Payment lifecycle state machine | — |
 | 3 | Idempotency keys | — |
 | 4 | Mock PSP, signed webhooks | — |
