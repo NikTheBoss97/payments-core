@@ -1,6 +1,6 @@
 // Author: Nicola Antonello
 
-//! Account keys (ADR-0009).
+//! Account keys, and opening and finding accounts (ADR-0009).
 //!
 //! An account is found by its business key: its kind, the party it is kept
 //! for, and its currency. The types here accept exactly what the database's
@@ -10,8 +10,11 @@
 
 use std::fmt;
 
+use sqlx::PgPool;
 use uuid::Uuid;
 
+use crate::db::code_and_constraint;
+use crate::ids::AccountId;
 use crate::money::Currency;
 
 /// Why a value cannot describe an account.
@@ -145,6 +148,182 @@ impl NormalSide {
     }
 }
 
+impl fmt::Display for NormalSide {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.pad(self.as_str())
+    }
+}
+
+impl fmt::Display for AccountKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}/{}/{}", self.kind, self.party, self.currency)
+    }
+}
+
+/// An account as stored: its ID and its normal side. Its key is the one it
+/// was found by.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Account {
+    pub id: AccountId,
+    pub normal_side: NormalSide,
+}
+
+/// Why an account could not be opened or found.
+#[derive(Debug, thiserror::Error)]
+pub enum AccountError {
+    /// No currency with this code: `23503` on `accounts_currency_fkey`.
+    #[error("currency {currency} is not in the currencies table")]
+    UnknownCurrency {
+        currency: Currency,
+        #[source]
+        source: sqlx::Error,
+    },
+    /// The account exists, kept on the other normal side.
+    #[error("account {key} exists with normal side {stored}, not {requested}")]
+    SideMismatch {
+        key: AccountKey,
+        stored: NormalSide,
+        requested: NormalSide,
+    },
+    /// The database rejected what the types rule out, such as a candidate
+    /// ID that another account already has: a bug, never retried
+    /// (ADR-0013).
+    #[error("the database rejected account {key} as invalid")]
+    Invariant {
+        key: AccountKey,
+        #[source]
+        source: sqlx::Error,
+    },
+    /// Any other failure, such as a lost connection. Opening converges on
+    /// the key, so calling it again is safe.
+    #[error("account {key} could not be opened or found")]
+    Database {
+        key: AccountKey,
+        #[source]
+        source: sqlx::Error,
+    },
+}
+
+/// Opens the account with this key, or finds it if it exists (ADR-0009).
+/// `candidate` becomes its ID only if the key is new; the stored ID is
+/// returned either way, and calling again with the same arguments is safe.
+///
+/// It takes a pool, not a database transaction: the account is committed
+/// before any ledger transaction can refer to it, so a posting's retry stays
+/// identical (ADR-0005).
+///
+/// # Errors
+///
+/// [`AccountError::UnknownCurrency`] for a currency missing from the
+/// `currencies` table, [`AccountError::SideMismatch`] when the account
+/// exists on the other normal side, [`AccountError::Invariant`] for a bug
+/// such as a reused candidate, and [`AccountError::Database`] for anything
+/// else.
+pub async fn open_account(
+    pool: &PgPool,
+    candidate: AccountId,
+    key: &AccountKey,
+    side: NormalSide,
+) -> Result<AccountId, AccountError> {
+    // Two statements, not one: a single statement reads one snapshot, so a
+    // CTE that inserts and selects returns no row when it loses a race to
+    // another session (ADR-0009).
+    sqlx::query!(
+        "INSERT INTO accounts (id, kind, party, currency, normal_side) \
+         VALUES ($1, $2, $3, $4, $5) \
+         ON CONFLICT (kind, party, currency) DO NOTHING",
+        candidate.get(),
+        key.kind.as_str(),
+        key.party.as_str(),
+        key.currency.as_str(),
+        side.as_str()
+    )
+    .execute(pool)
+    .await
+    .map_err(|source| {
+        let (code, constraint) = code_and_constraint(&source);
+        match classify_open(code.as_deref(), constraint) {
+            OpenFailure::UnknownCurrency => AccountError::UnknownCurrency {
+                currency: key.currency,
+                source,
+            },
+            OpenFailure::Invariant => AccountError::Invariant {
+                key: key.clone(),
+                source,
+            },
+            OpenFailure::Database => AccountError::Database {
+                key: key.clone(),
+                source,
+            },
+        }
+    })?;
+    // The insert either stored the account or met a committed one with the
+    // same key (ON CONFLICT waits for a concurrent insert to end), and
+    // accounts are append-only, so the row is there.
+    let account = find_account(pool, key)
+        .await?
+        .expect("the account was just inserted or found, and is never deleted");
+    if account.normal_side != side {
+        return Err(AccountError::SideMismatch {
+            key: key.clone(),
+            stored: account.normal_side,
+            requested: side,
+        });
+    }
+    Ok(account.id)
+}
+
+/// Finds the account with this key.
+///
+/// # Errors
+///
+/// [`AccountError::Database`] when the account cannot be read.
+pub async fn find_account(
+    pool: &PgPool,
+    key: &AccountKey,
+) -> Result<Option<Account>, AccountError> {
+    let row = sqlx::query!(
+        "SELECT id, normal_side FROM accounts \
+         WHERE kind = $1 AND party = $2 AND currency = $3",
+        key.kind.as_str(),
+        key.party.as_str(),
+        key.currency.as_str()
+    )
+    .fetch_optional(pool)
+    .await
+    .map_err(|source| AccountError::Database {
+        key: key.clone(),
+        source,
+    })?;
+    Ok(row.map(|row| Account {
+        id: AccountId::try_from(row.id).expect("accounts_id_check allows only UUIDv7 IDs"),
+        normal_side: NormalSide::parse(&row.normal_side)
+            .expect("accounts_normal_side_check allows only debit and credit"),
+    }))
+}
+
+/// What a failed account insert means, by its SQLSTATE and constraint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OpenFailure {
+    UnknownCurrency,
+    Invariant,
+    Database,
+}
+
+/// The pair (code, constraint) decides, never the message (ADR-0013). Any
+/// other integrity violation, or any `LG` code, is something the types rule
+/// out. Everything else, a lost connection included, may succeed when
+/// called again.
+fn classify_open(code: Option<&str>, constraint: Option<&str>) -> OpenFailure {
+    match (code, constraint) {
+        (Some("23503"), Some("accounts_currency_fkey")) => OpenFailure::UnknownCurrency,
+        (Some(code), _) if code.starts_with("23") || code.starts_with("LG") => {
+            OpenFailure::Invariant
+        }
+        _ => OpenFailure::Database,
+    }
+}
+
 /// The database's label rule, `^[a-z][a-z0-9_]{0,62}$`. Every character it
 /// allows is ASCII, so it is checked on bytes, and a byte length of 63 is 63
 /// characters.
@@ -270,6 +449,56 @@ mod tests {
                 "{label:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_failed_insert_is_classified_by_its_code_and_constraint() {
+        use OpenFailure::{Database, Invariant, UnknownCurrency};
+        for (code, constraint, expected) in [
+            (
+                Some("23503"),
+                Some("accounts_currency_fkey"),
+                UnknownCurrency,
+            ),
+            // Another key, or another rule that the types rule out: a bug.
+            (Some("23503"), Some("another_fkey"), Invariant),
+            (Some("23505"), Some("accounts_pkey"), Invariant),
+            (Some("23514"), Some("accounts_kind_check"), Invariant),
+            (Some("23514"), Some("currency_code_check"), Invariant),
+            (Some("LG001"), Some("accounts_append_only"), Invariant),
+            // Anything else may succeed when called again.
+            (Some("40P01"), None, Database),
+            (Some("55P03"), None, Database),
+            (Some("57P01"), None, Database),
+            (None, None, Database),
+        ] {
+            assert_eq!(
+                classify_open(code, constraint),
+                expected,
+                "{code:?} {constraint:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn keys_and_sides_display_as_the_database_stores_them() {
+        let key = AccountKey {
+            kind: AccountKind::parse("merchant_payable").expect("valid kind"),
+            party: Party::merchant(MERCHANT),
+            currency: Currency::parse("EUR").expect("valid code"),
+        };
+        let text = "merchant_payable/d1b2c3d4-e5f6-7a7b-8c9d-0e1f2a3b4c5d/EUR";
+        assert_eq!(key.to_string(), text);
+        assert_eq!(NormalSide::Credit.to_string(), "credit");
+        let error = AccountError::SideMismatch {
+            key,
+            stored: NormalSide::Credit,
+            requested: NormalSide::Debit,
+        };
+        assert_eq!(
+            error.to_string(),
+            format!("account {text} exists with normal side credit, not debit")
+        );
     }
 
     #[test]
