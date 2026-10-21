@@ -133,6 +133,17 @@ Which sqlx version:
   concurrency tests build their own larger pool.
 - Crates with many query macros compile more slowly.
 
+## Amendments
+
+- 2026-10-21: The regression test is
+  `crates/payments-core/tests/cancelled_begin.rs`. It drops the future of a
+  `begin_with` whose statement waits for an advisory lock that another
+  connection holds, then checks that the pool hands the same backend back
+  `idle`. Against sqlx 0.9.0 it failed: the backend was `idle in
+  transaction`. At the pinned commit it passes, because #4394 counts the
+  transaction before the BEGIN round trip, so the dropped future queues a
+  ROLLBACK, which the pool sends before reusing the connection.
+
 ## References
 
 - sqlx, [`query!` macro documentation](https://docs.rs/sqlx/latest/sqlx/macro.query.html) (offline mode).
