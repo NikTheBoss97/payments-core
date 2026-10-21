@@ -1,0 +1,19 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO ledger_entries (transaction_id, line_no, entry_count, account_id, currency, amount) SELECT $1::uuid, line_no, $2::integer, account_id, $3::text, amount FROM UNNEST($4::integer[], $5::uuid[], $6::bigint[]) AS entry (line_no, account_id, amount)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Int4",
+        "Text",
+        "Int4Array",
+        "UuidArray",
+        "Int8Array"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "93b687e06b74528b83a215a9a40da1df9536ef5a78f0fff446f02258a715996d"
+}

@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "CREATE TRIGGER drop_line BEFORE INSERT ON ledger_entries FOR EACH ROW EXECUTE FUNCTION drop_line_three()",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "33f5314b5af993e708bcab7531e4c8c7b95ab90a652c1e6a7b7a2792c4519830"
+}

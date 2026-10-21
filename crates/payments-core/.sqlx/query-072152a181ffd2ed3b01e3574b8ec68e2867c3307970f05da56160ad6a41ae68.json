@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "CREATE FUNCTION unbalance_line_one() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.line_no = 1 THEN NEW.amount := NEW.amount + 1; END IF; RETURN NEW; END $$",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "072152a181ffd2ed3b01e3574b8ec68e2867c3307970f05da56160ad6a41ae68"
+}

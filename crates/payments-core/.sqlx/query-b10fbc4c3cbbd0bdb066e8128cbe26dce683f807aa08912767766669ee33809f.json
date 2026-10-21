@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "REINDEX INDEX CONCURRENTLY ledger_transactions_pkey",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "b10fbc4c3cbbd0bdb066e8128cbe26dce683f807aa08912767766669ee33809f"
+}
