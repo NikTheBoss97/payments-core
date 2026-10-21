@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "CREATE FUNCTION zero_amounts() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN NEW.amount := 0; RETURN NEW; END $$",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "8f79adf215008dbe08b8fbaeb7b6f1cff34251fb8d3f457f8a46864d8a429120"
+}

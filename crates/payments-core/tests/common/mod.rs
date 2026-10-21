@@ -62,10 +62,31 @@ pub async fn runtime_transaction(pool: &PgPool) -> sqlx::Result<Transaction<'sta
 /// `#[sqlx::test]` drops its database without `FORCE`, which PostgreSQL
 /// refuses while another connection is open.
 pub async fn runtime_pool(pool: &PgPool) -> sqlx::Result<PgPool> {
+    runtime_pool_with(pool, None).await
+}
+
+/// A [`runtime_pool`] whose sessions wait at most `millis` for each lock,
+/// standing in for the runtime role's own `lock_timeout` (ADR-0005).
+pub async fn runtime_pool_with_lock_timeout(pool: &PgPool, millis: i32) -> sqlx::Result<PgPool> {
+    runtime_pool_with(pool, Some(millis)).await
+}
+
+async fn runtime_pool_with(pool: &PgPool, lock_timeout_ms: Option<i32>) -> sqlx::Result<PgPool> {
     PgPoolOptions::new()
-        .after_connect(|conn, _| {
+        .after_connect(move |conn, _| {
             Box::pin(async move {
-                sqlx::query!("SET ROLE payments_app").execute(conn).await?;
+                sqlx::query!("SET ROLE payments_app")
+                    .execute(&mut *conn)
+                    .await?;
+                if let Some(millis) = lock_timeout_ms {
+                    // SET takes no bind parameters; set_config does.
+                    sqlx::query!(
+                        "SELECT set_config('lock_timeout', $1::integer::text, false)",
+                        millis
+                    )
+                    .fetch_one(&mut *conn)
+                    .await?;
+                }
                 Ok(())
             })
         })

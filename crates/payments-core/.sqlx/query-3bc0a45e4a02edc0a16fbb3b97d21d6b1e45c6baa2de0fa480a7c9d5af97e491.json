@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "CREATE TRIGGER zero BEFORE INSERT ON ledger_entries FOR EACH ROW EXECUTE FUNCTION zero_amounts()",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "3bc0a45e4a02edc0a16fbb3b97d21d6b1e45c6baa2de0fa480a7c9d5af97e491"
+}

@@ -1,0 +1,76 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT h.entry_count, h.currency AS \"currency!\", e.line_no, e.account_id, e.amount\n             FROM ledger_transactions h\n             JOIN ledger_entries e ON e.transaction_id = h.id\n            WHERE h.id = $1\n            ORDER BY e.line_no",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "entry_count",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "ledger_transactions",
+            "name": "entry_count"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "currency!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "ledger_transactions",
+            "name": "currency"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "line_no",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "ledger_entries",
+            "name": "line_no"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "account_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "ledger_entries",
+            "name": "account_id"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "amount",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "ledger_entries",
+            "name": "amount"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "fd8fba26f1d2ac3c3445bdf33b21c02a72eff38bb0b90be9116010dc451d97c3"
+}
