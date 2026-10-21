@@ -18,6 +18,10 @@ thiserror = "2.0.21"
 uuid = { version = "1.28", features = ["v7"] }
 
 [dev-dependencies]
+# join_all, to run futures together in the concurrency tests. Only alloc:
+# the default features would add the futures-macro crate. sqlx builds this
+# crate already.
+futures-util = { version = "0.3.34", default-features = false, features = ["alloc"] }
 # Only the std feature: the default fork, timeout and bit-set features are
 # unused and would add rusty-fork, tempfile and bit-set to the build.
 proptest = { version = "1.12.0", default-features = false, features = ["std"] }
