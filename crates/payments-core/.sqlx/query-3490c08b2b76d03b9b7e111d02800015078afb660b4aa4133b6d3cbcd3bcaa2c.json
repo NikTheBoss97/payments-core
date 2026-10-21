@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT EXISTS (SELECT 1 FROM ledger_transactions WHERE id = $1) AS \"stored!\"",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "stored!",
+        "type_info": "Bool",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "3490c08b2b76d03b9b7e111d02800015078afb660b4aa4133b6d3cbcd3bcaa2c"
+}

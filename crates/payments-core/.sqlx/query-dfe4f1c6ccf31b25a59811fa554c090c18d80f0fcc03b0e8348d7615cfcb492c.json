@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SET log_min_duration_statement = 0",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "dfe4f1c6ccf31b25a59811fa554c090c18d80f0fcc03b0e8348d7615cfcb492c"
+}
