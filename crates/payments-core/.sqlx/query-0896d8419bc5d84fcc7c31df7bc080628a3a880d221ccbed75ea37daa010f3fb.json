@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SAVEPOINT spelling",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "0896d8419bc5d84fcc7c31df7bc080628a3a880d221ccbed75ea37daa010f3fb"
+}
