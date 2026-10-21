@@ -24,18 +24,21 @@ env:
   # The cache never restores incremental data, so producing it is wasted work.
   CARGO_INCREMENTAL: "0"
 
+# Each action is pinned to the commit of a release, named in a comment: a
+# tag can be moved to other code, a commit cannot (GitHub's secure use
+# reference). Dependabot updates both (.github/dependabot.yml).
 jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # rustup comes with the runner image. Naming the channel makes it fetch
       # the latest stable, the toolchain that rust-toolchain.toml selects.
       - name: Install Rust
         run: >-
           rustup toolchain install stable --profile minimal
           --component rustfmt,clippy --no-self-update
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --locked
 
@@ -58,7 +61,7 @@ jobs:
     env:
       DATABASE_URL: postgres://payments:payments@localhost:5432/payments
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Create database roles (ADR-0008)
         run: >-
           docker exec -i ${{ job.services.postgres.id }}
@@ -68,7 +71,7 @@ jobs:
         run: >-
           rustup toolchain install stable --profile minimal
           --component rustfmt,clippy --no-self-update
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - run: cargo test --workspace --locked
       # Release builds wrap on integer overflow unless the root Cargo.toml
       # turns the checks on. This test overflows on purpose and fails if they
@@ -98,7 +101,7 @@ jobs:
       # The sqlx commit pinned in Cargo.toml; sqlx-cli must match it.
       SQLX_REV: f1e94ec34dd5f11ad6488a3a8ac7988439a3f757
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Create database roles (ADR-0008)
         run: >-
           docker exec -i ${{ job.services.postgres.id }}
@@ -108,12 +111,12 @@ jobs:
         run: >-
           rustup toolchain install stable --profile minimal
           --component rustfmt,clippy --no-self-update
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       # The sqlx repository has no Cargo.lock, so the CLI build cannot be
       # locked; the built binary is cached under the commit hash instead.
       - name: Restore sqlx-cli
         id: sqlx-cli
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/bin/sqlx
