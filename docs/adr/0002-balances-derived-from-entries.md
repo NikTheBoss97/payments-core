@@ -122,6 +122,17 @@ Option A: no balance is stored anywhere.
   return no rows:
   `SELECT currency, SUM(amount) FROM ledger_entries GROUP BY currency HAVING SUM(amount) <> 0`.
 
+## Amendments
+
+- 2026-10-21: Rust reads a balance with `balance(pool, AccountId)`. It
+  returns the account's currency and normal side with the signed sum, so the
+  amount never travels without its currency (ADR-0003), and `None` when no
+  account has that ID, which a bare sum would report as zero. The statement
+  joins the account row to the sum, so it still reads one snapshot. The
+  cast's error, `22003`, is reported as an overflow, a bug: reaching it
+  takes more than 9,223 entries at the cap on one side of one account
+  (ADR-0003).
+
 ## References
 
 - Pat Helland, [Immutability Changes Everything](https://www.cidrdb.org/cidr2015/Papers/CIDR15_Paper16.pdf), CIDR 2015.
