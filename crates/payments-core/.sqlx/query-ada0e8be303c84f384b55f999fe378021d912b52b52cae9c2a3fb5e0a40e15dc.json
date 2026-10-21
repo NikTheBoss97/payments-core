@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SET commit_siblings = 0",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "ada0e8be303c84f384b55f999fe378021d912b52b52cae9c2a3fb5e0a40e15dc"
+}

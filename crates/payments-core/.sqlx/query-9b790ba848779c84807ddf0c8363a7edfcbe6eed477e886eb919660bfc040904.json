@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SET commit_delay = 100000",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "9b790ba848779c84807ddf0c8363a7edfcbe6eed477e886eb919660bfc040904"
+}
