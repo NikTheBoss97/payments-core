@@ -1,0 +1,19 @@
+# Author: Nicola Antonello
+
+# Dependabot proposes updates for the actions that ci.yml pins to commit
+# SHAs, and keeps the version comment next to each SHA in step. One pull
+# request a week carries every update, with a Conventional Commits subject
+# such as "ci: bump the actions group with 2 updates". Rust dependencies are
+# left out: sqlx is pinned to a git commit through [patch.crates-io].
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    # "/" is required to check the workflow files in .github/workflows.
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
+    commit-message:
+      prefix: ci
