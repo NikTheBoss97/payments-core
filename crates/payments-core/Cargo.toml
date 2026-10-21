@@ -9,6 +9,8 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+# PostgreSQL access through compile-time checked queries (ADR-0006).
+sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "postgres", "macros", "uuid"] }
 # Derives Display and Error for the error types (ADR-0015). sqlx depends on
 # it too.
 thiserror = "2.0.21"
@@ -19,7 +21,9 @@ uuid = { version = "1.28", features = ["v7"] }
 # Only the std feature: the default fork, timeout and bit-set features are
 # unused and would add rusty-fork, tempfile and bit-set to the build.
 proptest = { version = "1.12.0", default-features = false, features = ["std"] }
-sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "postgres", "macros", "migrate", "uuid"] }
+# #[sqlx::test] applies the migrations to each test database; the library
+# never runs them (ADR-0008). Cargo adds this feature to the one above.
+sqlx = { version = "0.9", default-features = false, features = ["migrate"] }
 
 [lints]
 workspace = true

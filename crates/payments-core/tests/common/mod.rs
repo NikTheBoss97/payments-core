@@ -12,7 +12,10 @@
     reason = "each test crate uses a different subset of these helpers"
 )]
 
+use payments_core::ids::{AccountId, TransactionId};
+use sqlx::postgres::PgPoolOptions;
 use sqlx::{PgConnection, PgPool, Postgres, Transaction};
+use uuid::Uuid;
 
 /// SQLSTATE raised by the append-only trigger (ADR-0004).
 pub const APPEND_ONLY: &str = "LG001";
@@ -50,6 +53,43 @@ pub async fn runtime_transaction(pool: &PgPool) -> sqlx::Result<Transaction<'sta
         .execute(&mut *tx)
         .await?;
     Ok(tx)
+}
+
+/// A pool whose connections act as the runtime role, to call the library's
+/// functions as the application does: each new connection runs `SET ROLE`
+/// first. Role settings such as `lock_timeout` apply only at login, so these
+/// connections have none (ADR-0005). Close the pool before the test returns:
+/// `#[sqlx::test]` drops its database without `FORCE`, which PostgreSQL
+/// refuses while another connection is open.
+pub async fn runtime_pool(pool: &PgPool) -> sqlx::Result<PgPool> {
+    PgPoolOptions::new()
+        .after_connect(|conn, _| {
+            Box::pin(async move {
+                sqlx::query!("SET ROLE payments_app").execute(conn).await?;
+                Ok(())
+            })
+        })
+        .connect_with((*pool.connect_options()).clone())
+        .await
+}
+
+/// A fixed UUIDv7 for tests (ADR-0005): 2026-01-01T00:00:00Z, with `n` in its
+/// last four bytes, so a failing test names a readable ID such as
+/// `019b76da-a800-7000-8000-000000000001`.
+pub fn test_uuid(n: u32) -> Uuid {
+    let mut counter_and_random = [0_u8; 10];
+    counter_and_random[6..].copy_from_slice(&n.to_be_bytes());
+    uuid::Builder::from_unix_timestamp_millis(1_767_225_600_000, &counter_and_random).into_uuid()
+}
+
+/// A fixed account ID, from [`test_uuid`].
+pub fn account_id(n: u32) -> AccountId {
+    AccountId::try_from(test_uuid(n)).expect("test_uuid builds UUIDv7 values")
+}
+
+/// A fixed ledger transaction ID, from [`test_uuid`].
+pub fn transaction_id(n: u32) -> TransactionId {
+    TransactionId::try_from(test_uuid(n)).expect("test_uuid builds UUIDv7 values")
 }
 
 /// The SQLSTATE of a database error, or a panic if the error is not one.
