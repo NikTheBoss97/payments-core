@@ -2,8 +2,9 @@
 
 # Schema design and database errors
 
-Constraints, privileges and operator resolution in PostgreSQL, and error codes that programs can act on. Part of the [reading list](README.md).
+Constraints, privileges and operator resolution in PostgreSQL, NULLs and keys, and error codes that programs can act on. Part of the [reading list](README.md).
 
+- ★ Etienne Toussaint, Paolo Guagliardo, Leonid Libkin and Juan Sequeda, [Troubles with Nulls, Views from the Users](https://www.vldb.org/pvldb/vol15/p2613-guagliardo.pdf) (PVLDB, 2022). A survey of 175 database users: NULLs are everywhere, many add NOT NULL even to foreign keys to avoid three-valued logic, and agreement with SQL drops for aggregates such as `SUM`, which skip NULLs.
 - ★ PostgreSQL, [5.5. Constraints](https://www.postgresql.org/docs/18/ddl-constraints.html) (PostgreSQL 18 docs). What each kind of constraint can check, why a foreign key must target a unique key (which lets a child row repeat its parent's values), and how NULLs slip past unique and check constraints.
 - PostgreSQL, [5.8. Privileges](https://www.postgresql.org/docs/18/ddl-priv.html) (PostgreSQL 18 docs). Privileges granted per column, which leave a column such as a recording time to its default.
 - PostgreSQL, [10.2. Operators](https://www.postgresql.org/docs/18/typeconv-oper.html) (PostgreSQL 18 docs). How PostgreSQL picks an operator: one that takes exactly the argument types wins wherever it sits on the search path, so a guard function compares only types for which `pg_catalog` has an exact operator.
@@ -11,5 +12,8 @@ Constraints, privileges and operator resolution in PostgreSQL, and error codes t
 - PostgreSQL, [Appendix A. PostgreSQL Error Codes](https://www.postgresql.org/docs/18/errcodes-appendix.html) (PostgreSQL 18 docs). Five-character SQLSTATEs, whose first two characters name a class that a program can act on without knowing the exact code.
 - PostgreSQL, [41.9. Errors and Messages](https://www.postgresql.org/docs/18/plpgsql-errors-and-messages.html) (PostgreSQL 18 docs). Raising errors with a custom SQLSTATE from PL/pgSQL, and why codes ending in 000 are categories.
 - Google, [AIP-193: Errors](https://google.aip.dev/193) (API Improvement Proposals). Messages are for people and machine-readable reasons are for programs, so clients never need to parse a message.
+- Xavier Oriol and Ernest Teniente, [Incremental checking of SQL assertions in an RDBMS](https://doi.org/10.1016/j.is.2025.102550) (Information Systems, 2025). Why no RDBMS implements SQL-92's `CREATE ASSERTION`, and how to check one incrementally with ordinary tables and triggers, aggregates included: the general form of the ledger's commit-time zero-sum check.
 - Bill Karwin, [SQL Antipatterns, Volume 1: Avoiding the Pitfalls of Database Programming](https://pragprog.com/titles/bksap1/sql-antipatterns-volume-1/) (Pragmatic Bookshelf, 2022). Includes Polymorphic Associations: why no foreign key can check a `(type, id)` pair, and what to do instead.
 - Craig Kerstiens, [Enums vs Check Constraints in Postgres](https://www.crunchydata.com/blog/enums-vs-check-constraints-in-postgres) (Crunchy Data, 2022). A short case for a `CHECK` constraint over an enum type for a closed set of values.
+- Junwen Yang, Utsav Sethi, Cong Yan, Alvin Cheung and Shan Lu, [Managing data constraints in database-backed web applications](https://doi.org/10.1145/3377811.3380375) (ICSE, 2020). A study of 12 Rails applications: a quarter of the constraints declared in application code are missing from the database, and violations often reach users as unclear or missing error messages.
+- Henning Köhler, Uwe Leck, Sebastian Link and Xiaofang Zhou, [Possible and certain keys for SQL](https://doi.org/10.1007/s00778-016-0430-9) (The VLDB Journal, 2016). What a key means once columns can be NULL: `UNIQUE` only guarantees a possible key, unique among rows without NULLs, which is why every column of the account key is `NOT NULL`.

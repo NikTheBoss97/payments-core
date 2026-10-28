@@ -2,11 +2,15 @@
 
 # Testing for correctness
 
-Property-based testing, failure injection and testing database guarantees. Part of the [reading list](README.md).
+Property-based testing, mutation testing, failure injection and testing database guarantees. Part of the [reading list](README.md).
 
 - ★ John Hughes, [Experiences with QuickCheck: Testing the Hard Stuff and Staying Sane](https://publications.lib.chalmers.se/records/fulltext/232550/local_232550.pdf) (2016). Testing stateful systems against a model of their state transitions, and finding race conditions.
 - ★ Ding Yuan et al., [Simple Testing Can Prevent Most Critical Failures](https://www.usenix.org/conference/osdi14/technical-sessions/presentation/yuan) (OSDI, 2014). Most catastrophic failures studied came from mishandled non-fatal errors, so failure injection should target error paths.
 - Jason Lingle, Mazdak Farrokhzad and contributors, [Proptest](https://proptest-rs.github.io/proptest/) (the proptest book). Property-based testing in Rust: strategies, shrinking, failure persistence and state-machine tests.
+- Harrison Goldstein et al., [Property-Based Testing in Practice](https://doi.org/10.1145/3597503.3639581) (ICSE, 2024). Interviews with 30 developers at Jane Street: properties pay off most where a simple model specifies a complicated implementation, which is how the concurrency tests check balances, and writing input generators is the main cost.
+- Goran Petrović et al., [Practical Mutation Testing at Scale: A view from Google](https://doi.org/10.1109/TSE.2021.3107634) (IEEE Transactions on Software Engineering, 2022). Why code that tests cover can still be untested, and how to make mutants worth a developer's time: mutate only changed lines, suppress unproductive mutants, and report the survivors in code review.
 - Jingyu Zhou et al., [FoundationDB: A Distributed Unbundled Transactional Key Value Store](https://doi.org/10.1145/3448016.3457559) (SIGMOD, 2021). Section 4 describes deterministic simulation, which makes every injected failure reproducible.
+- Kyle Kingsbury and Peter Alvaro, [Elle: Inferring Isolation Anomalies from Experimental Observations](https://doi.org/10.14778/3430915.3430918) (PVLDB, 2020). How to check an isolation level from outside the database: record what concurrent transactions read and wrote, infer the dependency graph between them, and report each cycle as a named anomaly. It is the checker behind the Jepsen analysis of PostgreSQL 12.3 in this list.
 - Kyle Kingsbury, [Jepsen: PostgreSQL 12.3](https://jepsen.io/analyses/postgresql-12.3) (2020). Testing isolation guarantees instead of assuming them; the SERIALIZABLE bug it found was fixed in 12.4.
 - Koen Claessen and John Hughes, [QuickCheck: A Lightweight Tool for Random Testing of Haskell Programs](https://doi.org/10.1145/351240.351266) (ICFP, 2000). The paper that introduced QuickCheck, from which modern property-based testing descends.
+- R. A. DeMillo, R. J. Lipton and F. G. Sayward, [Hints on Test Data Selection: Help for the Practicing Programmer](https://doi.org/10.1109/C-M.1978.218136) (IEEE Computer, 1978). The paper that introduced mutation analysis: seed small faults into the program and judge a test suite by how many of them it detects, the idea behind the mutation pass over the database guards.

@@ -2,10 +2,14 @@
 
 # Payments lifecycle
 
-Payment statuses, authorization and capture, compensation and reconciliation. Part of the [reading list](README.md).
+Payment statuses and state machines, authorization and settlement, compensation and reconciliation. Part of the [reading list](README.md).
 
 - ★ Adyen, [Payments lifecycle](https://docs.adyen.com/account/payments-lifecycle). Real payment statuses, including why a payment can no longer be cancelled once it is sent for settlement.
+- ★ Ross Anderson, [Security Engineering, 3rd edition](https://www.cl.cam.ac.uk/archive/rja14/book.html) (Wiley, 2020). Chapter 12, Banking and Bookkeeping, explains why all ledgers must add up to zero, the Clark-Wilson model (data changes only through well-formed transactions, each leaving an append-only record), daily reconciliation, and card payments split into authorization at the till and settlement days later.
 - Stripe, [Place a hold on a payment method](https://docs.stripe.com/payments/place-a-hold-on-a-payment-method). Separate authorization and capture, authorization expiry, and partial capture.
 - TigerBeetle, [Two-Phase Transfers](https://docs.tigerbeetle.com/coding/two-phase-transfers/). Holds in a ledger: pending transfers that are later posted, voided or expired.
+- Committee on Payments and Market Infrastructures, [CPMI glossary](https://www.bis.org/committees/cpmi/glossary) (Bank for International Settlements). Standard definitions of authorisation, clearing, settlement and final settlement (irrevocable, "a legally defined moment"), which pin down what "settled" should mean.
+- Simon Van Mierlo and Hans Vangheluwe, [Statecharts: A Formalism to Model, Simulate and Synthesize Reactive and Autonomous Timed Systems](https://doi.org/10.1007/978-3-030-43946-0_6) (Springer, 2020). An open-access tutorial that grows a statechart from plain states and transitions to timed transitions, hierarchy and orthogonal regions, and shows how to test the model; timed transitions are how an expiring authorization is modelled.
 - Gregor Hohpe, [Your Coffee Shop Doesn't Use Two-Phase Commit](https://www.enterpriseintegrationpatterns.com/docs/IEEE_Software_Design_2PC.pdf) (IEEE Software, 2005). Error handling without distributed transactions: write-off, retry, compensation and reconciliation.
+- David Harel, [Statecharts: A Visual Formalism for Complex Systems](https://doi.org/10.1016/0167-6423%2887%2990035-9) (Science of Computer Programming, 1987). The origin of statecharts, which extend state-transition diagrams with nested states, concurrent regions and broadcast events: the notation in which a payment's states and event-labelled transitions are drawn.
 - Hector Garcia-Molina and Kenneth Salem, [Sagas](https://doi.org/10.1145/38713.38742) (SIGMOD, 1987). Long-lived work as a sequence of transactions, with compensating transactions to undo a partial run.
