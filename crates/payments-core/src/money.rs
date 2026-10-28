@@ -34,6 +34,10 @@ pub enum MoneyError {
     NotPositive(i64),
     /// Not exactly three uppercase ASCII letters.
     InvalidCurrency(String),
+    /// A rate above 10,000 basis points (100%).
+    RateOutOfRange(u16),
+    /// Rates for a split that do not add up to 10,000 basis points.
+    SplitNotWhole(u64),
 }
 
 impl fmt::Display for MoneyError {
@@ -46,6 +50,17 @@ impl fmt::Display for MoneyError {
             Self::NotPositive(minor) => write!(f, "amount {minor} must be positive"),
             Self::InvalidCurrency(code) => {
                 write!(f, "currency {code:?} must be three uppercase ASCII letters")
+            }
+            Self::RateOutOfRange(bps) => {
+                let whole = BasisPoints::WHOLE.get();
+                write!(f, "rate {bps} is beyond {whole} basis points")
+            }
+            Self::SplitNotWhole(sum) => {
+                let whole = BasisPoints::WHOLE.get();
+                write!(
+                    f,
+                    "a split's rates add up to {sum} basis points instead of {whole}"
+                )
             }
         }
     }
@@ -202,6 +217,103 @@ pub fn total(amounts: impl IntoIterator<Item = Amount>) -> i128 {
         sum.checked_add(i128::from(amount.get()))
             .expect("an i128 holds more than 10^23 amounts at the cap")
     })
+}
+
+/// A rate in basis points, hundredths of a percent: 2.9% is 290. It runs
+/// from 0 to [`WHOLE`](Self::WHOLE), 100%, so a fee can never exceed the
+/// amount it is taken from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BasisPoints(u16);
+
+impl BasisPoints {
+    /// The whole: 10,000 basis points, 100%.
+    pub const WHOLE: Self = Self(10_000);
+
+    /// Checks that `bps` is at most 10,000.
+    ///
+    /// # Errors
+    ///
+    /// [`MoneyError::RateOutOfRange`] above 10,000.
+    pub fn new(bps: u16) -> Result<Self, MoneyError> {
+        if bps > Self::WHOLE.0 {
+            Err(MoneyError::RateOutOfRange(bps))
+        } else {
+            Ok(Self(bps))
+        }
+    }
+
+    /// The rate in basis points.
+    pub fn get(self) -> u16 {
+        self.0
+    }
+}
+
+/// Splits `total` into one share per rate, by ADR-0003's rule: each share
+/// gets the floor of its exact part, `total * rate / 10_000`, and the units
+/// left over go one each to the shares with the largest remainders, ties to
+/// the share listed first. The shares add up to `total` exactly, and each is
+/// within one unit of its exact part.
+///
+/// # Errors
+///
+/// [`MoneyError::SplitNotWhole`] when the rates do not add up to 10,000.
+pub fn allocate<const N: usize>(
+    total: PositiveAmount,
+    rates: [BasisPoints; N],
+) -> Result<[i64; N], MoneyError> {
+    let sum = rates.iter().fold(0_u64, |sum, rate| {
+        sum.checked_add(u64::from(rate.get()))
+            .expect("overflowing a u64 would take more than 10^15 rates")
+    });
+    if sum != u64::from(BasisPoints::WHOLE.get()) {
+        return Err(MoneyError::SplitNotWhole(sum));
+    }
+    let whole = i128::from(BasisPoints::WHOLE.get());
+    let total = i128::from(total.get());
+    // Each exact part as a floor and a remainder. A total of at most 10^15
+    // times a rate of at most 10^4 fits in an i128, though not in an i64.
+    let parts = rates.map(|rate| {
+        let scaled = total
+            .checked_mul(i128::from(rate.get()))
+            .expect("the cap times a rate fits in an i128");
+        let floor = scaled.checked_div(whole).expect("the whole is not zero");
+        let remainder = scaled.checked_rem(whole).expect("the whole is not zero");
+        (floor, remainder)
+    });
+    let floors = parts.iter().fold(0_i128, |sum, (floor, _)| {
+        sum.checked_add(*floor)
+            .expect("the floors add up to at most the total")
+    });
+    // The remainders add up to the whole times the units left, and each is
+    // below the whole, so fewer units are left than there are shares.
+    let left = total
+        .checked_sub(floors)
+        .expect("the floors add up to at most the total");
+    let left = usize::try_from(left).expect("fewer units are left than there are shares");
+    let mut order: [usize; N] = std::array::from_fn(|place| place);
+    order.sort_by_key(|&place| (std::cmp::Reverse(parts[place].1), place));
+    let mut shares = parts.map(|(floor, _)| floor);
+    for &place in order.iter().take(left) {
+        shares[place] = shares[place]
+            .checked_add(1)
+            .expect("a share is at most the total");
+    }
+    Ok(shares.map(|share| i64::try_from(share).expect("a share is at most the total")))
+}
+
+/// The platform's fee on a captured amount, at a rate fixed on the payment
+/// (ADR-0020): the first share when [`allocate`] splits the amount between
+/// the rate and the rest of the whole. It rounds half up, an exact half
+/// going to the platform, and lies between 0 and the captured amount.
+pub fn fee(captured: PositiveAmount, rate: BasisPoints) -> i64 {
+    let rest = BasisPoints::WHOLE
+        .get()
+        .checked_sub(rate.get())
+        .expect("a rate is at most the whole");
+    let rest = BasisPoints::new(rest).expect("the rest of a rate is a rate");
+    let [fee, _merchant] =
+        allocate(captured, [rate, rest]).expect("a rate and its rest make the whole");
+    fee
 }
 
 #[cfg(test)]
@@ -369,6 +481,14 @@ mod tests {
                 MoneyError::InvalidCurrency(" EU\n".into()),
                 r#"currency " EU\n" must be three uppercase ASCII letters"#,
             ),
+            (
+                MoneyError::RateOutOfRange(10_001),
+                "rate 10001 is beyond 10000 basis points",
+            ),
+            (
+                MoneyError::SplitNotWhole(9_999),
+                "a split's rates add up to 9999 basis points instead of 10000",
+            ),
         ] {
             assert_eq!(error.to_string(), text);
         }
@@ -377,6 +497,157 @@ mod tests {
     #[test]
     fn total_of_nothing_is_zero() {
         assert_eq!(total([]), 0);
+    }
+
+    #[test]
+    fn basis_points_run_from_0_to_10000() {
+        // A u16 has only 65,536 values, so check every one. The bound is
+        // written out rather than taken from the code under test.
+        for value in 0..=u16::MAX {
+            let expected = if value <= 10_000 {
+                Ok(value)
+            } else {
+                Err(MoneyError::RateOutOfRange(value))
+            };
+            assert_eq!(BasisPoints::new(value).map(BasisPoints::get), expected);
+        }
+        assert_eq!(BasisPoints::WHOLE.get(), 10_000);
+    }
+
+    fn bp(rate: u16) -> BasisPoints {
+        BasisPoints::new(rate).expect("valid rate")
+    }
+
+    fn positive(minor: i64) -> PositiveAmount {
+        PositiveAmount::new(minor).expect("valid amount")
+    }
+
+    #[test]
+    fn allocate_follows_the_largest_remainders() {
+        // ADR-0003's example: 5 cents split 70/30. The exact parts are 3.5
+        // and 1.5, the floors 3 and 1 leave one unit, and the remainders
+        // tie, so the unit goes to the share listed first.
+        assert_eq!(allocate(positive(5), [bp(7000), bp(3000)]), Ok([4, 1]));
+        // One unit split in half: the tie goes to the first share.
+        assert_eq!(allocate(positive(1), [bp(5000), bp(5000)]), Ok([1, 0]));
+        // 33.34, 33.33 and 33.33: the one unit left goes to the largest
+        // remainder, 0.34.
+        let thirds = [bp(3334), bp(3333), bp(3333)];
+        assert_eq!(allocate(positive(100), thirds), Ok([34, 33, 33]));
+        // 0.6666, 0.6666 and 0.6668: two units are left. The largest
+        // remainder takes one, and the earlier of the tied pair the other.
+        let thirds = [bp(3333), bp(3333), bp(3334)];
+        assert_eq!(allocate(positive(2), thirds), Ok([1, 0, 1]));
+        // One share, or a share of nothing, at both ends of the range.
+        assert_eq!(allocate(positive(7), [BasisPoints::WHOLE]), Ok([7]));
+        assert_eq!(allocate(positive(7), [bp(0), bp(10_000)]), Ok([0, 7]));
+        assert_eq!(allocate(positive(CAP), [BasisPoints::WHOLE]), Ok([CAP]));
+        let tiny = [bp(1), bp(9999)];
+        let expected = [100_000_000_000, 999_900_000_000_000];
+        assert_eq!(allocate(positive(CAP), tiny), Ok(expected));
+    }
+
+    #[test]
+    fn allocate_refuses_rates_that_are_not_the_whole() {
+        let amount = positive(100);
+        assert_eq!(allocate(amount, []), Err(MoneyError::SplitNotWhole(0)));
+        let half = [bp(5000)];
+        assert_eq!(allocate(amount, half), Err(MoneyError::SplitNotWhole(5000)));
+        let over = [bp(7000), bp(3001)];
+        assert_eq!(
+            allocate(amount, over),
+            Err(MoneyError::SplitNotWhole(10_001))
+        );
+        let twice = [BasisPoints::WHOLE, BasisPoints::WHOLE];
+        assert_eq!(
+            allocate(amount, twice),
+            Err(MoneyError::SplitNotWhole(20_000))
+        );
+    }
+
+    #[test]
+    fn fee_rounds_half_up_to_the_platform() {
+        // (captured, rate, fee), worked out by hand.
+        for (captured, rate, expected) in [
+            // The design lab's example: 2.5% of 80.00 is 2.00.
+            (8000, 250, 200),
+            // 2.9% of 10.50 is 30.45 cents, rounded down.
+            (1050, 290, 30),
+            // Around an exact half: 0.49, 0.5 and 0.51 of a cent at 1%, and
+            // 1.5 cents. An exact half goes to the platform.
+            (49, 100, 0),
+            (50, 100, 1),
+            (51, 100, 1),
+            (150, 100, 2),
+            // One unit at just under, exactly and just over 50%.
+            (1, 4999, 0),
+            (1, 5000, 1),
+            (1, 5001, 1),
+            // Both ends of the rate, and the cap.
+            (7, 0, 0),
+            (7, 10_000, 7),
+            (CAP, 0, 0),
+            (CAP, 1, 100_000_000_000),
+            (CAP, 9999, 999_900_000_000_000),
+            (CAP, 10_000, CAP),
+        ] {
+            let got = fee(positive(captured), bp(rate));
+            assert_eq!(got, expected, "{captured} at {rate} basis points");
+        }
+    }
+
+    /// Rates that make the whole: the gaps between the sorted `cuts`, which
+    /// lie in 0..=10,000, so there is one more rate than there are cuts.
+    fn rates_from_cuts<const N: usize>(mut cuts: Vec<u16>) -> [BasisPoints; N] {
+        cuts.sort_unstable();
+        cuts.insert(0, 0);
+        cuts.push(10_000);
+        let rates: Vec<BasisPoints> = cuts
+            .windows(2)
+            .map(|pair| bp(pair[1].checked_sub(pair[0]).expect("sorted cuts")))
+            .collect();
+        rates.try_into().expect("N - 1 cuts make N rates")
+    }
+
+    /// Checks one split against ADR-0003's rule, worked out on its own: each
+    /// share is the floor of its exact part or one more, the shares add up
+    /// to the total, and a share that got a unit has a larger remainder than
+    /// a share that did not, or the same remainder and an earlier place.
+    fn check_allocation<const N: usize>(
+        total: i64,
+        rates: [BasisPoints; N],
+    ) -> Result<(), TestCaseError> {
+        let shares = allocate(positive(total), rates).expect("the rates make the whole");
+        let mut sum = 0_i128;
+        // For each share: whether it got a unit, its remainder, its place.
+        let mut units = Vec::new();
+        for (place, (rate, share)) in rates.iter().zip(shares).enumerate() {
+            let scaled = i128::from(total)
+                .checked_mul(i128::from(rate.get()))
+                .expect("fits in i128");
+            let floor = scaled.checked_div(10_000).expect("non-zero divisor");
+            let remainder = scaled.checked_rem(10_000).expect("non-zero divisor");
+            let unit = i128::from(share).checked_sub(floor).expect("small numbers");
+            prop_assert!(
+                unit == 0 || unit == 1,
+                "share {place} is {share}, its floor {floor}"
+            );
+            sum = sum.checked_add(i128::from(share)).expect("small numbers");
+            units.push((unit == 1, remainder, place));
+        }
+        prop_assert_eq!(sum, i128::from(total));
+        for &(got, remainder, place) in &units {
+            for &(other_got, other_remainder, other_place) in &units {
+                if got && !other_got {
+                    prop_assert!(
+                        remainder > other_remainder
+                            || (remainder == other_remainder && place < other_place),
+                        "share {place} got a unit before share {other_place}"
+                    );
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Any i64, half of the time drawn uniformly from -BEYOND to BEYOND,
@@ -448,6 +719,42 @@ mod tests {
                 .checked_mul(i128::try_from(count).expect("count fits in i128"))
                 .expect("no overflow");
             prop_assert_eq!(total(std::iter::repeat_n(amount, count)), expected);
+        }
+
+        #[test]
+        fn allocate_splits_in_two_by_the_rule(total in positive_amounts(), cut in 0_u16..=10_000) {
+            check_allocation::<2>(total, rates_from_cuts(vec![cut]))?;
+        }
+
+        #[test]
+        fn allocate_splits_in_three_by_the_rule(
+            total in positive_amounts(),
+            cuts in prop::collection::vec(0_u16..=10_000, 2),
+        ) {
+            check_allocation::<3>(total, rates_from_cuts(cuts))?;
+        }
+
+        #[test]
+        fn allocate_splits_in_five_by_the_rule(
+            total in prop_oneof![1_i64..=20, positive_amounts()],
+            cuts in prop::collection::vec(0_u16..=10_000, 4),
+        ) {
+            // Small totals leave several units over, so their order counts.
+            check_allocation::<5>(total, rates_from_cuts(cuts))?;
+        }
+
+        #[test]
+        fn fee_matches_the_half_up_formula(captured in positive_amounts(), rate in 0_u16..=10_000) {
+            // ADR-0020's closed form, (C * r + 5000) div 10000 in i128,
+            // against the fee taken through the allocation function.
+            let expected = i128::from(captured)
+                .checked_mul(i128::from(rate))
+                .and_then(|scaled| scaled.checked_add(5000))
+                .and_then(|scaled| scaled.checked_div(10_000))
+                .expect("fits in i128");
+            let got = fee(positive(captured), bp(rate));
+            prop_assert_eq!(i128::from(got), expected);
+            prop_assert!((0..=captured).contains(&got), "fee {got} on {captured}");
         }
     }
 }
