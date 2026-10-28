@@ -163,6 +163,11 @@ Append-only rows (I2):
   commit-time check's own codes (`LG002`, `LG003`) prove a rollback; any
   other `COMMIT` error leaves the outcome unknown, to be settled as ADR-0005
   describes.
+- 2026-10-28: the payment tables of ADR-0017 use the same guards: the
+  `reject_change()` trigger (`LG001`), `ENABLE ALWAYS` triggers with a
+  pinned `search_path`, and a runtime role without `UPDATE`, `DELETE` or
+  `TRUNCATE`. Their commit-time checks follow this ADR's pattern, with codes
+  of their own (ADR-0013).
 
 ## References
 

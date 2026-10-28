@@ -85,6 +85,15 @@ Two facts about sqlx 0.9 (rev `f1e94ec`) bear on the same question:
 - Nothing bounds how long a client takes to notice a lost `COMMIT`: sqlx sets
   no TCP keepalive or read timeout on its sockets. That is left to phase 8.
 
+## Amendments
+
+- 2026-10-28: "the ledger's deferred checks" means every deferred check in
+  the registry of ADR-0013, now `LG002` to `LG006`, the last three added
+  for payments (ADR-0017). Each is raised by a constraint trigger that
+  `CommitTransaction()` fires before it writes the commit record, so each
+  proves a rollback, and the one function through which every `COMMIT` goes
+  lists all five.
+
 ## References
 
 - PostgreSQL 18 manual, [Message Flow](https://www.postgresql.org/docs/18/protocol-flow.html) (`CommandComplete`, `ReadyForQuery`, canceling requests in progress).
