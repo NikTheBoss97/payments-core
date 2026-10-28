@@ -71,6 +71,15 @@ cardinality.
 - After a lost `COMMIT`, the comparison described in ADR-0005 belongs to
   whoever owns the unit of work; in phase 2 it includes the link row.
 
+## Amendments
+
+- 2026-10-28: ADR-0021 answers the three questions left to phase 2. A
+  posting without a cause is refused on the payment side (`LG004`,
+  `LG006`) and detected on the ledger side by a query. A capture or refund
+  posting has exactly one cause, and a phase-6 batch posting one per entry.
+  No reason code is added. The link row of the last consequence is the
+  capture or refund record (ADR-0019).
+
 ## References
 
 - Bill Karwin, [SQL Antipatterns, Volume 1: Avoiding the Pitfalls of Database Programming](https://pragprog.com/titles/bksap1/sql-antipatterns-volume-1/) (Pragmatic Bookshelf, 2022), chapter "Polymorphic Associations".
