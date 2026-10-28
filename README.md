@@ -76,7 +76,7 @@ that the committed sqlx query cache matches the queries.
 ## Further reading
 
 Eight first reads. The [full reading list](docs/reading/README.md) groups
-68 references by topic, and ★ marks the best first reads in each.
+107 references by topic, and ★ marks the best first reads in each.
 
 - ★ Martin Kleppmann, [Accounting for Computer Scientists](https://martin.kleppmann.com/2011/03/07/accounting-for-computer-scientists.html) (2011). Double-entry bookkeeping as a graph: accounts are nodes, transactions are edges, and all balances sum to zero.
 - ★ Pat Helland, [Immutability Changes Everything](https://www.cidrdb.org/cidr2015/Papers/CIDR15_Paper16.pdf) (CIDR 2015). "The truth is the log": a bank balance is a fact derived from immutable records.
