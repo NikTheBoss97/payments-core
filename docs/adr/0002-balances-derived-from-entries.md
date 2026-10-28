@@ -2,7 +2,7 @@
 
 # ADR-0002: Balances are derived from ledger entries
 
-- Status: accepted
+- Status: accepted; partly superseded by ADR-0018
 - Date: 2026-10-14
 
 ## Context
@@ -137,6 +137,12 @@ Option A: no balance is stored anywhere.
   once and never updated, the constraints fix it from the row before it,
   and only that payment's commands, which run one at a time, write it. No
   account balance is stored, so the decision is unchanged.
+- 2026-10-28: ADR-0018 supersedes "which coordinates by locking the payment
+  row". The payment layer takes a transaction-level advisory lock on the
+  payment's key instead, the first mechanism listed under Consequences,
+  because the runtime role has no `UPDATE` privilege and so can lock no
+  row. The rest of that bullet stands: only the payment's own commands wait
+  on the lock.
 
 ## References
 
