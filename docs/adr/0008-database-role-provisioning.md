@@ -70,6 +70,12 @@ superuser.
   outlasts the 30-second idle timeout (ADR-0005). An existing local volume
   picks it up after `docker compose down -v`, as for any change to the
   script.
+- 2026-10-28: `roles.sql` also sets `idle_session_timeout = '30min'` on the
+  runtime role, so that a session-level advisory lock leaked by hand-written
+  SQL ends with its session (ADR-0018). The limit sits above the longest
+  time sqlx's pool keeps a connection idle, and a catalog test pins it with
+  the other two settings. An existing local volume picks it up after
+  `docker compose down -v`.
 
 ## References
 
