@@ -301,6 +301,21 @@ pub fn allocate<const N: usize>(
     Ok(shares.map(|share| i64::try_from(share).expect("a share is at most the total")))
 }
 
+/// The platform's fee on a captured amount, at a rate fixed on the payment
+/// (ADR-0020): the first share when [`allocate`] splits the amount between
+/// the rate and the rest of the whole. It rounds half up, an exact half
+/// going to the platform, and lies between 0 and the captured amount.
+pub fn fee(captured: PositiveAmount, rate: BasisPoints) -> i64 {
+    let rest = BasisPoints::WHOLE
+        .get()
+        .checked_sub(rate.get())
+        .expect("a rate is at most the whole");
+    let rest = BasisPoints::new(rest).expect("the rest of a rate is a rate");
+    let [fee, _merchant] =
+        allocate(captured, [rate, rest]).expect("a rate and its rest make the whole");
+    fee
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -550,6 +565,37 @@ mod tests {
         );
     }
 
+    #[test]
+    fn fee_rounds_half_up_to_the_platform() {
+        // (captured, rate, fee), worked out by hand.
+        for (captured, rate, expected) in [
+            // The design lab's example: 2.5% of 80.00 is 2.00.
+            (8000, 250, 200),
+            // 2.9% of 10.50 is 30.45 cents, rounded down.
+            (1050, 290, 30),
+            // Around an exact half: 0.49, 0.5 and 0.51 of a cent at 1%, and
+            // 1.5 cents. An exact half goes to the platform.
+            (49, 100, 0),
+            (50, 100, 1),
+            (51, 100, 1),
+            (150, 100, 2),
+            // One unit at just under, exactly and just over 50%.
+            (1, 4999, 0),
+            (1, 5000, 1),
+            (1, 5001, 1),
+            // Both ends of the rate, and the cap.
+            (7, 0, 0),
+            (7, 10_000, 7),
+            (CAP, 0, 0),
+            (CAP, 1, 100_000_000_000),
+            (CAP, 9999, 999_900_000_000_000),
+            (CAP, 10_000, CAP),
+        ] {
+            let got = fee(positive(captured), bp(rate));
+            assert_eq!(got, expected, "{captured} at {rate} basis points");
+        }
+    }
+
     /// Rates that make the whole: the gaps between the sorted `cuts`, which
     /// lie in 0..=10,000, so there is one more rate than there are cuts.
     fn rates_from_cuts<const N: usize>(mut cuts: Vec<u16>) -> [BasisPoints; N] {
@@ -695,6 +741,20 @@ mod tests {
         ) {
             // Small totals leave several units over, so their order counts.
             check_allocation::<5>(total, rates_from_cuts(cuts))?;
+        }
+
+        #[test]
+        fn fee_matches_the_half_up_formula(captured in positive_amounts(), rate in 0_u16..=10_000) {
+            // ADR-0020's closed form, (C * r + 5000) div 10000 in i128,
+            // against the fee taken through the allocation function.
+            let expected = i128::from(captured)
+                .checked_mul(i128::from(rate))
+                .and_then(|scaled| scaled.checked_add(5000))
+                .and_then(|scaled| scaled.checked_div(10_000))
+                .expect("fits in i128");
+            let got = fee(positive(captured), bp(rate));
+            prop_assert_eq!(i128::from(got), expected);
+            prop_assert!((0..=captured).contains(&got), "fee {got} on {captured}");
         }
     }
 }
