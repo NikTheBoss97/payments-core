@@ -77,6 +77,16 @@ never their real recording time.
 - When a later phase needs commit order, it uses PostgreSQL's transaction
   IDs (ADR-0005), not timestamps.
 
+## Amendments
+
+- 2026-10-28: phase 2 meets the condition for deferring effective time as
+  ADR-0022 decides. The capture and refund records hold their business
+  times, `captured_at` and `refunded_at`, and the authorization holds the
+  PSP's `expires_at`. The crate is `chrono`. Records that commit with their
+  step carry no `recorded_at`, because the step's is the same instant;
+  `merchants`, `payments` and the history carry one, as this ADR's "later
+  tables that record facts".
+
 ## References
 
 - Krishna Kulkarni and Jan-Eike Michels, [Temporal features in SQL:2011](https://sigmodrecord.org/publications/sigmodRecord/1209/pdfs/07.industry.kulkarni.pdf) (SIGMOD Record, 2012).
