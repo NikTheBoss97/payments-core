@@ -2,7 +2,7 @@
 
 # ADR-0009: Account identity and the normal side
 
-- Status: accepted
+- Status: accepted; partly superseded by ADR-0020
 - Date: 2026-10-17
 
 ## Context
@@ -119,6 +119,12 @@ Normal side:
   merchant whose ID begins with a letter would have a second accepted
   spelling, so "exactly one spelling" needs both rules. The decision is
   unchanged.
+- 2026-10-28: `account_kinds` landed with three kinds (ADR-0020), and
+  `23503` on its key, `accounts_kind_normal_side_fkey`, is classified as a
+  bug. ADR-0020 supersedes "then becomes the only producer of keys":
+  `AccountRef` builds every key that the library uses, and `AccountKey`
+  stays public, so that ledger-level tests can open accounts of kinds they
+  seed.
 
 ## References
 
