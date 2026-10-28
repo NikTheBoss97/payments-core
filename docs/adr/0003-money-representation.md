@@ -178,6 +178,10 @@ Rounding:
 - 2026-10-16: the Rust bullet records that the `money` module forbids
   clippy's `arithmetic_side_effects` lint, and why the workspace does not
   deny it. The decision is unchanged.
+- 2026-10-28: the fee's rounding rule, chosen with the payment flows, is
+  half up, with an exact half going to the platform: the allocation
+  function with the fee's share listed first (ADR-0020). Fee rates run from
+  0 to 10,000 basis points.
 
 ## References
 
