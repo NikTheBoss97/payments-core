@@ -36,7 +36,8 @@ enforcement mechanism and a test that tries to break it.
 | Concurrent requests on the same payment or account   | Clock agreement between services             |
 | Webhooks duplicated, delayed, reordered, or forged   | A PSP that sends a validly signed but false event |
 | PSP timeouts with unknown outcome                    |                                              |
-| Application bugs and manual SQL run as the runtime role, including code that bypasses the domain layer | A superuser or the migration role (the tables' owner) deliberately disabling the ledger's triggers or foreign-key checks |
+| Application bugs and manual SQL run as the runtime role, including code that bypasses the domain layer or skips a payment's lock | A superuser or the migration role (the tables' owner) deliberately disabling the ledger's triggers or foreign-key checks |
+| A session that stalls while holding a lock, or leaks a session-level advisory lock ([ADR-0018](adr/0018-serializing-a-payments-commands.md)) |                                              |
 | Lost `COMMIT` acknowledgements (the service cannot tell whether PostgreSQL committed) |              |
 | A `COMMIT` answered with an error after it committed, when a cancel or terminate signal arrives during the commit ([ADR-0014](adr/0014-what-a-failed-commit-proves.md)) |              |
 
@@ -46,17 +47,17 @@ enforcement mechanism and a test that tries to break it.
 |----|-----------|-------------|-----------|
 | I1 | Every ledger transaction's entries sum to zero per currency, so the whole ledger sums to zero in each currency. | Domain type that cannot be built unbalanced, plus a commit-time check of each sealed ledger transaction in PostgreSQL ([ADR-0004](adr/0004-enforcing-ledger-invariants.md)); a foreign key that makes every entry repeat its ledger transaction's currency ([ADR-0010](adr/0010-currency-on-the-ledger-header.md)); `NOT NULL` ledger columns, so no entry escapes those checks ([ADR-0003](adr/0003-money-representation.md)). | Unit and property tests of the domain type; database tests, as the runtime role, that write unbalanced, incomplete, mixed-currency or appended ledger transactions with raw SQL; posting tests in which a trigger corrupts a write that the types allowed, so that only the commit-time check can reject it; a catalog test that pins every ledger column's type and `NOT NULL`; a single-statement trial balance (every currency sums to zero across the ledger). |
 | I2 | Ledger entries are append-only. Corrections are new, reversing transactions. | A trigger rejecting `UPDATE`, `DELETE` and `TRUNCATE`, and a runtime role without those privileges ([ADR-0004](adr/0004-enforcing-ledger-invariants.md)). | Database tests that attempt `UPDATE`, `DELETE` and `TRUNCATE` as the runtime role (expecting a permission error) and as the owner role (expecting the trigger's error), so each guard is tested on its own; catalog tests that pin the runtime role's privileges and grant options, check that it can neither create objects in `public` nor act through another role, and pin every guard trigger, its `ENABLE ALWAYS` and its function's `search_path`. |
-| I3 | No balance is read from a mutable column that can drift from the entries. Balances are derived from entries. | No balance is stored anywhere ([ADR-0002](adr/0002-balances-derived-from-entries.md)). | Holds by construction. Tests check derived balances against an independent in-memory model under concurrent writes. |
+| I3 | No balance is read from a mutable column that can drift from the entries. Balances are derived from entries. | No account balance is stored anywhere ([ADR-0002](adr/0002-balances-derived-from-entries.md)). A payment's refundable amount, kept on each row of its history, is written once and fixed by constraints from the row before it ([ADR-0017](adr/0017-payments-and-their-history.md)). | Holds by construction. Tests check derived balances against an independent in-memory model under concurrent writes. |
 | I4 | One idempotency key produces at most one effect. | *Phase 3* | Concurrent-retry tests. |
-| I5 | A payment never makes an invalid state transition. | *Phase 2* | Exhaustive transition-table tests and property tests. |
-| I6 | A payment state change, its ledger entries, and its outbound event commit atomically. | *Phases 2 and 5*: single database transaction plus transactional outbox. | Crash-injection tests. |
+| I5 | A payment never makes an invalid state transition. | An exhaustive transition function whose result is the only input the step writer accepts ([ADR-0016](adr/0016-payment-lifecycle.md)); in PostgreSQL, an append-only history whose edge check, predecessor foreign key and primary key let only a legal step follow the current state, for any SQL the runtime role runs ([ADR-0017](adr/0017-payments-and-their-history.md)); one command at a time per payment, under a transaction-level advisory lock ([ADR-0018](adr/0018-serializing-a-payments-commands.md)). *Phase 2, in progress.* | Table tests of all 63 (status, event) pairs in Rust, and of every (from, kind, to) triple against the database as the runtime role; property tests of command sequences against a model; race tests of concurrent commands on one payment. |
+| I6 | A payment state change, its ledger entries, and its outbound event commit atomically. | A payment's step, its posting and its record commit in one database transaction, through the one function that applies the rule of [ADR-0014](adr/0014-what-a-failed-commit-proves.md) ([ADR-0019](adr/0019-payment-commands-retries-and-errors.md)); deferred checks refuse a capture or refund without its record, or with a posting that is not exactly its lines written in the same transaction ([ADR-0021](adr/0021-what-causes-a-posting.md)). *Phase 2, in progress; the outbox follows in phase 5.* | Crash-injection tests that kill the backend around each statement; tests that prove each deferred check rolls its transaction back. |
 
 ## Components
 
 | Component        | Phase | Status  |
 |------------------|-------|---------|
 | Ledger           | 1     | done    |
-| Payment lifecycle | 2    | planned |
+| Payment lifecycle | 2    | in progress |
 | Idempotency      | 3     | planned |
 | Mock PSP and webhooks | 4 | planned |
 | Outbox           | 5     | planned |

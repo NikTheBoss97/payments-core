@@ -16,7 +16,7 @@ invariants, and [`docs/adr/`](docs/adr/) for the decisions behind them.
 | Phase | Scope | Status |
 |-------|-------|--------|
 | 1 | Double-entry ledger | done |
-| 2 | Payment lifecycle state machine | — |
+| 2 | Payment lifecycle state machine | in progress |
 | 3 | Idempotency keys | — |
 | 4 | Mock PSP, signed webhooks | — |
 | 5 | Transactional outbox | — |
@@ -57,8 +57,8 @@ guard, and the failures they reproduce.
 | I2 | The ledger's tables are append-only. | Guaranteed since phase 1 | [Ledger](docs/correctness/ledger.md) |
 | I3 | Balances are derived from the entries: none is stored. | Guaranteed since phase 1 | [Ledger](docs/correctness/ledger.md) |
 | I4 | One idempotency key produces at most one effect. | Phase 3 | |
-| I5 | A payment never makes an invalid state transition. | Phase 2 | |
-| I6 | A payment's state change, its ledger entries and its outbound event commit atomically. | Phases 2 and 5 | |
+| I5 | A payment never makes an invalid state transition. | Phase 2, in progress: designed in [ADR-0016](docs/adr/0016-payment-lifecycle.md) to [ADR-0018](docs/adr/0018-serializing-a-payments-commands.md) | |
+| I6 | A payment's state change, its ledger entries and its outbound event commit atomically. | Phase 2 in progress ([ADR-0019](docs/adr/0019-payment-commands-retries-and-errors.md), [ADR-0021](docs/adr/0021-what-causes-a-posting.md)); the outbox in phase 5 | |
 
 ### Running the tests
 
