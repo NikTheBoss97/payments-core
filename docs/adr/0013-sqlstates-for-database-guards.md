@@ -79,6 +79,16 @@ constraints use one code per kind of constraint, such as `23514` for every
   signal held during the commit can arrive as `57014` or `57P01` after the
   transaction committed. Any other `COMMIT` error leaves the outcome
   unknown.
+- 2026-10-28: the registry gains three codes for the payment tables
+  (ADR-0017), each raised by a deferred check at `COMMIT`:
+  - `LG004`: a payment step of kind `authorize`, `capture` or `refund`
+    without its record;
+  - `LG005`: a payment without its genesis step;
+  - `LG006`: a capture or refund record whose posting is not exactly the
+    record's lines, or was not written by the same database transaction.
+
+  The checks are separate triggers, so when several rules fail at once, the
+  first trigger to run is the one reported; tests break one rule at a time.
 
 ## References
 
