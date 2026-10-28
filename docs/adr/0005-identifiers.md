@@ -125,6 +125,13 @@ what happened.
   test pins the role's settings. They are defaults, which the role can
   change for itself, so a wrong value can only delay the answer, never
   make it wrong.
+- 2026-10-28: phase 2 adds three ID types, `PaymentId`, `MerchantId` and
+  `TransitionId`, each created by the caller with its own `now_v7()`, so
+  the only calls to `Uuid::now_v7` in the library are now five
+  constructors. `TransitionId`, like `TransactionId`, is neither `Copy` nor
+  `Clone`, so one ID cannot quietly serve two commands (ADR-0019).
+  `PaymentId` and `MerchantId` are `Copy`: they name things that already
+  exist, and every command on a payment repeats them.
 
 ## References
 
