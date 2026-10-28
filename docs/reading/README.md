@@ -16,7 +16,7 @@ publication: its title, authors, year and link.
 | [Schema design and database errors](schema-and-errors.md) | Constraints, privileges and operator resolution in PostgreSQL, NULLs and keys, and error codes that programs can act on. | 13 |
 | [Transactions and concurrency](transactions-and-concurrency.md) | Isolation levels, locking, coordination and what a database transaction guarantees. | 11 |
 | [Idempotency and messaging](idempotency-and-messaging.md) | Idempotency keys, retries, transactional messaging and webhooks. | 12 |
-| [Payments lifecycle](payments-lifecycle.md) | Payment statuses and state machines, authorization and settlement, compensation and reconciliation. | 9 |
+| [Payments lifecycle](payments-lifecycle.md) | Payment statuses and state machines, authorization and settlement, compensation and reconciliation. | 11 |
 | [Testing for correctness](testing.md) | Property-based testing, mutation testing, failure injection and testing database guarantees. | 10 |
 | [Modelling the domain in Rust](rust.md) | Types that carry their invariants, and making illegal states unrepresentable. | 7 |
 | [Benchmarking](benchmarking.md) | Measuring latency and throughput without fooling yourself. | 8 |
