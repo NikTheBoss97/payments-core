@@ -34,6 +34,8 @@ pub enum MoneyError {
     NotPositive(i64),
     /// Not exactly three uppercase ASCII letters.
     InvalidCurrency(String),
+    /// A rate above 10,000 basis points (100%).
+    RateOutOfRange(u16),
 }
 
 impl fmt::Display for MoneyError {
@@ -46,6 +48,10 @@ impl fmt::Display for MoneyError {
             Self::NotPositive(minor) => write!(f, "amount {minor} must be positive"),
             Self::InvalidCurrency(code) => {
                 write!(f, "currency {code:?} must be three uppercase ASCII letters")
+            }
+            Self::RateOutOfRange(bps) => {
+                let whole = BasisPoints::WHOLE.get();
+                write!(f, "rate {bps} is beyond {whole} basis points")
             }
         }
     }
@@ -202,6 +208,35 @@ pub fn total(amounts: impl IntoIterator<Item = Amount>) -> i128 {
         sum.checked_add(i128::from(amount.get()))
             .expect("an i128 holds more than 10^23 amounts at the cap")
     })
+}
+
+/// A rate in basis points, hundredths of a percent: 2.9% is 290. It runs
+/// from 0 to [`WHOLE`](Self::WHOLE), 100%, so a fee can never exceed the
+/// amount it is taken from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BasisPoints(u16);
+
+impl BasisPoints {
+    /// The whole: 10,000 basis points, 100%.
+    pub const WHOLE: Self = Self(10_000);
+
+    /// Checks that `bps` is at most 10,000.
+    ///
+    /// # Errors
+    ///
+    /// [`MoneyError::RateOutOfRange`] above 10,000.
+    pub fn new(bps: u16) -> Result<Self, MoneyError> {
+        if bps > Self::WHOLE.0 {
+            Err(MoneyError::RateOutOfRange(bps))
+        } else {
+            Ok(Self(bps))
+        }
+    }
+
+    /// The rate in basis points.
+    pub fn get(self) -> u16 {
+        self.0
+    }
 }
 
 #[cfg(test)]
@@ -369,6 +404,10 @@ mod tests {
                 MoneyError::InvalidCurrency(" EU\n".into()),
                 r#"currency " EU\n" must be three uppercase ASCII letters"#,
             ),
+            (
+                MoneyError::RateOutOfRange(10_001),
+                "rate 10001 is beyond 10000 basis points",
+            ),
         ] {
             assert_eq!(error.to_string(), text);
         }
@@ -377,6 +416,21 @@ mod tests {
     #[test]
     fn total_of_nothing_is_zero() {
         assert_eq!(total([]), 0);
+    }
+
+    #[test]
+    fn basis_points_run_from_0_to_10000() {
+        // A u16 has only 65,536 values, so check every one. The bound is
+        // written out rather than taken from the code under test.
+        for value in 0..=u16::MAX {
+            let expected = if value <= 10_000 {
+                Ok(value)
+            } else {
+                Err(MoneyError::RateOutOfRange(value))
+            };
+            assert_eq!(BasisPoints::new(value).map(BasisPoints::get), expected);
+        }
+        assert_eq!(BasisPoints::WHOLE.get(), 10_000);
     }
 
     /// Any i64, half of the time drawn uniformly from -BEYOND to BEYOND,
