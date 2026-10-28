@@ -132,6 +132,11 @@ Option A: no balance is stored anywhere.
   cast's error, `22003`, is reported as an overflow, a bug: reaching it
   takes more than 9,223 entries at the cap on one side of one account
   (ADR-0003).
+- 2026-10-28: a payment's refundable amount, stored on each row of its
+  history (ADR-0017), is not a balance in this ADR's sense. It is written
+  once and never updated, the constraints fix it from the row before it,
+  and only that payment's commands, which run one at a time, write it. No
+  account balance is stored, so the decision is unchanged.
 
 ## References
 
