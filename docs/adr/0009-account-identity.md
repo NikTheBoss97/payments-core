@@ -125,6 +125,14 @@ Normal side:
   `AccountRef` builds every key that the library uses, and `AccountKey`
   stays public, so that ledger-level tests can open accounts of kinds they
   seed.
+- 2026-11-02: `ON CONFLICT` covers only the key it names, and a retry racing its
+  first attempt sends the same candidate. When both pass the check of the key
+  before either writes, the second fails on the primary key once the first has
+  committed: eight concurrent copies of one payment's creation hit this in about
+  one run in ten. Opening an account now reads `23505` on `accounts_pkey` through
+  the key. If the key has an account, the opening has converged on it, as it does
+  when the key was there first, and otherwise another account has the candidate,
+  which stays a bug. The decision is unchanged.
 
 ## References
 

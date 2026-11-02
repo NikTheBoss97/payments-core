@@ -312,7 +312,7 @@ pub async fn open_account(
     // Two statements, not one: a single statement reads one snapshot, so a
     // CTE that inserts and selects returns no row when it loses a race to
     // another session (ADR-0009).
-    sqlx::query!(
+    let inserted = sqlx::query!(
         "INSERT INTO accounts (id, kind, party, currency, normal_side) \
          VALUES ($1, $2, $3, $4, $5) \
          ON CONFLICT (kind, party, currency) DO NOTHING",
@@ -323,24 +323,44 @@ pub async fn open_account(
         side.as_str()
     )
     .execute(pool)
-    .await
-    .map_err(|source| {
+    .await;
+    if let Err(source) = inserted {
         let (code, constraint) = code_and_constraint(&source);
         match classify_open(code.as_deref(), constraint) {
-            OpenFailure::UnknownCurrency => AccountError::UnknownCurrency {
-                currency: key.currency,
-                source,
-            },
-            OpenFailure::Invariant => AccountError::Invariant {
-                key: key.clone(),
-                source,
-            },
-            OpenFailure::Database => AccountError::Database {
-                key: key.clone(),
-                source,
-            },
+            OpenFailure::UnknownCurrency => {
+                return Err(AccountError::UnknownCurrency {
+                    currency: key.currency,
+                    source,
+                });
+            }
+            OpenFailure::Invariant => {
+                return Err(AccountError::Invariant {
+                    key: key.clone(),
+                    source,
+                });
+            }
+            OpenFailure::Database => {
+                return Err(AccountError::Database {
+                    key: key.clone(),
+                    source,
+                });
+            }
+            // ON CONFLICT covers only the key it names. A retry racing its first
+            // attempt sends the same candidate, and when both pass the check of
+            // the key before either writes, the second fails here, once the
+            // first has committed. The key says which case this is: with an
+            // account it has converged, as if it had been there first, and with
+            // none another account has the candidate, a bug.
+            OpenFailure::CandidateTaken => {
+                if find_account(pool, key).await?.is_none() {
+                    return Err(AccountError::Invariant {
+                        key: key.clone(),
+                        source,
+                    });
+                }
+            }
         }
-    })?;
+    }
     // The insert either stored the account or met a committed one with the
     // same key (ON CONFLICT waits for a concurrent insert to end), and
     // accounts are append-only, so the row is there.
@@ -390,6 +410,8 @@ pub async fn find_account(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum OpenFailure {
     UnknownCurrency,
+    /// An account has the candidate's ID, which may be this same opening.
+    CandidateTaken,
     Invariant,
     Database,
 }
@@ -401,6 +423,7 @@ enum OpenFailure {
 fn classify_open(code: Option<&str>, constraint: Option<&str>) -> OpenFailure {
     match (code, constraint) {
         (Some("23503"), Some("accounts_currency_fkey")) => OpenFailure::UnknownCurrency,
+        (Some("23505"), Some("accounts_pkey")) => OpenFailure::CandidateTaken,
         (Some(code), _) if code.starts_with("23") || code.starts_with("LG") => {
             OpenFailure::Invariant
         }
@@ -537,7 +560,7 @@ mod tests {
 
     #[test]
     fn a_failed_insert_is_classified_by_its_code_and_constraint() {
-        use OpenFailure::{Database, Invariant, UnknownCurrency};
+        use OpenFailure::{CandidateTaken, Database, Invariant, UnknownCurrency};
         for (code, constraint, expected) in [
             (
                 Some("23503"),
@@ -551,7 +574,9 @@ mod tests {
                 Invariant,
             ),
             (Some("23503"), Some("another_fkey"), Invariant),
-            (Some("23505"), Some("accounts_pkey"), Invariant),
+            // The key decides which of two cases this is (ADR-0009).
+            (Some("23505"), Some("accounts_pkey"), CandidateTaken),
+            (Some("23505"), Some("another_key"), Invariant),
             (Some("23514"), Some("accounts_kind_check"), Invariant),
             (Some("23514"), Some("currency_code_check"), Invariant),
             (Some("LG001"), Some("accounts_append_only"), Invariant),
