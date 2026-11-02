@@ -4,6 +4,8 @@
 //! copy of the rules (ADR-0017) and the commands that use them (ADR-0019) live
 //! elsewhere.
 
+use std::fmt;
+
 /// A label that the database should never hold.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum InvalidLabel {
@@ -151,6 +153,132 @@ impl StepKind {
     }
 }
 
+impl fmt::Display for PaymentStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.pad(self.as_str())
+    }
+}
+
+/// An event that a payment's status does not allow.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("a payment that is {status} cannot take the event {event:?}")]
+pub struct IllegalTransition {
+    pub status: PaymentStatus,
+    pub event: Event,
+}
+
+/// A legal step of a payment's history. Its fields are private, so only
+/// [`next`] and [`Transition::genesis`] can make one, and the only function
+/// that writes a step takes one: every step written comes from the table
+/// (ADR-0016).
+///
+/// ```
+/// use payments_core::lifecycle::{Event, PaymentStatus, StepKind, next};
+///
+/// let step = next(PaymentStatus::Authorized, Event::Capture).expect("a legal move");
+/// assert_eq!(step.kind(), StepKind::Capture);
+/// assert_eq!(step.to(), PaymentStatus::Captured);
+/// ```
+///
+/// ```compile_fail
+/// use payments_core::lifecycle::{PaymentStatus, StepKind, Transition};
+///
+/// let forged = Transition { // private fields
+///     from: PaymentStatus::Created,
+///     kind: StepKind::Capture,
+///     to: PaymentStatus::Captured,
+/// };
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Transition {
+    from: PaymentStatus,
+    kind: StepKind,
+    to: PaymentStatus,
+}
+
+impl Transition {
+    /// A new payment's first step, the one move that [`next`] cannot make,
+    /// because no status comes before it.
+    #[must_use]
+    pub fn genesis() -> Self {
+        Self {
+            from: PaymentStatus::Created,
+            kind: StepKind::Create,
+            to: PaymentStatus::Created,
+        }
+    }
+
+    /// The status the step starts from.
+    pub fn from(self) -> PaymentStatus {
+        self.from
+    }
+
+    /// What the step records.
+    pub fn kind(self) -> StepKind {
+        self.kind
+    }
+
+    /// The status the step moves the payment to.
+    pub fn to(self) -> PaymentStatus {
+        self.to
+    }
+}
+
+/// The table of moves (ADR-0016): where a payment in `status` goes when `event`
+/// happens. The match has no catch-all arm, so a new status or event fails to
+/// compile (error E0004) until every pair it creates is decided.
+///
+/// # Errors
+///
+/// [`IllegalTransition`] when the status does not allow the event.
+pub fn next(status: PaymentStatus, event: Event) -> Result<Transition, IllegalTransition> {
+    use Event as E;
+    use PaymentStatus as S;
+    use StepKind as K;
+    let (kind, to) = match (status, event) {
+        (S::Created, E::Authorize) => (K::Authorize, S::Authorized),
+        (S::Created, E::Decline) => (K::Decline, S::Failed),
+        (S::Created, E::Cancel) => (K::Cancel, S::Voided),
+        (S::Authorized, E::Capture) => (K::Capture, S::Captured),
+        (S::Authorized, E::Void) => (K::Void, S::Voided),
+        (S::Authorized, E::Expire) => (K::Expire, S::Voided),
+        (S::Captured, E::Settle) => (K::Settle, S::Settled),
+        (S::Captured, E::PartialRefund) => (K::Refund, S::Captured),
+        (S::Settled, E::PartialRefund) => (K::Refund, S::Settled),
+        (S::Captured | S::Settled, E::FinalRefund) => (K::Refund, S::Refunded),
+        (
+            S::Created,
+            E::Capture | E::Void | E::Expire | E::Settle | E::PartialRefund | E::FinalRefund,
+        )
+        | (
+            S::Authorized,
+            E::Authorize | E::Decline | E::Cancel | E::Settle | E::PartialRefund | E::FinalRefund,
+        )
+        | (S::Captured, E::Authorize | E::Decline | E::Cancel | E::Capture | E::Void | E::Expire)
+        | (
+            S::Settled,
+            E::Authorize | E::Decline | E::Cancel | E::Capture | E::Void | E::Expire | E::Settle,
+        )
+        | (
+            S::Failed | S::Voided | S::Refunded,
+            E::Authorize
+            | E::Decline
+            | E::Cancel
+            | E::Capture
+            | E::Void
+            | E::Expire
+            | E::Settle
+            | E::PartialRefund
+            | E::FinalRefund,
+        ) => return Err(IllegalTransition { status, event }),
+    };
+    Ok(Transition {
+        from: status,
+        kind,
+        to,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -247,5 +375,90 @@ mod tests {
         ] {
             assert_eq!(error.to_string(), text);
         }
+        let illegal = IllegalTransition {
+            status: PaymentStatus::Refunded,
+            event: Event::PartialRefund,
+        };
+        assert_eq!(
+            illegal.to_string(),
+            "a payment that is refunded cannot take the event PartialRefund"
+        );
+    }
+
+    /// ADR-0016's moves, written out independently of `next`: from, event,
+    /// step kind, to. Frozen: later phases add moves and never change these,
+    /// so a new move joins the table test through a list of its own.
+    const PHASE_2_EDGES: [(PaymentStatus, Event, StepKind, PaymentStatus); 11] = {
+        use Event as E;
+        use PaymentStatus as S;
+        use StepKind as K;
+        [
+            (S::Created, E::Authorize, K::Authorize, S::Authorized),
+            (S::Created, E::Decline, K::Decline, S::Failed),
+            (S::Created, E::Cancel, K::Cancel, S::Voided),
+            (S::Authorized, E::Capture, K::Capture, S::Captured),
+            (S::Authorized, E::Void, K::Void, S::Voided),
+            (S::Authorized, E::Expire, K::Expire, S::Voided),
+            (S::Captured, E::Settle, K::Settle, S::Settled),
+            (S::Captured, E::PartialRefund, K::Refund, S::Captured),
+            (S::Captured, E::FinalRefund, K::Refund, S::Refunded),
+            (S::Settled, E::PartialRefund, K::Refund, S::Settled),
+            (S::Settled, E::FinalRefund, K::Refund, S::Refunded),
+        ]
+    };
+
+    #[test]
+    fn every_pair_of_status_and_event_follows_the_table() {
+        let mut pairs = 0;
+        for &status in PaymentStatus::ALL {
+            for &event in Event::ALL {
+                pairs += 1;
+                let edge = PHASE_2_EDGES
+                    .iter()
+                    .find(|edge| (edge.0, edge.1) == (status, event));
+                match (next(status, event), edge) {
+                    (Ok(step), Some(&(from, _, kind, to))) => {
+                        assert_eq!((step.from(), step.kind(), step.to()), (from, kind, to));
+                    }
+                    (Err(illegal), None) => {
+                        assert_eq!(illegal, IllegalTransition { status, event });
+                    }
+                    (got, want) => panic!("{status:?}, {event:?}: {got:?}, expected {want:?}"),
+                }
+            }
+        }
+        assert_eq!(pairs, 63);
+    }
+
+    #[test]
+    fn the_phase_2_edges_stay_legal() {
+        for (from, event, kind, to) in PHASE_2_EDGES {
+            let step = next(from, event).expect("a phase-2 edge stays legal");
+            assert_eq!((step.from(), step.kind(), step.to()), (from, kind, to));
+        }
+    }
+
+    #[test]
+    fn a_final_status_takes_no_event() {
+        for status in [
+            PaymentStatus::Failed,
+            PaymentStatus::Voided,
+            PaymentStatus::Refunded,
+        ] {
+            for &event in Event::ALL {
+                assert_eq!(
+                    next(status, event),
+                    Err(IllegalTransition { status, event })
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_payment_starts_created() {
+        let first = Transition::genesis();
+        assert_eq!(first.kind(), StepKind::Create);
+        assert_eq!(first.from(), PaymentStatus::Created);
+        assert_eq!(first.to(), PaymentStatus::Created);
     }
 }
