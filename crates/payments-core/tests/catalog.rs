@@ -1,7 +1,7 @@
 // Author: Nicola Antonello
 
 //! Catalog tests: what the behavioural tests cannot see (ADR-0003,
-//! ADR-0004, ADR-0005, ADR-0012).
+//! ADR-0004, ADR-0005, ADR-0012, ADR-0017).
 //!
 //! `#[sqlx::test]` connects as a superuser, which skips privilege checks, so
 //! only the tests that switch to the runtime role, `payments_app`, meet
@@ -10,7 +10,7 @@
 //! privileges, its grant options and its session defaults, check that it can
 //! neither create objects in the public schema nor act through another role,
 //! pin each guard trigger and the function it runs, and pin the type and
-//! nullability of every column.
+//! nullability of every column and the name of every constraint.
 
 use sqlx::{Connection, PgConnection, PgPool};
 
@@ -510,6 +510,101 @@ async fn every_column_has_its_type_and_is_not_null(pool: PgPool) -> sqlx::Result
             "payments.merchant_id uuid not null",
             "payments.psp text not null",
             "payments.recorded_at timestamp with time zone not null",
+        ]
+    );
+    Ok(())
+}
+
+#[sqlx::test]
+async fn every_constraint_keeps_its_name(pool: PgPool) -> sqlx::Result<()> {
+    // A test that breaks a rule asserts its constraint's name, but only for the
+    // rules it breaks, so a migration that drops another would pass them all
+    // (ADR-0017). A NOT NULL has a row here too, and the test above pins those.
+    // The sqlx bookkeeping table's key is left out.
+    let mut constraints = sqlx::query_scalar!(
+        r#"
+        SELECT conname::text AS "constraint!"
+          FROM pg_constraint
+         WHERE connamespace = 'public'::regnamespace
+           AND contype <> 'n'
+           AND conname <> '_sqlx_migrations_pkey'
+        "#
+    )
+    .fetch_all(&pool)
+    .await?;
+    constraints.sort();
+
+    assert_eq!(
+        constraints,
+        [
+            "account_kinds_kind_check",
+            "account_kinds_kind_normal_side_key",
+            "account_kinds_normal_side_check",
+            "account_kinds_pkey",
+            "accounts_currency_fkey",
+            "accounts_id_check",
+            "accounts_id_currency_key",
+            "accounts_kind_check",
+            "accounts_kind_normal_side_fkey",
+            "accounts_kind_party_currency_key",
+            "accounts_normal_side_check",
+            "accounts_party_check",
+            "accounts_pkey",
+            "currencies_decimals_check",
+            "currencies_pkey",
+            "currency_code_check",
+            "ledger_entries_account_fkey",
+            "ledger_entries_amount_check",
+            "ledger_entries_header_fkey",
+            "ledger_entries_line_no_check",
+            "ledger_entries_pkey",
+            "ledger_transactions_commit_check",
+            "ledger_transactions_entry_count_check",
+            "ledger_transactions_id_check",
+            "ledger_transactions_id_entry_count_currency_key",
+            "ledger_transactions_pkey",
+            "merchants_id_check",
+            "merchants_pkey",
+            "payment_authorizations_amount_check",
+            "payment_authorizations_expires_at_check",
+            "payment_authorizations_payment_fkey",
+            "payment_authorizations_payment_id_amount_key",
+            "payment_authorizations_pkey",
+            "payment_authorizations_step_fkey",
+            "payment_captures_amount_check",
+            "payment_captures_authorization_fkey",
+            "payment_captures_captured_at_check",
+            "payment_captures_commit_check",
+            "payment_captures_fee_check",
+            "payment_captures_ledger_transaction_fkey",
+            "payment_captures_ledger_transaction_id_key",
+            "payment_captures_pkey",
+            "payment_captures_step_fkey",
+            "payment_refunds_commit_check",
+            "payment_refunds_ledger_transaction_fkey",
+            "payment_refunds_ledger_transaction_id_key",
+            "payment_refunds_pkey",
+            "payment_refunds_refunded_at_check",
+            "payment_refunds_step_fkey",
+            "payment_transitions_commit_check",
+            "payment_transitions_edge_check",
+            "payment_transitions_id_check",
+            "payment_transitions_id_key",
+            "payment_transitions_money_check",
+            "payment_transitions_payment_fkey",
+            "payment_transitions_pkey",
+            "payment_transitions_prev_fkey",
+            "payment_transitions_seq_check",
+            "payment_transitions_state_key",
+            "payment_transitions_step_key",
+            "payments_amount_check",
+            "payments_commit_check",
+            "payments_fee_bps_check",
+            "payments_id_amount_key",
+            "payments_id_check",
+            "payments_merchant_fkey",
+            "payments_pkey",
+            "payments_psp_check",
         ]
     );
     Ok(())
