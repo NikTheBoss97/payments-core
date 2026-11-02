@@ -1,0 +1,21 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT conname::text AS \"constraint!\"\n          FROM pg_constraint\n         WHERE connamespace = 'public'::regnamespace\n           AND contype <> 'n'\n           AND conname <> '_sqlx_migrations_pkey'\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "constraint!",
+        "type_info": "Text",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "0c322d49219809e1c3b89c717c94e8334b7c7ebb21203552c1369dd4368d36cc"
+}
