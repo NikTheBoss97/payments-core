@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM merchants",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "93a548fd1dfac14472a5b9619487227fd6ffbc1af7c531813e32a3dbc61880d9"
+}
