@@ -7,6 +7,10 @@
 //! payment since. No error converts from `sqlx::Error` with `#[from]`, so no
 //! `?` can skip the classifier, which says what each database error proves.
 //!
+//! Never wrap a command in a client-side timeout or `select!`: sqlx cannot
+//! cancel the server's work, and a dropped `COMMIT` is a lost one (ADR-0014).
+//! Waits are bounded on the server (ADR-0018).
+//!
 //! The lints are the same as in `money`: this module handles amounts.
 
 #![forbid(clippy::arithmetic_side_effects, clippy::as_conversions)]
@@ -17,7 +21,7 @@ use uuid::Uuid;
 use crate::accounts::{AccountError, AccountRef, Psp, open_account};
 use crate::db::{CommitError, code_and_constraint, commit};
 use crate::ids::{AccountId, MerchantId, PaymentId, TransitionId};
-use crate::lifecycle::{PaymentStatus, StepKind, Transition};
+use crate::lifecycle::{Event, IllegalTransition, PaymentStatus, StepKind, Transition, next};
 use crate::money::{BasisPoints, Currency, PositiveAmount};
 
 /// Where a command landed: its step's `seq`, the statuses it moved between,
@@ -232,8 +236,6 @@ pub enum CreateError {
 /// with its first step in one database transaction. It takes no lock: a
 /// concurrent insert of the same payment waits on the primary key (ADR-0019).
 ///
-/// Never wrap it in a client-side timeout or `select!` (ADR-0014).
-///
 /// # Errors
 ///
 /// See [`CreateError`].
@@ -409,6 +411,384 @@ async fn stored_create(
     }))
 }
 
+/// A command that moves a payment and carries nothing else: decline, cancel,
+/// void, expire or settle.
+#[derive(Debug)]
+pub struct StepCommand {
+    /// The step's ID, which identifies this command.
+    pub step: TransitionId,
+    pub payment: PaymentId,
+}
+
+/// Why a [`StepCommand`] was not applied. Only [`StepError::NotConfirmed`] may
+/// have stored its step.
+#[derive(Debug, thiserror::Error)]
+pub enum StepError {
+    /// No payment has this ID.
+    #[error("payment {payment} does not exist")]
+    NotFound { payment: PaymentId },
+    /// The payment's status does not allow the event. Nothing is stored, and a
+    /// retry is decided again (ADR-0019).
+    #[error(transparent)]
+    Illegal(IllegalTransition),
+    /// The command's step ID is stored with other content: a bug, never
+    /// retried.
+    #[error("step {step} is stored with other content")]
+    Mismatch { step: Uuid },
+    /// The database caught what the domain types should have prevented, or a
+    /// writer that skipped the payment's lock got there first (ADR-0018): a bug,
+    /// never retried.
+    #[error("step {step}: the database rejected it as invalid")]
+    Invariant {
+        step: Uuid,
+        #[source]
+        source: sqlx::Error,
+    },
+    /// The step may or may not be stored. Send the identical command again
+    /// later, never one with new IDs (ADR-0019).
+    #[error("step {step} may or may not be stored: send the command again")]
+    NotConfirmed {
+        step: Uuid,
+        #[source]
+        source: sqlx::Error,
+    },
+}
+
+impl StepError {
+    fn new(command: &StepCommand, failed: Failed<IllegalTransition>) -> Self {
+        let step = command.step.get();
+        match failed {
+            Failed::NotFound => Self::NotFound {
+                payment: command.payment,
+            },
+            Failed::Refused(illegal) => Self::Illegal(illegal),
+            Failed::Mismatch => Self::Mismatch { step },
+            Failed::Duplicate(source) | Failed::Invariant(source) => {
+                Self::Invariant { step, source }
+            }
+            Failed::NotConfirmed(source) => Self::NotConfirmed { step, source },
+        }
+    }
+}
+
+/// Records that the PSP declined the authorization (ADR-0016).
+///
+/// # Errors
+///
+/// See [`StepError`].
+pub async fn decline(pool: &PgPool, command: &StepCommand) -> Result<Outcome, StepError> {
+    plain_step(pool, command, Event::Decline, StepKind::Decline).await
+}
+
+/// Cancels a payment before its authorization (ADR-0016).
+///
+/// # Errors
+///
+/// See [`StepError`].
+pub async fn cancel(pool: &PgPool, command: &StepCommand) -> Result<Outcome, StepError> {
+    plain_step(pool, command, Event::Cancel, StepKind::Cancel).await
+}
+
+/// Records that an authorization was voided (ADR-0016).
+///
+/// # Errors
+///
+/// See [`StepError`].
+pub async fn void(pool: &PgPool, command: &StepCommand) -> Result<Outcome, StepError> {
+    plain_step(pool, command, Event::Void, StepKind::Void).await
+}
+
+/// Records that the PSP reported an authorization as expired, a call that only
+/// the PSP can make (ADR-0016).
+///
+/// # Errors
+///
+/// See [`StepError`].
+pub async fn expire(pool: &PgPool, command: &StepCommand) -> Result<Outcome, StepError> {
+    plain_step(pool, command, Event::Expire, StepKind::Expire).await
+}
+
+/// Records that the PSP reported a capture as settled (ADR-0016).
+///
+/// # Errors
+///
+/// See [`StepError`].
+pub async fn settle(pool: &PgPool, command: &StepCommand) -> Result<Outcome, StepError> {
+    plain_step(pool, command, Event::Settle, StepKind::Settle).await
+}
+
+async fn plain_step(
+    pool: &PgPool,
+    command: &StepCommand,
+    event: Event,
+    kind: StepKind,
+) -> Result<Outcome, StepError> {
+    let plan = Plan {
+        id: &command.step,
+        asked: Asked {
+            payment: command.payment,
+            kind,
+            amount: 0,
+        },
+    };
+    apply(pool, &plan, |state| next(state.status, event))
+        .await
+        .map_err(|failed| StepError::new(command, failed))
+}
+
+/// The key of a payment's advisory lock (ADR-0018): the low 64 bits of its ID,
+/// read as a big-endian `i64`. RFC 9562's variant bits are the top bits of that
+/// half, so every payment's key is negative, apart from other uses of advisory
+/// locks, which take non-negative keys.
+#[must_use]
+pub fn lock_key(id: PaymentId) -> i64 {
+    let (_, low) = id.get().as_u64_pair();
+    i64::from_be_bytes(low.to_be_bytes())
+}
+
+/// What a command asks for, in the terms that a retry compares. It leaves out
+/// where the command landed: `seq`, the statuses and the refundable amount
+/// (ADR-0019).
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct Asked {
+    payment: PaymentId,
+    kind: StepKind,
+    amount: i64,
+}
+
+/// A command as its unit of work sees it.
+pub(crate) struct Plan<'a> {
+    id: &'a TransitionId,
+    asked: Asked,
+}
+
+/// A stored step: what its command asked for, and the reply a retry gets.
+struct Stored {
+    asked: Asked,
+    recorded: Recorded,
+}
+
+/// What a command's one read under the lock found.
+pub(crate) struct State {
+    /// The newest step's `seq`, status and refundable amount.
+    seq: i32,
+    status: PaymentStatus,
+    refundable: i64,
+    /// The step with the command's ID, on any payment.
+    stored: Option<Stored>,
+}
+
+/// A command's failure, before its public function states it in its own enum.
+/// `R` is what that command's rules can refuse.
+pub(crate) enum Failed<R> {
+    NotFound,
+    Refused(R),
+    Mismatch,
+    /// Some ID already exists, and the command has yet to look its step up.
+    /// Reaching the caller, it is a duplicate that nothing explains: a bug.
+    Duplicate(sqlx::Error),
+    Invariant(sqlx::Error),
+    NotConfirmed(sqlx::Error),
+}
+
+impl<R> Failed<R> {
+    fn database(source: sqlx::Error) -> Self {
+        match failure_of(&source) {
+            Failure::Duplicate => Self::Duplicate(source),
+            Failure::Invariant => Self::Invariant(source),
+            Failure::NotConfirmed => Self::NotConfirmed(source),
+        }
+    }
+}
+
+/// A command's unit of work, from `BEGIN` to `COMMIT` (ADR-0019).
+async fn apply<R>(
+    pool: &PgPool,
+    plan: &Plan<'_>,
+    decide: impl FnOnce(&State) -> Result<Transition, R>,
+) -> Result<Outcome, Failed<R>> {
+    let mut tx = begin_locked(pool, plan.asked.payment).await?;
+    match apply_in(&mut tx, plan, decide).await {
+        Ok(Outcome::Applied(recorded)) => match commit(tx).await {
+            Ok(()) => Ok(Outcome::Applied(recorded)),
+            Err(CommitError::Rejected(source)) => Err(Failed::Invariant(source)),
+            Err(CommitError::Unknown(source)) => Err(Failed::NotConfirmed(source)),
+        },
+        // A retry wrote nothing, so dropping the transaction ends it.
+        Ok(replayed) => Ok(replayed),
+        Err(Failed::Duplicate(duplicate)) => {
+            // The failure aborted the transaction, which released the lock at
+            // once (ADR-0018), and the lookup takes it again. Dropping the
+            // transaction first gives its connection back: a command that asks
+            // the pool for a connection while it holds one can wait for itself.
+            drop(tx);
+            look_up_again(pool, plan, duplicate).await
+        }
+        // A rejection wrote nothing, and any other failure aborted the
+        // transaction: drop it, because committing it would report success
+        // (ADR-0014).
+        Err(failed) => Err(failed),
+    }
+}
+
+/// Begins a database transaction whose first statement takes the payment's lock
+/// (ADR-0018). A session-level lock would outlive the transaction, so this is
+/// the only lock function that the library calls. `lock_timeout` bounds the
+/// wait, on the server.
+async fn begin_locked<R>(
+    pool: &PgPool,
+    payment: PaymentId,
+) -> Result<Transaction<'static, Postgres>, Failed<R>> {
+    let mut tx = pool.begin().await.map_err(Failed::database)?;
+    sqlx::query!("SELECT pg_advisory_xact_lock($1)", lock_key(payment))
+        .execute(&mut *tx)
+        .await
+        .map_err(Failed::database)?;
+    Ok(tx)
+}
+
+/// Steps 3 to 6 of a command (ADR-0019), inside a database transaction that the
+/// caller has begun and locked, so that later phases can add to the same unit of
+/// work. It never begins or commits. After an error, drop the transaction.
+pub(crate) async fn apply_in<R>(
+    tx: &mut Transaction<'_, Postgres>,
+    plan: &Plan<'_>,
+    decide: impl FnOnce(&State) -> Result<Transition, R>,
+) -> Result<Outcome, Failed<R>> {
+    let state = read_state(tx, plan).await?;
+    // Identity first: a retry that waited behind its own first attempt finds
+    // that attempt's step, and checked against the state it would be refused.
+    if let Some(stored) = state.stored {
+        return answer(stored, plan).map(Outcome::AlreadyApplied);
+    }
+    let step = decide(&state).map_err(Failed::Refused)?;
+    let seq = state
+        .seq
+        .checked_add(1)
+        .expect("a payment has far fewer steps than an integer holds");
+    insert_step(
+        tx,
+        &NewStep {
+            payment: plan.asked.payment,
+            id: plan.id,
+            seq,
+            prev_seq: state.seq,
+            step,
+            amount: plan.asked.amount,
+            prev_refundable: state.refundable,
+            refundable: state.refundable,
+        },
+    )
+    .await
+    .map_err(Failed::database)?;
+    Ok(Outcome::Applied(Recorded {
+        seq,
+        from: step.from(),
+        to: step.to(),
+        refundable: state.refundable,
+    }))
+}
+
+/// A write met a duplicate key, so some ID exists. Under the lock again, the
+/// step with the command's ID decides, and none means that another writer broke
+/// a rule (ADR-0019).
+async fn look_up_again<R>(
+    pool: &PgPool,
+    plan: &Plan<'_>,
+    duplicate: sqlx::Error,
+) -> Result<Outcome, Failed<R>> {
+    let mut tx = begin_locked(pool, plan.asked.payment).await?;
+    match read_state(&mut tx, plan).await?.stored {
+        Some(stored) => answer(stored, plan).map(Outcome::AlreadyApplied),
+        None => Err(Failed::Invariant(duplicate)),
+    }
+}
+
+/// The stored reply when the stored step is this command's.
+fn answer<R>(stored: Stored, plan: &Plan<'_>) -> Result<Recorded, Failed<R>> {
+    if stored.asked == plan.asked {
+        Ok(stored.recorded)
+    } else {
+        Err(Failed::Mismatch)
+    }
+}
+
+/// The one read under the lock (ADR-0019). It must come in a later statement
+/// than the lock: at READ COMMITTED each statement takes a new snapshot, so this
+/// one sees every step that the lock's previous holder committed (ADR-0018).
+async fn read_state<R>(
+    tx: &mut Transaction<'_, Postgres>,
+    plan: &Plan<'_>,
+) -> Result<State, Failed<R>> {
+    let row = sqlx::query!(
+        r#"SELECT newest.seq, newest.to_status, newest.refundable,
+                  stored.payment_id AS "stored_payment?",
+                  stored.seq AS "stored_seq?",
+                  stored.kind AS "stored_kind?",
+                  stored.from_status AS "stored_from?",
+                  stored.to_status AS "stored_to?",
+                  stored.amount AS "stored_amount?",
+                  stored.refundable AS "stored_refundable?"
+             FROM payments p
+            CROSS JOIN LATERAL (
+                  SELECT t.seq, t.to_status, t.refundable
+                    FROM payment_transitions t
+                   WHERE t.payment_id = p.id
+                   ORDER BY t.seq DESC
+                   LIMIT 1
+                  ) newest
+             LEFT JOIN payment_transitions stored ON stored.id = $2
+            WHERE p.id = $1"#,
+        plan.asked.payment.get(),
+        plan.id.get()
+    )
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(Failed::database)?
+    .ok_or(Failed::NotFound)?;
+    // The join finds a whole row or none, and every column is NOT NULL.
+    let stored = match (
+        row.stored_payment,
+        row.stored_seq,
+        row.stored_kind,
+        row.stored_from,
+        row.stored_to,
+        row.stored_amount,
+        row.stored_refundable,
+    ) {
+        (
+            Some(payment),
+            Some(seq),
+            Some(kind),
+            Some(from),
+            Some(to),
+            Some(amount),
+            Some(refundable),
+        ) => Some(Stored {
+            asked: Asked {
+                payment: PaymentId::try_from(payment)
+                    .expect("payments_id_check allows only UUIDv7 IDs"),
+                kind: StepKind::parse(&kind)
+                    .expect("payment_transitions_edge_check allows only known kinds"),
+                amount,
+            },
+            recorded: Recorded {
+                seq,
+                from: parse_status(&from),
+                to: parse_status(&to),
+                refundable,
+            },
+        }),
+        _ => None,
+    };
+    Ok(State {
+        seq: row.seq,
+        status: parse_status(&row.to_status),
+        refundable: row.refundable,
+        stored,
+    })
+}
+
 /// One row of a payment's history. Its move can come only from a [`Transition`],
 /// which only the table of moves can make (ADR-0016).
 struct NewStep<'a> {
@@ -482,6 +862,7 @@ fn failure_of(err: &sqlx::Error) -> Failure {
 mod tests {
     use super::*;
     use proptest::prelude::*;
+    use uuid::uuid;
 
     #[test]
     fn a_failed_statement_is_classified_by_its_code() {
@@ -519,6 +900,27 @@ mod tests {
                 !code.starts_with("23") && !code.starts_with("LG") && code != "53200"
             );
             prop_assert_eq!(classify(Some(&code)), Failure::NotConfirmed);
+        }
+    }
+
+    #[test]
+    fn a_payments_lock_key_is_the_low_half_of_its_id() {
+        // Written out, and read as a big-endian i64 by hand: 0x8123456789abcdef
+        // is 2^64 - 0x7edcba9876543211 (ADR-0018).
+        let id = uuid!("019b76da-a800-7000-8123-456789abcdef");
+        let id = PaymentId::try_from(id).expect("a UUIDv7");
+        assert_eq!(lock_key(id), -0x7EDC_BA98_7654_3211);
+    }
+
+    proptest! {
+        #[test]
+        fn every_payments_lock_key_is_negative(bits in any::<u128>()) {
+            // Any ID that converts has RFC 9562's variant bits, the top bits of
+            // the low half, so other uses of advisory locks keep clear of these
+            // keys by taking non-negative ones (ADR-0018).
+            let version_7 = (bits & !(0xf << 76) & !(0b11 << 62)) | (0x7 << 76) | (0b10 << 62);
+            let id = PaymentId::try_from(Uuid::from_u128(version_7)).expect("a UUIDv7");
+            prop_assert!(lock_key(id) < 0);
         }
     }
 

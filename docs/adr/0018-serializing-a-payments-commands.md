@@ -115,7 +115,19 @@ runtime role:
 - ADR-0002's rule for guarding a limit (lock first, then read in a later
   statement, at READ COMMITTED) now governs every payment command.
 
+## Amendments
+
+- 2026-11-02: "released when its transaction ends" means, for a transaction
+  that a failed statement aborts, at that failure and not at the client's
+  `ROLLBACK`. `AbortTransaction()` releases the locks, and the session then only
+  waits for the `ROLLBACK`: on 18.6, `pg_locks` shows no advisory lock for a
+  session that is `idle in transaction (aborted)`. So a queued command goes
+  ahead as soon as the holder's statement fails, and an aborted session blocks
+  nobody. Nothing above depends on the difference. The decision is unchanged.
+
 ## References
+
+- PostgreSQL 18.6 source: `AbortCurrentTransactionInternal()` and `AbortTransaction()` in [xact.c](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/access/transam/xact.c).
 
 - PostgreSQL 18 manual, [Advisory Locks](https://www.postgresql.org/docs/18/explicit-locking.html#ADVISORY-LOCKS) and [Advisory Lock Functions](https://www.postgresql.org/docs/18/functions-admin.html#FUNCTIONS-ADVISORY-LOCKS).
 - PostgreSQL 18 manual, [Read Committed Isolation Level](https://www.postgresql.org/docs/18/transaction-iso.html#XACT-READ-COMMITTED).
