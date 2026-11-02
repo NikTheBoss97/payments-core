@@ -6,6 +6,7 @@
 
 use payments_core::accounts::Psp;
 use payments_core::ids::MerchantId;
+use payments_core::lifecycle::PaymentStatus;
 use payments_core::money::{BasisPoints, Currency, PositiveAmount};
 use payments_core::payments::{AccountCandidates, CreatePayment};
 use sqlx::{PgConnection, Postgres, Transaction};
@@ -453,4 +454,44 @@ pub async fn refund_step(
     let posting = write_posting(conn, &books.refund_lines(amount)).await?;
     insert_refund(conn, &refund, posting).await?;
     Ok(refund)
+}
+
+/// Writes a payment that stands at `status`, and returns its newest step. Commit
+/// the database transaction that holds `conn` before any command reads it.
+pub async fn payment_at(
+    conn: &mut PgConnection,
+    books: &Books,
+    status: PaymentStatus,
+) -> sqlx::Result<Step> {
+    // Each arm writes its payment's steps; `step` writes one more after them.
+    let step = match status {
+        PaymentStatus::Authorized => return authorized_payment(conn, books).await,
+        PaymentStatus::Captured => return captured_payment(conn, books).await,
+        PaymentStatus::Refunded => {
+            let captured = captured_payment(conn, books).await?;
+            return refund_step(conn, books, &captured, "refunded", AUTHORIZED).await;
+        }
+        PaymentStatus::Settled => {
+            let captured = captured_payment(conn, books).await?;
+            captured.then("settle", "settled", 0, AUTHORIZED)
+        }
+        PaymentStatus::Created | PaymentStatus::Failed | PaymentStatus::Voided => {
+            let payment = NewPayment::valid(books.merchant);
+            payment.insert(conn).await?;
+            let first = Step::first(payment.id);
+            match status {
+                PaymentStatus::Failed => {
+                    first.insert(conn).await?;
+                    first.then("decline", "failed", 0, 0)
+                }
+                PaymentStatus::Voided => {
+                    first.insert(conn).await?;
+                    first.then("cancel", "voided", 0, 0)
+                }
+                _ => first,
+            }
+        }
+    };
+    step.insert(conn).await?;
+    Ok(step)
 }

@@ -14,6 +14,8 @@
 
 pub mod payments;
 
+use std::time::{Duration, Instant};
+
 use payments_core::ids::{AccountId, MerchantId, PaymentId, TransactionId, TransitionId};
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{PgConnection, PgPool, Postgres, Transaction};
@@ -119,6 +121,32 @@ pub async fn seed_kind(pool: &PgPool, kind: &str, side: &str) -> sqlx::Result<()
     .execute(pool)
     .await?;
     Ok(())
+}
+
+/// Waits until a session of this database is blocked on this kind of lock, so
+/// that a race test can act at a known moment instead of sleeping: `advisory`
+/// for a payment's lock, `transactionid` for another transaction's row. Pass the
+/// test's own pool: only a superuser sees other sessions' wait events.
+pub async fn wait_for_lock_wait(pool: &PgPool, wait_event: &str) -> sqlx::Result<()> {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let waiting = sqlx::query_scalar!(
+            r#"SELECT EXISTS (SELECT 1 FROM pg_stat_activity
+                               WHERE datname = current_database()
+                                 AND wait_event_type = 'Lock'
+                                 AND wait_event = $1) AS "waiting!""#,
+            wait_event
+        )
+        .fetch_one(pool)
+        .await?;
+        if waiting {
+            return Ok(());
+        }
+        assert!(
+            Instant::now() < deadline,
+            "no session waited for a lock of type {wait_event}"
+        );
+    }
 }
 
 /// A fixed UUIDv7 for tests (ADR-0005): 2026-01-01T00:00:00Z, with `n` in its
