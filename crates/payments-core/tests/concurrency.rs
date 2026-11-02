@@ -216,3 +216,33 @@ async fn concurrent_openings_of_one_key_return_one_id(pool: PgPool) -> TestResul
     app.close().await;
     Ok(())
 }
+
+#[sqlx::test]
+async fn concurrent_openings_with_one_candidate_return_it(pool: PgPool) -> TestResult {
+    // A retry sends the same candidate as its first attempt. ON CONFLICT covers
+    // only the key it names, so two callers that both pass the check of the key
+    // before either writes meet on the primary key instead. Timing decides, so
+    // each round is a fresh key, and many rounds make a miss very unlikely.
+    let app = runtime_pool(&pool).await?;
+    let rounds = 300;
+    for round in 1..=rounds {
+        let key = AccountKey {
+            kind: AccountKind::parse("fee_revenue")?,
+            party: Party::label(&format!("party_{round}"))?,
+            currency: currency("EUR"),
+        };
+        let opened = join_all(
+            (0..8).map(|_| open_account(&app, account_id(round), &key, NormalSide::Credit)),
+        )
+        .await;
+        for result in opened {
+            assert_eq!(result?, account_id(round));
+        }
+    }
+    let stored: i64 = sqlx::query_scalar!(r#"SELECT count(*) AS "count!" FROM accounts"#)
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(stored, i64::from(rounds));
+    app.close().await;
+    Ok(())
+}
