@@ -1,0 +1,20 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO payment_captures (transition_id, payment_id, amount, authorized_amount, fee, captured_at, ledger_transaction_id) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Int8",
+        "Int8",
+        "Int8",
+        "Timestamptz",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "97f3b794c5fdb6aa9ec5b7b6066f184ba81122519317a1320bbdaa88f656cbc5"
+}

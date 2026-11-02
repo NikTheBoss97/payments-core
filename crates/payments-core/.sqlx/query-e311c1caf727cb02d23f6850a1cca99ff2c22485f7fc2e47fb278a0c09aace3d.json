@@ -1,0 +1,26 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT t.id FROM ledger_transactions t WHERE NOT EXISTS (SELECT 1 FROM payment_captures c WHERE c.ledger_transaction_id = t.id) AND NOT EXISTS (SELECT 1 FROM payment_refunds r WHERE r.ledger_transaction_id = t.id)",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "ledger_transactions",
+            "name": "id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "e311c1caf727cb02d23f6850a1cca99ff2c22485f7fc2e47fb278a0c09aace3d"
+}

@@ -224,6 +224,27 @@ impl Transition {
     pub fn to(self) -> PaymentStatus {
         self.to
     }
+
+    /// What can still be refunded after this step, of `amount`, when `before`
+    /// could be: the rule of `payment_transitions_money_check` (ADR-0017). Only
+    /// [`capture`] and [`refund`] change it, and the refund's limit keeps its
+    /// amount within what is left.
+    #[must_use]
+    pub fn refundable_after(self, amount: i64, before: i64) -> i64 {
+        match self.kind {
+            StepKind::Capture => amount,
+            StepKind::Refund => before
+                .checked_sub(amount)
+                .expect("the refund's limit keeps its amount within what is left"),
+            StepKind::Create
+            | StepKind::Authorize
+            | StepKind::Decline
+            | StepKind::Cancel
+            | StepKind::Void
+            | StepKind::Expire
+            | StepKind::Settle => before,
+        }
+    }
 }
 
 /// The table of moves (ADR-0016): where a payment in `status` goes when `event`
@@ -542,6 +563,39 @@ mod tests {
 
     fn amount(minor: i64) -> PositiveAmount {
         PositiveAmount::new(minor).expect("valid amount")
+    }
+
+    #[test]
+    fn only_a_capture_or_a_refund_changes_what_can_be_refunded() {
+        use PaymentStatus as S;
+        let move_of = |status, event| next(status, event).expect("a legal move");
+        assert_eq!(
+            move_of(S::Authorized, Event::Capture).refundable_after(80, 0),
+            80
+        );
+        assert_eq!(
+            move_of(S::Captured, Event::PartialRefund).refundable_after(30, 80),
+            50
+        );
+        assert_eq!(
+            move_of(S::Settled, Event::FinalRefund).refundable_after(50, 50),
+            0
+        );
+        assert_eq!(Transition::genesis().refundable_after(0, 0), 0);
+        for (status, event, before) in [
+            (S::Created, Event::Authorize, 0),
+            (S::Created, Event::Decline, 0),
+            (S::Created, Event::Cancel, 0),
+            (S::Authorized, Event::Void, 0),
+            (S::Authorized, Event::Expire, 0),
+            (S::Captured, Event::Settle, 80),
+        ] {
+            assert_eq!(
+                move_of(status, event).refundable_after(0, before),
+                before,
+                "{event:?}"
+            );
+        }
     }
 
     #[test]

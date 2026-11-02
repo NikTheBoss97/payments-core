@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "CREATE CONSTRAINT TRIGGER zz_end_session AFTER INSERT ON payment_captures DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION end_own_session()",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "16f67db892744469049782b66e0b7b831e4915575d1b999830e124c7c46fb701"
+}

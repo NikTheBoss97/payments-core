@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "CREATE FUNCTION raise_fee() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN NEW.fee := NEW.amount + 1; RETURN NEW; END $$",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "592cb97309f071c5bea03eac0d7f736357c93792c436d33ac51e4ee8657929eb"
+}

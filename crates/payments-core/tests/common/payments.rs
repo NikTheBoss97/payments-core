@@ -6,19 +6,22 @@
 
 use std::error::Error;
 
-use payments_core::accounts::Psp;
+use payments_core::accounts::{AccountRef, Psp, find_account};
+use payments_core::balances::balance;
 use payments_core::db::commit;
 use payments_core::ids::{MerchantId, PaymentId};
 use payments_core::lifecycle::PaymentStatus;
 use payments_core::money::{BasisPoints, Currency, PositiveAmount};
 use payments_core::payments::{
-    AccountCandidates, Authorize, CreatePayment, find_payment, lock_key,
+    AccountCandidates, Authorize, Capture, CreatePayment, create_payment, find_payment, lock_key,
 };
 use payments_core::times::BusinessTime;
 use sqlx::{PgConnection, PgPool, Postgres, Transaction};
 use uuid::{Uuid, uuid};
 
-use super::{account_id, payment_id, runtime_connection, runtime_transaction, transition_id};
+use super::{
+    account_id, payment_id, runtime_connection, runtime_transaction, transaction_id, transition_id,
+};
 
 /// A valid UUID that is not version 7.
 pub const VERSION_4: Uuid = uuid!("019b76da-a800-4000-8000-000000000001");
@@ -67,6 +70,74 @@ pub fn authorize_command(n: u32, payment: PaymentId) -> Authorize {
         amount: PositiveAmount::new(AUTHORIZED).expect("valid amount"),
         expires_at: deadline(),
     }
+}
+
+/// When the test captures took effect.
+pub fn capture_time() -> BusinessTime {
+    let time = "2026-01-05T09:30:00.654321Z".parse().expect("a valid time");
+    BusinessTime::new(time).expect("a time that can be stored")
+}
+
+/// The command that captures a payment for [`AUTHORIZED`]. Its step ID is
+/// `2000 + n`, apart from those of the commands above, and its posting's ID is `n`.
+pub fn capture_command(n: u32, payment: PaymentId) -> Capture {
+    Capture {
+        step: transition_id(n.checked_add(2000).expect("a small n")),
+        posting: transaction_id(n),
+        payment,
+        amount: PositiveAmount::new(AUTHORIZED).expect("valid amount"),
+        captured_at: capture_time(),
+    }
+}
+
+/// Creates payment `n` at this fee rate, through the library, and returns its ID.
+pub async fn created_with(
+    app: &PgPool,
+    merchant: MerchantId,
+    n: u32,
+    fee_rate: BasisPoints,
+) -> Result<PaymentId, Box<dyn Error>> {
+    let command = CreatePayment {
+        fee_rate,
+        ..create_command(n, merchant)
+    };
+    create_payment(app, &command).await?;
+    Ok(command.id)
+}
+
+/// An account's balance, debits minus credits. An account that does not exist yet
+/// has moved nothing.
+pub async fn balance_of(app: &PgPool, reference: AccountRef) -> Result<i64, Box<dyn Error>> {
+    let Some(account) = find_account(app, &reference.key()).await? else {
+        return Ok(0);
+    };
+    let read = balance(app, account.id).await?;
+    Ok(read.ok_or("the account exists")?.debits_minus_credits)
+}
+
+/// The trial balance: every currency whose entries do not sum to zero across the
+/// whole ledger. Invariant I1 says there are none (ADR-0002).
+pub async fn unbalanced_currencies(pool: &PgPool) -> sqlx::Result<Vec<String>> {
+    sqlx::query_scalar!(
+        r#"SELECT currency AS "currency!" FROM ledger_entries
+            GROUP BY currency HAVING sum(amount) <> 0"#
+    )
+    .fetch_all(pool)
+    .await
+}
+
+/// The ledger transactions that no business record references: the detection on
+/// the ledger's side of ADR-0021. After a payment flow there are none.
+pub async fn uncaused_postings(pool: &PgPool) -> sqlx::Result<Vec<Uuid>> {
+    sqlx::query_scalar!(
+        "SELECT t.id FROM ledger_transactions t \
+          WHERE NOT EXISTS (SELECT 1 FROM payment_captures c \
+                             WHERE c.ledger_transaction_id = t.id) \
+            AND NOT EXISTS (SELECT 1 FROM payment_refunds r \
+                             WHERE r.ledger_transaction_id = t.id)"
+    )
+    .fetch_all(pool)
+    .await
 }
 
 /// Registers a new merchant and returns its ID.
