@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "CREATE FUNCTION die_if_planned() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER AS $$ BEGIN IF current_setting('crash.point', true) = TG_NAME || ' ' || TG_TABLE_NAME THEN PERFORM pg_terminate_backend(pg_backend_pid()); END IF; RETURN NEW; END $$",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "926d5703350d294395e31f1bb3bf9c5d9605d2db28693e6924cb5d3a013a3e75"
+}

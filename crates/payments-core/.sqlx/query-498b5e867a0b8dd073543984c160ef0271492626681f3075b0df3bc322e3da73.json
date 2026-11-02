@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT pg_terminate_backend($1) AS \"sent!\"",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "sent!",
+        "type_info": "Bool",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int4"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "498b5e867a0b8dd073543984c160ef0271492626681f3075b0df3bc322e3da73"
+}
