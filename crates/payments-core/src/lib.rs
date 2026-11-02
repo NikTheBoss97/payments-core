@@ -7,5 +7,6 @@ pub mod balances;
 pub mod db;
 pub mod ids;
 pub mod ledger;
+pub mod lifecycle;
 pub mod money;
 pub mod posting;

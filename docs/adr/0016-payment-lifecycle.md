@@ -101,8 +101,9 @@ Until then the caller, in practice the tests, reports what the PSP decided.
   `refunded`, and phase 6 records the settlement of each captured and
   refunded amount on rows of its own.
 - **The Rust model.**
-  - `PaymentStatus`, `Event` and `StepKind` are enums stored as text labels
-    and parsed once, like `NormalSide` (ADR-0009).
+  - `PaymentStatus`, `Event` and `StepKind` are enums. Statuses and step
+    kinds are stored as text labels and parsed once, like `NormalSide`
+    (ADR-0009); an event is never stored.
   - `next(status, event)` is a `match` on the pair with no catch-all arm,
     so a new variant fails to compile (error E0004) until every pair it
     creates is decided.
@@ -113,10 +114,8 @@ Until then the caller, in practice the tests, reports what the PSP decided.
   - The amount rules are small pure functions beside `next`, applied only
     where `next` allows the event: a refund of a `refunded` payment is an
     illegal transition, not an amount error.
-  - Each enum's `ALL` list, which the tests iterate, is kept complete by a
-    convention that review enforces: every arm of the enum's exhaustive
-    `match` carries a `const` assertion that its variant is in `ALL`. Only
-    the exhaustive `match` is a compiler guarantee.
+  - A small macro declares each enum together with its `ALL` list, which the
+    tests iterate, so the list cannot miss a variant.
 - **Extension rule.** Later phases add statuses, events, step kinds and
   moves, and never remove or change one. A test,
   `the_phase_2_edges_stay_legal`, lists today's legal moves and fails if one
@@ -151,6 +150,12 @@ Until then the caller, in practice the tests, reports what the PSP decided.
 - 2026-11-02: the Context and the Options state the seven statuses
   themselves, rather than pointing to a local working file that can change
   and that readers of the repository do not have. The decision is unchanged.
+- 2026-11-02: a small macro now declares each enum together with its `ALL`
+  list, where this ADR first had a `const` assertion in every match arm. The
+  assertions would have taken about 100 lines and stayed a convention that
+  review enforces; the macro takes about 10 and makes a missing variant
+  impossible. The Rust model also now says that events are not stored, which
+  its first wording got wrong. The decision is unchanged.
 
 ## References
 
