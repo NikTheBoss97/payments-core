@@ -10,11 +10,13 @@ use std::error::Error;
 
 use common::{
     CHECK_VIOLATION, FOREIGN_KEY_VIOLATION, UNIQUE_VIOLATION, account_id, assert_violation,
-    runtime_pool,
+    runtime_pool, test_uuid,
 };
 use payments_core::accounts::{
-    Account, AccountError, AccountKey, AccountKind, NormalSide, Party, find_account, open_account,
+    Account, AccountError, AccountKey, AccountKind, AccountRef, NormalSide, Party, Psp,
+    find_account, open_account,
 };
+use payments_core::ids::MerchantId;
 use payments_core::money::Currency;
 use sqlx::{PgConnection, PgPool};
 use uuid::{Uuid, uuid};
@@ -166,6 +168,61 @@ async fn both_normal_sides_round_trip_through_the_database(pool: PgPool) -> Test
         );
     }
     app.close().await;
+    Ok(())
+}
+
+/// One reference to each kind of account in the chart.
+fn references() -> [AccountRef; 3] {
+    let eur = Currency::parse("EUR").expect("valid code");
+    let merchant = MerchantId::try_from(test_uuid(1)).expect("test_uuid builds UUIDv7 values");
+    [
+        AccountRef::PspReceivable(Psp::Mock, eur),
+        AccountRef::MerchantPayable(merchant, eur),
+        AccountRef::FeeRevenue(eur),
+    ]
+}
+
+#[sqlx::test]
+async fn every_reference_opens_against_the_chart(pool: PgPool) -> TestResult {
+    // Rust and the database each hold a copy of the chart. The foreign key
+    // refuses a reference whose kind or side differs from the database's, and
+    // the party's CHECK refuses a misspelled party.
+    let app = runtime_pool(&pool).await?;
+    for (n, reference) in (1..).zip(references()) {
+        let key = reference.key();
+        let side = reference.normal_side();
+        let id = open_account(&app, account_id(n), &key, side).await?;
+        assert_eq!(
+            find_account(&app, &key).await?,
+            Some(Account {
+                id,
+                normal_side: side
+            })
+        );
+    }
+    app.close().await;
+    Ok(())
+}
+
+#[sqlx::test]
+async fn the_references_cover_the_whole_chart(pool: PgPool) -> TestResult {
+    // The other direction: a kind added to the chart without a reference
+    // fails here.
+    let rows = sqlx::query!("SELECT kind, normal_side FROM account_kinds ORDER BY kind")
+        .fetch_all(&pool)
+        .await?;
+    let chart: Vec<(String, String)> = rows.into_iter().map(|r| (r.kind, r.normal_side)).collect();
+    let mut covered: Vec<(String, String)> = references()
+        .into_iter()
+        .map(|reference| {
+            (
+                reference.key().kind.as_str().to_owned(),
+                reference.normal_side().as_str().to_owned(),
+            )
+        })
+        .collect();
+    covered.sort();
+    assert_eq!(chart, covered);
     Ok(())
 }
 
