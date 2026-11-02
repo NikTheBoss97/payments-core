@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DROP TRIGGER zz_end_session ON payments",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "2ae8babb97eca4fcdcae2ddae55f7c2df7579bc04513f586f35631641f1274fa"
+}

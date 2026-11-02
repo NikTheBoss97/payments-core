@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "CREATE FUNCTION lose_row() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NULL; END $$",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "4f4f9ab3c870e2fe8d4b5ec9b66687573d6fe5d91652ab6fec2d5c3234658741"
+}

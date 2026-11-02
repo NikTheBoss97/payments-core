@@ -14,7 +14,7 @@
 
 pub mod payments;
 
-use payments_core::ids::{AccountId, TransactionId};
+use payments_core::ids::{AccountId, MerchantId, PaymentId, TransactionId, TransitionId};
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{PgConnection, PgPool, Postgres, Transaction};
 use uuid::Uuid;
@@ -64,17 +64,28 @@ pub async fn runtime_transaction(pool: &PgPool) -> sqlx::Result<Transaction<'sta
 /// `#[sqlx::test]` drops its database without `FORCE`, which PostgreSQL
 /// refuses while another connection is open.
 pub async fn runtime_pool(pool: &PgPool) -> sqlx::Result<PgPool> {
-    runtime_pool_with(pool, None).await
+    runtime_pool_with(pool, PgPoolOptions::new(), None).await
 }
 
 /// A [`runtime_pool`] whose sessions wait at most `millis` for each lock,
 /// standing in for the runtime role's own `lock_timeout` (ADR-0005).
 pub async fn runtime_pool_with_lock_timeout(pool: &PgPool, millis: i32) -> sqlx::Result<PgPool> {
-    runtime_pool_with(pool, Some(millis)).await
+    runtime_pool_with(pool, PgPoolOptions::new(), Some(millis)).await
 }
 
-async fn runtime_pool_with(pool: &PgPool, lock_timeout_ms: Option<i32>) -> sqlx::Result<PgPool> {
-    PgPoolOptions::new()
+/// A [`runtime_pool`] with one connection. A path that asks the pool for a
+/// connection while it holds one waits for itself here, until the pool gives up,
+/// so running on this shows that a path never needs two at once.
+pub async fn runtime_pool_of_one(pool: &PgPool) -> sqlx::Result<PgPool> {
+    runtime_pool_with(pool, PgPoolOptions::new().max_connections(1), None).await
+}
+
+async fn runtime_pool_with(
+    pool: &PgPool,
+    options: PgPoolOptions,
+    lock_timeout_ms: Option<i32>,
+) -> sqlx::Result<PgPool> {
+    options
         .after_connect(move |conn, _| {
             Box::pin(async move {
                 sqlx::query!("SET ROLE payments_app")
@@ -127,6 +138,21 @@ pub fn account_id(n: u32) -> AccountId {
 /// A fixed ledger transaction ID, from [`test_uuid`].
 pub fn transaction_id(n: u32) -> TransactionId {
     TransactionId::try_from(test_uuid(n)).expect("test_uuid builds UUIDv7 values")
+}
+
+/// A fixed merchant ID, from [`test_uuid`].
+pub fn merchant_id(n: u32) -> MerchantId {
+    MerchantId::try_from(test_uuid(n)).expect("test_uuid builds UUIDv7 values")
+}
+
+/// A fixed payment ID, from [`test_uuid`].
+pub fn payment_id(n: u32) -> PaymentId {
+    PaymentId::try_from(test_uuid(n)).expect("test_uuid builds UUIDv7 values")
+}
+
+/// A fixed step ID, from [`test_uuid`].
+pub fn transition_id(n: u32) -> TransitionId {
+    TransitionId::try_from(test_uuid(n)).expect("test_uuid builds UUIDv7 values")
 }
 
 /// The SQLSTATE of a database error, or a panic if the error is not one.

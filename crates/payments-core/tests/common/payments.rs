@@ -5,11 +5,44 @@
 //! could write them (ADR-0017).
 
 use payments_core::accounts::Psp;
+use payments_core::ids::MerchantId;
+use payments_core::money::{BasisPoints, Currency, PositiveAmount};
+use payments_core::payments::{AccountCandidates, CreatePayment};
 use sqlx::{PgConnection, Postgres, Transaction};
 use uuid::{Uuid, uuid};
 
+use super::{account_id, payment_id, transition_id};
+
 /// A valid UUID that is not version 7.
 pub const VERSION_4: Uuid = uuid!("019b76da-a800-4000-8000-000000000001");
+
+pub fn eur() -> Currency {
+    Currency::parse("EUR").expect("valid code")
+}
+
+/// The command that creates payment `n` for this merchant: 100.00 EUR through
+/// the mock PSP, at a fee rate of 2.5%. Its IDs are fixed, so calling this again
+/// builds the identical command, which is what a retry sends (ADR-0019).
+pub fn create_command(n: u32, merchant: MerchantId) -> CreatePayment {
+    let candidate = |offset| {
+        let base = n.checked_mul(3).expect("a small n");
+        account_id(base.checked_add(offset).expect("a small n"))
+    };
+    CreatePayment {
+        id: payment_id(n),
+        step: transition_id(n),
+        merchant,
+        psp: Psp::Mock,
+        currency: eur(),
+        amount: PositiveAmount::new(REQUESTED).expect("valid amount"),
+        fee_rate: BasisPoints::new(250).expect("valid rate"),
+        accounts: AccountCandidates {
+            fee_revenue: candidate(0),
+            merchant_payable: candidate(1),
+            psp_receivable: candidate(2),
+        },
+    }
+}
 
 /// Registers a new merchant and returns its ID.
 pub async fn register_merchant(conn: &mut PgConnection) -> sqlx::Result<Uuid> {

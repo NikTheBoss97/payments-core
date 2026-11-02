@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "CREATE FUNCTION corrupt_fee_rate() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN NEW.fee_bps := 10001; RETURN NEW; END $$",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "b1927430f22bef21bdf9255db9d693dda26feceaafbddc073b83fd47b7005f9b"
+}
