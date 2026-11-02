@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE payment_authorizations SET amount = 1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "fe3d52c49582c0965810be96a1973104f576889c39e66f6e2042adc62040aacb"
+}

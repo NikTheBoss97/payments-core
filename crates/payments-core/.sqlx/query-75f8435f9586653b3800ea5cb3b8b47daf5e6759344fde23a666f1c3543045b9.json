@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM payment_authorizations",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "75f8435f9586653b3800ea5cb3b8b47daf5e6759344fde23a666f1c3543045b9"
+}

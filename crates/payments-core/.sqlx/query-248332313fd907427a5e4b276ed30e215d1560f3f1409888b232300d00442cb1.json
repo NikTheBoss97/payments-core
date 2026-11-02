@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO payment_refunds (transition_id, payment_id, amount, refunded_at, ledger_transaction_id) VALUES ($1, $2, $3, transaction_timestamp(), $4)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Int8",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "248332313fd907427a5e4b276ed30e215d1560f3f1409888b232300d00442cb1"
+}

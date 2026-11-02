@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "TRUNCATE payment_captures",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "c09bbad13431286c7f2b75227d7f4ffc4143ae328d7a7590f3d1dcb605d73c68"
+}

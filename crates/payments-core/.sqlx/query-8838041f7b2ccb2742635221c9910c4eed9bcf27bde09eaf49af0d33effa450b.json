@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO payment_authorizations (transition_id, payment_id, amount, payment_amount, expires_at) VALUES ($1, $2, $3, $4, transaction_timestamp())",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "8838041f7b2ccb2742635221c9910c4eed9bcf27bde09eaf49af0d33effa450b"
+}
