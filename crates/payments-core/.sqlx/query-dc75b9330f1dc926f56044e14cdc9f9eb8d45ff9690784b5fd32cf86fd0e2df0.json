@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "CREATE TRIGGER raise_fee BEFORE INSERT ON payment_captures FOR EACH ROW EXECUTE FUNCTION raise_fee()",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "dc75b9330f1dc926f56044e14cdc9f9eb8d45ff9690784b5fd32cf86fd0e2df0"
+}

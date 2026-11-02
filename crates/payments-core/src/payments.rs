@@ -19,13 +19,15 @@ use sqlx::types::chrono::{DateTime, Utc};
 use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
-use crate::accounts::{AccountError, AccountRef, Psp, open_account};
+use crate::accounts::{AccountError, AccountKey, AccountRef, Psp, find_account, open_account};
 use crate::db::{CommitError, code_and_constraint, commit};
-use crate::ids::{AccountId, MerchantId, PaymentId, TransitionId};
+use crate::ids::{AccountId, MerchantId, PaymentId, TransactionId, TransitionId};
+use crate::ledger::{Entry, LedgerTransaction};
 use crate::lifecycle::{
     self, Event, IllegalTransition, PaymentStatus, Refused, StepKind, Transition, next,
 };
-use crate::money::{BasisPoints, Currency, PositiveAmount};
+use crate::money::{self, BasisPoints, Currency, PositiveAmount};
+use crate::posting::{self, PostInError, post_in};
 use crate::times::BusinessTime;
 
 /// Where a command landed: its step's `seq`, the statuses it moved between,
@@ -496,12 +498,229 @@ pub async fn authorize(pool: &PgPool, command: &Authorize) -> Result<Outcome, Au
                 expires_at: command.expires_at,
             },
         },
+        posting: None,
     };
     apply(pool, &plan, |state| {
         lifecycle::authorize(state.status, command.amount, state.requested)
     })
     .await
     .map_err(|failed| AuthorizeError::new(command, failed))
+}
+
+/// The command that records a capture, and posts it (ADR-0016, ADR-0020).
+#[derive(Debug)]
+pub struct Capture {
+    /// The step's ID, which identifies this command.
+    pub step: TransitionId,
+    /// The ID of the ledger transaction that this capture posts.
+    pub posting: TransactionId,
+    pub payment: PaymentId,
+    /// The captured amount, at most the authorized one. The PSP releases the
+    /// rest of the hold.
+    pub amount: PositiveAmount,
+    /// When the capture took effect, as the PSP reported it (ADR-0022).
+    pub captured_at: BusinessTime,
+}
+
+/// Why a [`Capture`] was not applied. Only [`CaptureError::NotConfirmed`] may
+/// have stored its step.
+#[derive(Debug, thiserror::Error)]
+pub enum CaptureError {
+    /// No payment has this ID.
+    #[error("payment {payment} does not exist")]
+    NotFound { payment: PaymentId },
+    /// The status or the amount refuses it. Nothing is stored, and a retry is
+    /// decided again (ADR-0019).
+    #[error(transparent)]
+    Refused(Refused),
+    /// An account of the posting does not exist. Creating a payment opens them,
+    /// and accounts are never deleted, so a writer that skipped that broke a
+    /// rule: a bug, never retried.
+    #[error("account {key} does not exist")]
+    MissingAccount { key: AccountKey },
+    /// The command's step ID is stored with other content: a bug, never
+    /// retried.
+    #[error("step {step} is stored with other content")]
+    Mismatch { step: Uuid },
+    /// The database caught what the domain types should have prevented, or a
+    /// writer that skipped the payment's lock got there first (ADR-0018): a bug,
+    /// never retried.
+    #[error("step {step}: the database rejected it as invalid")]
+    Invariant {
+        step: Uuid,
+        #[source]
+        source: sqlx::Error,
+    },
+    /// The step may or may not be stored. Send the identical command again
+    /// later, never one with new IDs (ADR-0019).
+    #[error("step {step} may or may not be stored: send the command again")]
+    NotConfirmed {
+        step: Uuid,
+        #[source]
+        source: sqlx::Error,
+    },
+}
+
+impl CaptureError {
+    fn new(command: &Capture, failed: Failed<PostingRefusal>) -> Self {
+        let step = command.step.get();
+        match failed {
+            Failed::NotFound => Self::NotFound {
+                payment: command.payment,
+            },
+            Failed::Refused(PostingRefusal::Refused(refused)) => Self::Refused(refused),
+            Failed::Refused(PostingRefusal::MissingAccount(key)) => Self::MissingAccount { key },
+            Failed::Mismatch => Self::Mismatch { step },
+            Failed::Duplicate(source) | Failed::Invariant(source) => {
+                Self::Invariant { step, source }
+            }
+            Failed::NotConfirmed(source) => Self::NotConfirmed { step, source },
+        }
+    }
+}
+
+/// Records that the PSP captured a payment, for at most the authorized amount,
+/// and posts it: the step, the posting and the record commit together
+/// (ADR-0016, ADR-0020).
+///
+/// # Errors
+///
+/// See [`CaptureError`].
+pub async fn capture(pool: &PgPool, command: &Capture) -> Result<Outcome, CaptureError> {
+    let fail = |failed| CaptureError::new(command, failed);
+    // Outside any transaction, and so before the lock: the terms never change,
+    // and the accounts exist before the payment does (ADR-0019, ADR-0020).
+    let terms = read_terms(pool, command.payment).await.map_err(fail)?;
+    let receivable = posting_account(pool, AccountRef::PspReceivable(terms.psp, terms.currency))
+        .await
+        .map_err(fail)?;
+    let payable = posting_account(
+        pool,
+        AccountRef::MerchantPayable(terms.merchant, terms.currency),
+    )
+    .await
+    .map_err(fail)?;
+    let fees = posting_account(pool, AccountRef::FeeRevenue(terms.currency))
+        .await
+        .map_err(fail)?;
+    let fee = money::fee(command.amount, terms.fee_rate);
+    let posting = capture_posting(
+        same_posting_id(&command.posting),
+        terms.currency,
+        CaptureAccounts {
+            receivable,
+            payable,
+            fees,
+        },
+        command.amount,
+        fee,
+    );
+    let plan = Plan {
+        id: &command.step,
+        asked: Asked {
+            payment: command.payment,
+            kind: StepKind::Capture,
+            amount: command.amount.get(),
+            detail: Detail::Capture {
+                fee,
+                captured_at: command.captured_at,
+                posting: command.posting.get(),
+            },
+        },
+        posting: Some(&posting),
+    };
+    apply(pool, &plan, |state| {
+        // Before an authorization the status refuses the capture, so this limit
+        // is never read.
+        let limit = state.authorized.unwrap_or(state.requested);
+        lifecycle::capture(state.status, command.amount, limit).map_err(PostingRefusal::Refused)
+    })
+    .await
+    .map_err(fail)
+}
+
+/// The accounts of a capture's posting.
+struct CaptureAccounts {
+    receivable: AccountId,
+    payable: AccountId,
+    fees: AccountId,
+}
+
+/// ADR-0020's lines for a capture of C with a fee of F: the PSP's receivable
+/// +C, the merchant's payable -(C - F) and the platform's fees -F. A line whose
+/// amount would be zero is left out.
+fn capture_posting(
+    id: TransactionId,
+    currency: Currency,
+    accounts: CaptureAccounts,
+    captured: PositiveAmount,
+    fee: i64,
+) -> LedgerTransaction {
+    let merchant_share = captured
+        .get()
+        .checked_sub(fee)
+        .expect("a fee is at most the captured amount");
+    let entries = [
+        Some(Entry {
+            account: accounts.receivable,
+            amount: captured.debit(),
+        }),
+        credit_line(accounts.payable, merchant_share),
+        credit_line(accounts.fees, fee),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    LedgerTransaction::new(id, currency, entries)
+        .expect("the credits share out the debit, so the lines balance, and there are two or more")
+}
+
+/// A credit of `minor`, or no line at all when it is zero: a ledger entry is
+/// never zero (ADR-0020).
+fn credit_line(account: AccountId, minor: i64) -> Option<Entry> {
+    (minor != 0).then(|| Entry {
+        account,
+        amount: PositiveAmount::new(minor)
+            .expect("a share of a captured amount is between 1 and the cap")
+            .credit(),
+    })
+}
+
+/// A second value of a command's posting ID. A retry must post under the same
+/// one, and a command is only borrowed, so this is written out (ADR-0005).
+fn same_posting_id(id: &TransactionId) -> TransactionId {
+    TransactionId::try_from(id.get()).expect("a transaction ID stays valid")
+}
+
+/// What stops a command that posts, besides a [`Failed`] that any command can
+/// meet.
+pub(crate) enum PostingRefusal {
+    Refused(Refused),
+    MissingAccount(AccountKey),
+}
+
+/// A payment's terms, or why they could not be read.
+async fn read_terms<R>(pool: &PgPool, id: PaymentId) -> Result<Payment, Failed<R>> {
+    match find_payment(pool, id).await {
+        Ok(Some(payment)) => Ok(payment),
+        Ok(None) => Err(Failed::NotFound),
+        Err(ReadError::Database { source, .. }) => Err(Failed::database(source)),
+    }
+}
+
+/// The ID of an account of a posting. It only looks the account up: creating a
+/// payment opened it (ADR-0020), and a posting never creates accounts (ADR-0005).
+async fn posting_account(
+    pool: &PgPool,
+    reference: AccountRef,
+) -> Result<AccountId, Failed<PostingRefusal>> {
+    let key = reference.key();
+    match find_account(pool, &key).await {
+        Ok(Some(account)) => Ok(account.id),
+        Ok(None) => Err(Failed::Refused(PostingRefusal::MissingAccount(key))),
+        Err(AccountError::Database { source, .. }) => Err(Failed::database(source)),
+        Err(other) => unreachable!("finding an account fails only as Database: {other}"),
+    }
 }
 
 /// A command that moves a payment and carries nothing else: decline, cancel,
@@ -624,6 +843,7 @@ async fn plain_step(
             amount: 0,
             detail: Detail::None,
         },
+        posting: None,
     };
     apply(pool, &plan, |state| next(state.status, event))
         .await
@@ -659,12 +879,20 @@ pub(crate) enum Detail {
     Authorization {
         expires_at: BusinessTime,
     },
+    Capture {
+        fee: i64,
+        captured_at: BusinessTime,
+        /// The link to the ledger (ADR-0011).
+        posting: Uuid,
+    },
 }
 
 /// A command as its unit of work sees it.
 pub(crate) struct Plan<'a> {
     id: &'a TransitionId,
     asked: Asked,
+    /// What the step posts, written after it and before its record.
+    posting: Option<&'a LedgerTransaction>,
 }
 
 /// A stored step: what its command asked for, and the reply a retry gets.
@@ -681,6 +909,8 @@ pub(crate) struct State {
     refundable: i64,
     /// The payment's requested amount.
     requested: PositiveAmount,
+    /// The payment's authorized amount, once it has one.
+    authorized: Option<PositiveAmount>,
     /// The step with the command's ID, on any payment.
     stored: Option<Stored>,
 }
@@ -766,13 +996,14 @@ pub(crate) async fn apply_in<R>(
     // Identity first: a retry that waited behind its own first attempt finds
     // that attempt's step, and checked against the state it would be refused.
     if let Some(stored) = state.stored {
-        return answer(stored, plan).map(Outcome::AlreadyApplied);
+        return answer(tx, stored, plan).await.map(Outcome::AlreadyApplied);
     }
     let step = decide(&state).map_err(Failed::Refused)?;
     let seq = state
         .seq
         .checked_add(1)
         .expect("a payment has far fewer steps than an integer holds");
+    let refundable = step.refundable_after(plan.asked.amount, state.refundable);
     insert_step(
         tx,
         &NewStep {
@@ -783,11 +1014,14 @@ pub(crate) async fn apply_in<R>(
             step,
             amount: plan.asked.amount,
             prev_refundable: state.refundable,
-            refundable: state.refundable,
+            refundable,
         },
     )
     .await
     .map_err(Failed::database)?;
+    if let Some(posting) = plan.posting {
+        post_in(tx, posting).await.map_err(posting_failure)?;
+    }
     insert_record(tx, plan, &state)
         .await
         .map_err(Failed::database)?;
@@ -795,8 +1029,21 @@ pub(crate) async fn apply_in<R>(
         seq,
         from: step.from(),
         to: step.to(),
-        refundable: state.refundable,
+        refundable,
     }))
+}
+
+/// What a failed posting means to a command: `post_in` reads it as the ledger
+/// sees it. An ID that exists is a duplicate key like any other, and an account
+/// outside the currency is a bug here, because the command found it by a key in
+/// that currency.
+fn posting_failure<R>(err: PostInError) -> Failed<R> {
+    match err {
+        PostInError::Exists { source, .. } => Failed::Duplicate(source),
+        PostInError::AccountNotInCurrency { source, .. }
+        | PostInError::Invariant { source, .. } => Failed::Invariant(source),
+        PostInError::Database { source, .. } => Failed::database(source),
+    }
 }
 
 /// A write met a duplicate key, so some ID exists. Under the lock again, the
@@ -809,18 +1056,34 @@ async fn look_up_again<R>(
 ) -> Result<Outcome, Failed<R>> {
     let mut tx = begin_locked(pool, plan.asked.payment).await?;
     match read_state(&mut tx, plan).await?.stored {
-        Some(stored) => answer(stored, plan).map(Outcome::AlreadyApplied),
+        Some(stored) => answer(&mut tx, stored, plan)
+            .await
+            .map(Outcome::AlreadyApplied),
         None => Err(Failed::Invariant(duplicate)),
     }
 }
 
-/// The stored reply when the stored step is this command's.
-fn answer<R>(stored: Stored, plan: &Plan<'_>) -> Result<Recorded, Failed<R>> {
-    if stored.asked == plan.asked {
-        Ok(stored.recorded)
-    } else {
-        Err(Failed::Mismatch)
+/// The stored reply when the stored step is this command's: the same step, the
+/// same record, and the same entries (ADR-0019). The entries are compared on the
+/// connection that holds the lock, because asking the pool for another one here
+/// can wait for itself.
+async fn answer<R>(
+    tx: &mut Transaction<'_, Postgres>,
+    stored: Stored,
+    plan: &Plan<'_>,
+) -> Result<Recorded, Failed<R>> {
+    if stored.asked != plan.asked {
+        return Err(Failed::Mismatch);
     }
+    if let Some(posting) = plan.posting {
+        let same = posting::is_stored_as(&mut **tx, posting)
+            .await
+            .map_err(Failed::database)?;
+        if !same {
+            return Err(Failed::Mismatch);
+        }
+    }
+    Ok(stored.recorded)
 }
 
 /// The one read under the lock (ADR-0019). It must come in a later statement
@@ -833,6 +1096,7 @@ async fn read_state<R>(
     let row = sqlx::query!(
         r#"SELECT newest.seq, newest.to_status, newest.refundable,
                   p.amount AS requested,
+                  authorized.amount AS "authorized?",
                   stored.payment_id AS "stored_payment?",
                   stored.seq AS "stored_seq?",
                   stored.kind AS "stored_kind?",
@@ -840,7 +1104,10 @@ async fn read_state<R>(
                   stored.to_status AS "stored_to?",
                   stored.amount AS "stored_amount?",
                   stored.refundable AS "stored_refundable?",
-                  stored_authorization.expires_at AS "expires_at?"
+                  stored_authorization.expires_at AS "expires_at?",
+                  stored_capture.fee AS "fee?",
+                  stored_capture.captured_at AS "captured_at?",
+                  stored_capture.ledger_transaction_id AS "capture_posting?"
              FROM payments p
             CROSS JOIN LATERAL (
                   SELECT t.seq, t.to_status, t.refundable
@@ -849,9 +1116,12 @@ async fn read_state<R>(
                    ORDER BY t.seq DESC
                    LIMIT 1
                   ) newest
+             LEFT JOIN payment_authorizations authorized ON authorized.payment_id = p.id
              LEFT JOIN payment_transitions stored ON stored.id = $2
              LEFT JOIN payment_authorizations stored_authorization
                     ON stored_authorization.transition_id = stored.id
+             LEFT JOIN payment_captures stored_capture
+                    ON stored_capture.transition_id = stored.id
             WHERE p.id = $1"#,
         plan.asked.payment.get(),
         plan.id.get()
@@ -887,7 +1157,23 @@ async fn read_state<R>(
                         .expect("payments_id_check allows only UUIDv7 IDs"),
                     kind,
                     amount,
-                    detail: stored_detail(kind, row.expires_at),
+                    detail: match kind {
+                        StepKind::Authorize => Detail::Authorization {
+                            expires_at: stored_time(row.expires_at.expect(HAS_RECORD)),
+                        },
+                        StepKind::Capture => Detail::Capture {
+                            fee: row.fee.expect(HAS_RECORD),
+                            captured_at: stored_time(row.captured_at.expect(HAS_RECORD)),
+                            posting: row.capture_posting.expect(HAS_RECORD),
+                        },
+                        StepKind::Create
+                        | StepKind::Decline
+                        | StepKind::Cancel
+                        | StepKind::Void
+                        | StepKind::Expire
+                        | StepKind::Settle
+                        | StepKind::Refund => Detail::None,
+                    },
                 },
                 recorded: Recorded {
                     seq,
@@ -905,27 +1191,17 @@ async fn read_state<R>(
         refundable: row.refundable,
         requested: PositiveAmount::new(row.requested)
             .expect("payments_amount_check keeps it between 1 and the cap"),
+        authorized: row.authorized.map(|amount| {
+            PositiveAmount::new(amount)
+                .expect("an authorization is at least 1 and at most the request")
+        }),
         stored,
     })
 }
 
-/// What a stored step's record holds. Its kind says which record it has, and a
-/// committed step of a kind that carries data has its record (LG004).
-fn stored_detail(kind: StepKind, expires_at: Option<DateTime<Utc>>) -> Detail {
-    match kind {
-        StepKind::Authorize => Detail::Authorization {
-            expires_at: stored_time(expires_at.expect("LG004 keeps an authorization's record")),
-        },
-        StepKind::Create
-        | StepKind::Decline
-        | StepKind::Cancel
-        | StepKind::Capture
-        | StepKind::Void
-        | StepKind::Expire
-        | StepKind::Settle
-        | StepKind::Refund => Detail::None,
-    }
-}
+/// Why a stored step's kind tells which record it has: a committed step of a
+/// kind that carries data has its record (LG004).
+const HAS_RECORD: &str = "LG004 keeps the record of a step that carries data";
 
 fn stored_time(time: DateTime<Utc>) -> BusinessTime {
     BusinessTime::new(time).expect("a time read from the database can be stored")
@@ -986,6 +1262,31 @@ async fn insert_record(
                 plan.asked.amount,
                 state.requested.get(),
                 expires_at.get()
+            )
+            .execute(&mut **tx)
+            .await?;
+            Ok(())
+        }
+        Detail::Capture {
+            fee,
+            captured_at,
+            posting,
+        } => {
+            let authorized = state
+                .authorized
+                .expect("the status allows a capture only after an authorization");
+            sqlx::query!(
+                "INSERT INTO payment_captures \
+                     (transition_id, payment_id, amount, authorized_amount, fee, captured_at, \
+                      ledger_transaction_id) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                plan.id.get(),
+                plan.asked.payment.get(),
+                plan.asked.amount,
+                authorized.get(),
+                fee,
+                captured_at.get(),
+                posting
             )
             .execute(&mut **tx)
             .await?;
@@ -1069,6 +1370,75 @@ mod tests {
                 !code.starts_with("23") && !code.starts_with("LG") && code != "53200"
             );
             prop_assert_eq!(classify(Some(&code)), Failure::NotConfirmed);
+        }
+    }
+
+    fn capture_accounts() -> CaptureAccounts {
+        CaptureAccounts {
+            receivable: AccountId::now_v7(),
+            payable: AccountId::now_v7(),
+            fees: AccountId::now_v7(),
+        }
+    }
+
+    /// The lines of a capture's posting, as (which account, amount).
+    fn capture_lines(captured: i64, fee: i64) -> Vec<(&'static str, i64)> {
+        let accounts = capture_accounts();
+        let (receivable, payable, fees) = (accounts.receivable, accounts.payable, accounts.fees);
+        let posting = capture_posting(
+            TransactionId::now_v7(),
+            Currency::parse("EUR").expect("valid code"),
+            accounts,
+            PositiveAmount::new(captured).expect("valid amount"),
+            fee,
+        );
+        posting
+            .entries()
+            .iter()
+            .map(|entry| {
+                let name = if entry.account == receivable {
+                    "receivable"
+                } else if entry.account == payable {
+                    "payable"
+                } else {
+                    assert_eq!(entry.account, fees);
+                    "fees"
+                };
+                (name, entry.amount.get())
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_captures_posting_has_the_lines_of_adr_0020() {
+        assert_eq!(
+            capture_lines(8_000, 200),
+            [("receivable", 8_000), ("payable", -7_800), ("fees", -200)]
+        );
+        // A fee of 0, or of the whole capture, leaves its line out.
+        assert_eq!(
+            capture_lines(8_000, 0),
+            [("receivable", 8_000), ("payable", -8_000)]
+        );
+        assert_eq!(
+            capture_lines(8_000, 8_000),
+            [("receivable", 8_000), ("fees", -8_000)]
+        );
+    }
+
+    proptest! {
+        #[test]
+        fn a_captures_posting_can_always_be_built(
+            captured in 1_i64..=money::MAX_ABS,
+            rate in 0_u16..=10_000,
+        ) {
+            // LedgerTransaction::new checks the balance, and fee() the share, so
+            // building one is the property.
+            let amount = PositiveAmount::new(captured).expect("valid amount");
+            let rate = BasisPoints::new(rate).expect("valid rate");
+            let lines = capture_lines(captured, money::fee(amount, rate));
+            prop_assert!((2..=3).contains(&lines.len()));
+            prop_assert_eq!(lines[0], ("receivable", captured));
         }
     }
 

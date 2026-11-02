@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "CREATE FUNCTION shift_a_unit() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.line_no = 2 THEN NEW.amount := NEW.amount + 1; END IF; IF NEW.line_no = 3 THEN NEW.amount := NEW.amount - 1; END IF; RETURN NEW; END $$",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "5f3fe06bca9221510fb810a2d66f333f6ab8b8f2b61790ecd7541fb10d3afd50"
+}

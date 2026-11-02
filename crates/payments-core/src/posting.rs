@@ -13,7 +13,7 @@
 
 #![forbid(clippy::arithmetic_side_effects, clippy::as_conversions)]
 
-use sqlx::{PgPool, Postgres, Transaction};
+use sqlx::{PgExecutor, PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
 use crate::db::{CommitError, code_and_constraint, commit};
@@ -225,6 +225,22 @@ pub async fn post(pool: &PgPool, transaction: &LedgerTransaction) -> Result<Post
 /// only if it committed.
 async fn compare(pool: &PgPool, transaction: &LedgerTransaction) -> Result<Posted, PostError> {
     let id = transaction.id().get();
+    match is_stored_as(pool, transaction).await {
+        Ok(true) => Ok(Posted::AlreadyApplied),
+        Ok(false) => Err(PostError::Mismatch { id }),
+        Err(source) => Err(PostError::NotConfirmed { id, source }),
+    }
+}
+
+/// Whether the stored ledger transaction with this ID has exactly these entries.
+/// A payment command compares on the connection that holds its lock, because
+/// asking the pool for another one while it holds that one can wait for itself
+/// (ADR-0019).
+pub(crate) async fn is_stored_as<'e>(
+    executor: impl PgExecutor<'e>,
+    transaction: &LedgerTransaction,
+) -> sqlx::Result<bool> {
+    let id = transaction.id().get();
     let rows = sqlx::query!(
         r#"SELECT h.entry_count, h.currency AS "currency!", e.line_no, e.account_id, e.amount
              FROM ledger_transactions h
@@ -233,9 +249,8 @@ async fn compare(pool: &PgPool, transaction: &LedgerTransaction) -> Result<Poste
             ORDER BY e.line_no"#,
         id
     )
-    .fetch_all(pool)
-    .await
-    .map_err(|source| PostError::NotConfirmed { id, source })?;
+    .fetch_all(executor)
+    .await?;
     let stored: Vec<(i32, String, i32, Uuid, i64)> = rows
         .into_iter()
         .map(|row| {
@@ -263,11 +278,7 @@ async fn compare(pool: &PgPool, transaction: &LedgerTransaction) -> Result<Poste
             )
         })
         .collect();
-    if stored == intended {
-        Ok(Posted::AlreadyApplied)
-    } else {
-        Err(PostError::Mismatch { id })
-    }
+    Ok(stored == intended)
 }
 
 /// The statement a database error came from.
