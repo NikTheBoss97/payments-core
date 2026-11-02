@@ -10,7 +10,7 @@ publish.workspace = true
 
 [dependencies]
 # PostgreSQL access through compile-time checked queries (ADR-0006).
-sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "postgres", "macros", "uuid"] }
+sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "postgres", "macros", "uuid", "chrono"] }
 # Derives Display and Error for the error types (ADR-0015). sqlx depends on
 # it too.
 thiserror = "2.0.21"

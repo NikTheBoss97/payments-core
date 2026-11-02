@@ -80,6 +80,30 @@ so a lock entry that is never built costs nothing.
 - Linux builds also compile `iana-time-zone`, which nothing in the library
   uses.
 
+## Amendments
+
+- 2026-11-02: measured while building the type, on PostgreSQL 18.6 and sqlx
+  `f1e94ec`, and decided by the owner. Everything else above stands.
+  - **How a time is normalised.** The newtype uses
+    `DateTime::from_timestamp_micros(time.timestamp_micros())`, not
+    `trunc_subsecs(6)`. sqlx's re-export leaves out the `SubsecRound` trait, so
+    `trunc_subsecs` would need the direct dependency that this ADR avoids. And
+    truncating is not enough: chrono parses a leap second such as `23:59:60.5`,
+    which PostgreSQL returned as `00:00:00.5` of the next day, so every retry of
+    that command would be `Mismatch`. The round trip folds a leap second into
+    the next second, as the database does.
+  - **What sqlx drops.** "Dropping the rest" holds only from 2000 on. sqlx counts
+    microseconds from 2000-01-01 and rounds towards it, so
+    `1999-12-31T23:59:59.123456789Z` came back as `.123457`. The newtype drops
+    the rest downwards in every era before sqlx sees the time, so this no longer
+    matters.
+  - **Its range.** Building a time now fails when a `timestamptz` cannot hold it.
+    Below 4714-11-24 BC, chrono can represent a time and PostgreSQL answers
+    `22008`, which ADR-0019 would read as `NotConfirmed`: a retry that can never
+    succeed. Holding the type now proves that the database accepts the value, as
+    it does for IDs and money. chrono's latest time is within PostgreSQL's range,
+    but a leap second in that very second folds beyond it, and is refused too.
+
 ## References
 
 - Krishna Kulkarni and Jan-Eike Michels, [Temporal features in SQL:2011](https://doi.org/10.1145/2380776.2380786) (SIGMOD Record, 2012).
