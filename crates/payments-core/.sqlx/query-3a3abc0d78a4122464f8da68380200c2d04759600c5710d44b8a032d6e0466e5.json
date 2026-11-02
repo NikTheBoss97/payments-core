@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT newest.seq, newest.to_status, newest.refundable,\n                  stored.payment_id AS \"stored_payment?\",\n                  stored.seq AS \"stored_seq?\",\n                  stored.kind AS \"stored_kind?\",\n                  stored.from_status AS \"stored_from?\",\n                  stored.to_status AS \"stored_to?\",\n                  stored.amount AS \"stored_amount?\",\n                  stored.refundable AS \"stored_refundable?\"\n             FROM payments p\n            CROSS JOIN LATERAL (\n                  SELECT t.seq, t.to_status, t.refundable\n                    FROM payment_transitions t\n                   WHERE t.payment_id = p.id\n                   ORDER BY t.seq DESC\n                   LIMIT 1\n                  ) newest\n             LEFT JOIN payment_transitions stored ON stored.id = $2\n            WHERE p.id = $1",
+  "query": "SELECT newest.seq, newest.to_status, newest.refundable,\n                  p.amount AS requested,\n                  stored.payment_id AS \"stored_payment?\",\n                  stored.seq AS \"stored_seq?\",\n                  stored.kind AS \"stored_kind?\",\n                  stored.from_status AS \"stored_from?\",\n                  stored.to_status AS \"stored_to?\",\n                  stored.amount AS \"stored_amount?\",\n                  stored.refundable AS \"stored_refundable?\",\n                  stored_authorization.expires_at AS \"expires_at?\"\n             FROM payments p\n            CROSS JOIN LATERAL (\n                  SELECT t.seq, t.to_status, t.refundable\n                    FROM payment_transitions t\n                   WHERE t.payment_id = p.id\n                   ORDER BY t.seq DESC\n                   LIMIT 1\n                  ) newest\n             LEFT JOIN payment_transitions stored ON stored.id = $2\n             LEFT JOIN payment_authorizations stored_authorization\n                    ON stored_authorization.transition_id = stored.id\n            WHERE p.id = $1",
   "describe": {
     "columns": [
       {
@@ -38,6 +38,17 @@
       },
       {
         "ordinal": 3,
+        "name": "requested",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "payments",
+            "name": "amount"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
         "name": "stored_payment?",
         "type_info": "Uuid",
         "origin": {
@@ -48,7 +59,7 @@
         }
       },
       {
-        "ordinal": 4,
+        "ordinal": 5,
         "name": "stored_seq?",
         "type_info": "Int4",
         "origin": {
@@ -59,7 +70,7 @@
         }
       },
       {
-        "ordinal": 5,
+        "ordinal": 6,
         "name": "stored_kind?",
         "type_info": "Text",
         "origin": {
@@ -70,7 +81,7 @@
         }
       },
       {
-        "ordinal": 6,
+        "ordinal": 7,
         "name": "stored_from?",
         "type_info": "Text",
         "origin": {
@@ -81,7 +92,7 @@
         }
       },
       {
-        "ordinal": 7,
+        "ordinal": 8,
         "name": "stored_to?",
         "type_info": "Text",
         "origin": {
@@ -92,7 +103,7 @@
         }
       },
       {
-        "ordinal": 8,
+        "ordinal": 9,
         "name": "stored_amount?",
         "type_info": "Int8",
         "origin": {
@@ -103,13 +114,24 @@
         }
       },
       {
-        "ordinal": 9,
+        "ordinal": 10,
         "name": "stored_refundable?",
         "type_info": "Int8",
         "origin": {
           "Table": {
             "table": "payment_transitions",
             "name": "refundable"
+          }
+        }
+      },
+      {
+        "ordinal": 11,
+        "name": "expires_at?",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "payment_authorizations",
+            "name": "expires_at"
           }
         }
       }
@@ -124,6 +146,8 @@
       false,
       false,
       false,
+      false,
+      true,
       true,
       true,
       true,
@@ -133,5 +157,5 @@
       true
     ]
   },
-  "hash": "56238f5c30132a2dc2714cc2f6144e5a7c8c964d1610deb74ff6837e9b17d687"
+  "hash": "3a3abc0d78a4122464f8da68380200c2d04759600c5710d44b8a032d6e0466e5"
 }
