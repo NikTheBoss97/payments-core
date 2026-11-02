@@ -4,15 +4,21 @@
 //! bypassing the domain types, the way a buggy code path or a manual session
 //! could write them (ADR-0017).
 
+use std::error::Error;
+
 use payments_core::accounts::Psp;
-use payments_core::ids::MerchantId;
+use payments_core::db::commit;
+use payments_core::ids::{MerchantId, PaymentId};
 use payments_core::lifecycle::PaymentStatus;
 use payments_core::money::{BasisPoints, Currency, PositiveAmount};
-use payments_core::payments::{AccountCandidates, CreatePayment};
-use sqlx::{PgConnection, Postgres, Transaction};
+use payments_core::payments::{
+    AccountCandidates, Authorize, CreatePayment, find_payment, lock_key,
+};
+use payments_core::times::BusinessTime;
+use sqlx::{PgConnection, PgPool, Postgres, Transaction};
 use uuid::{Uuid, uuid};
 
-use super::{account_id, payment_id, transition_id};
+use super::{account_id, payment_id, runtime_connection, runtime_transaction, transition_id};
 
 /// A valid UUID that is not version 7.
 pub const VERSION_4: Uuid = uuid!("019b76da-a800-4000-8000-000000000001");
@@ -42,6 +48,24 @@ pub fn create_command(n: u32, merchant: MerchantId) -> CreatePayment {
             merchant_payable: candidate(1),
             psp_receivable: candidate(2),
         },
+    }
+}
+
+/// When the test authorizations expire: a time that the command carries, and a
+/// retry compares (ADR-0022).
+pub fn deadline() -> BusinessTime {
+    let time = "2026-01-08T12:00:00.123456Z".parse().expect("a valid time");
+    BusinessTime::new(time).expect("a time that can be stored")
+}
+
+/// The command that authorizes a payment for [`AUTHORIZED`]. Its step ID is
+/// `1000 + n`, apart from those of [`create_command`].
+pub fn authorize_command(n: u32, payment: PaymentId) -> Authorize {
+    Authorize {
+        step: transition_id(n.checked_add(1000).expect("a small n")),
+        payment,
+        amount: PositiveAmount::new(AUTHORIZED).expect("valid amount"),
+        expires_at: deadline(),
     }
 }
 
@@ -494,4 +518,45 @@ pub async fn payment_at(
     };
     step.insert(conn).await?;
     Ok(step)
+}
+
+/// A merchant and its accounts.
+pub async fn books(pool: &PgPool) -> Result<Books, Box<dyn Error>> {
+    let mut conn = runtime_connection(pool).await?;
+    Ok(open_books(&mut conn).await?)
+}
+
+/// Commits a payment that stands at `status`, and returns its newest step.
+pub async fn committed_at(
+    pool: &PgPool,
+    books: &Books,
+    status: PaymentStatus,
+) -> Result<Step, Box<dyn Error>> {
+    let mut tx = runtime_transaction(pool).await?;
+    let step = payment_at(&mut tx, books, status).await?;
+    commit(tx).await?;
+    Ok(step)
+}
+
+/// How many steps a payment has.
+pub async fn steps(pool: &PgPool, payment: PaymentId) -> sqlx::Result<i64> {
+    sqlx::query_scalar!(
+        r#"SELECT count(*) AS "count!" FROM payment_transitions WHERE payment_id = $1"#,
+        payment.get()
+    )
+    .fetch_one(pool)
+    .await
+}
+
+pub async fn status_of(app: &PgPool, payment: PaymentId) -> Result<PaymentStatus, Box<dyn Error>> {
+    let payment = find_payment(app, payment).await?;
+    Ok(payment.ok_or("the payment exists")?.status)
+}
+
+/// Takes a payment's lock, as every command does first (ADR-0018).
+pub async fn take_lock(tx: &mut Transaction<'_, Postgres>, payment: PaymentId) -> sqlx::Result<()> {
+    sqlx::query!("SELECT pg_advisory_xact_lock($1)", lock_key(payment))
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
 }

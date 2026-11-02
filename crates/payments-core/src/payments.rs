@@ -15,14 +15,18 @@
 
 #![forbid(clippy::arithmetic_side_effects, clippy::as_conversions)]
 
+use sqlx::types::chrono::{DateTime, Utc};
 use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
 use crate::accounts::{AccountError, AccountRef, Psp, open_account};
 use crate::db::{CommitError, code_and_constraint, commit};
 use crate::ids::{AccountId, MerchantId, PaymentId, TransitionId};
-use crate::lifecycle::{Event, IllegalTransition, PaymentStatus, StepKind, Transition, next};
+use crate::lifecycle::{
+    self, Event, IllegalTransition, PaymentStatus, Refused, StepKind, Transition, next,
+};
 use crate::money::{BasisPoints, Currency, PositiveAmount};
+use crate::times::BusinessTime;
 
 /// Where a command landed: its step's `seq`, the statuses it moved between,
 /// and the refundable amount after it. A retry gets the same values, read from
@@ -411,6 +415,95 @@ async fn stored_create(
     }))
 }
 
+/// The command that records an authorization (ADR-0016).
+#[derive(Debug)]
+pub struct Authorize {
+    /// The step's ID, which identifies this command.
+    pub step: TransitionId,
+    pub payment: PaymentId,
+    /// The authorized amount, at most the requested one.
+    pub amount: PositiveAmount,
+    /// The deadline that the PSP reported, never enforced by a clock here
+    /// (ADR-0016).
+    pub expires_at: BusinessTime,
+}
+
+/// Why an [`Authorize`] was not applied. Only [`AuthorizeError::NotConfirmed`]
+/// may have stored its step.
+#[derive(Debug, thiserror::Error)]
+pub enum AuthorizeError {
+    /// No payment has this ID.
+    #[error("payment {payment} does not exist")]
+    NotFound { payment: PaymentId },
+    /// The status or the amount refuses it. Nothing is stored, and a retry is
+    /// decided again (ADR-0019).
+    #[error(transparent)]
+    Refused(Refused),
+    /// The command's step ID is stored with other content: a bug, never
+    /// retried.
+    #[error("step {step} is stored with other content")]
+    Mismatch { step: Uuid },
+    /// The database caught what the domain types should have prevented, or a
+    /// writer that skipped the payment's lock got there first (ADR-0018): a bug,
+    /// never retried.
+    #[error("step {step}: the database rejected it as invalid")]
+    Invariant {
+        step: Uuid,
+        #[source]
+        source: sqlx::Error,
+    },
+    /// The step may or may not be stored. Send the identical command again
+    /// later, never one with new IDs (ADR-0019).
+    #[error("step {step} may or may not be stored: send the command again")]
+    NotConfirmed {
+        step: Uuid,
+        #[source]
+        source: sqlx::Error,
+    },
+}
+
+impl AuthorizeError {
+    fn new(command: &Authorize, failed: Failed<Refused>) -> Self {
+        let step = command.step.get();
+        match failed {
+            Failed::NotFound => Self::NotFound {
+                payment: command.payment,
+            },
+            Failed::Refused(refused) => Self::Refused(refused),
+            Failed::Mismatch => Self::Mismatch { step },
+            Failed::Duplicate(source) | Failed::Invariant(source) => {
+                Self::Invariant { step, source }
+            }
+            Failed::NotConfirmed(source) => Self::NotConfirmed { step, source },
+        }
+    }
+}
+
+/// Records that the PSP authorized a payment, for at most the requested amount
+/// (ADR-0016).
+///
+/// # Errors
+///
+/// See [`AuthorizeError`].
+pub async fn authorize(pool: &PgPool, command: &Authorize) -> Result<Outcome, AuthorizeError> {
+    let plan = Plan {
+        id: &command.step,
+        asked: Asked {
+            payment: command.payment,
+            kind: StepKind::Authorize,
+            amount: command.amount.get(),
+            detail: Detail::Authorization {
+                expires_at: command.expires_at,
+            },
+        },
+    };
+    apply(pool, &plan, |state| {
+        lifecycle::authorize(state.status, command.amount, state.requested)
+    })
+    .await
+    .map_err(|failed| AuthorizeError::new(command, failed))
+}
+
 /// A command that moves a payment and carries nothing else: decline, cancel,
 /// void, expire or settle.
 #[derive(Debug)]
@@ -529,6 +622,7 @@ async fn plain_step(
             payment: command.payment,
             kind,
             amount: 0,
+            detail: Detail::None,
         },
     };
     apply(pool, &plan, |state| next(state.status, event))
@@ -554,6 +648,17 @@ pub(crate) struct Asked {
     payment: PaymentId,
     kind: StepKind,
     amount: i64,
+    detail: Detail,
+}
+
+/// What a step's record holds that a retry compares.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Detail {
+    /// This kind of step has no record.
+    None,
+    Authorization {
+        expires_at: BusinessTime,
+    },
 }
 
 /// A command as its unit of work sees it.
@@ -574,6 +679,8 @@ pub(crate) struct State {
     seq: i32,
     status: PaymentStatus,
     refundable: i64,
+    /// The payment's requested amount.
+    requested: PositiveAmount,
     /// The step with the command's ID, on any payment.
     stored: Option<Stored>,
 }
@@ -681,6 +788,9 @@ pub(crate) async fn apply_in<R>(
     )
     .await
     .map_err(Failed::database)?;
+    insert_record(tx, plan, &state)
+        .await
+        .map_err(Failed::database)?;
     Ok(Outcome::Applied(Recorded {
         seq,
         from: step.from(),
@@ -722,13 +832,15 @@ async fn read_state<R>(
 ) -> Result<State, Failed<R>> {
     let row = sqlx::query!(
         r#"SELECT newest.seq, newest.to_status, newest.refundable,
+                  p.amount AS requested,
                   stored.payment_id AS "stored_payment?",
                   stored.seq AS "stored_seq?",
                   stored.kind AS "stored_kind?",
                   stored.from_status AS "stored_from?",
                   stored.to_status AS "stored_to?",
                   stored.amount AS "stored_amount?",
-                  stored.refundable AS "stored_refundable?"
+                  stored.refundable AS "stored_refundable?",
+                  stored_authorization.expires_at AS "expires_at?"
              FROM payments p
             CROSS JOIN LATERAL (
                   SELECT t.seq, t.to_status, t.refundable
@@ -738,6 +850,8 @@ async fn read_state<R>(
                    LIMIT 1
                   ) newest
              LEFT JOIN payment_transitions stored ON stored.id = $2
+             LEFT JOIN payment_authorizations stored_authorization
+                    ON stored_authorization.transition_id = stored.id
             WHERE p.id = $1"#,
         plan.asked.payment.get(),
         plan.id.get()
@@ -764,29 +878,57 @@ async fn read_state<R>(
             Some(to),
             Some(amount),
             Some(refundable),
-        ) => Some(Stored {
-            asked: Asked {
-                payment: PaymentId::try_from(payment)
-                    .expect("payments_id_check allows only UUIDv7 IDs"),
-                kind: StepKind::parse(&kind)
-                    .expect("payment_transitions_edge_check allows only known kinds"),
-                amount,
-            },
-            recorded: Recorded {
-                seq,
-                from: parse_status(&from),
-                to: parse_status(&to),
-                refundable,
-            },
-        }),
+        ) => {
+            let kind = StepKind::parse(&kind)
+                .expect("payment_transitions_edge_check allows only known kinds");
+            Some(Stored {
+                asked: Asked {
+                    payment: PaymentId::try_from(payment)
+                        .expect("payments_id_check allows only UUIDv7 IDs"),
+                    kind,
+                    amount,
+                    detail: stored_detail(kind, row.expires_at),
+                },
+                recorded: Recorded {
+                    seq,
+                    from: parse_status(&from),
+                    to: parse_status(&to),
+                    refundable,
+                },
+            })
+        }
         _ => None,
     };
     Ok(State {
         seq: row.seq,
         status: parse_status(&row.to_status),
         refundable: row.refundable,
+        requested: PositiveAmount::new(row.requested)
+            .expect("payments_amount_check keeps it between 1 and the cap"),
         stored,
     })
+}
+
+/// What a stored step's record holds. Its kind says which record it has, and a
+/// committed step of a kind that carries data has its record (LG004).
+fn stored_detail(kind: StepKind, expires_at: Option<DateTime<Utc>>) -> Detail {
+    match kind {
+        StepKind::Authorize => Detail::Authorization {
+            expires_at: stored_time(expires_at.expect("LG004 keeps an authorization's record")),
+        },
+        StepKind::Create
+        | StepKind::Decline
+        | StepKind::Cancel
+        | StepKind::Capture
+        | StepKind::Void
+        | StepKind::Expire
+        | StepKind::Settle
+        | StepKind::Refund => Detail::None,
+    }
+}
+
+fn stored_time(time: DateTime<Utc>) -> BusinessTime {
+    BusinessTime::new(time).expect("a time read from the database can be stored")
 }
 
 /// One row of a payment's history. Its move can come only from a [`Transition`],
@@ -823,6 +965,33 @@ async fn insert_step(tx: &mut Transaction<'_, Postgres>, row: &NewStep<'_>) -> s
     .execute(&mut **tx)
     .await?;
     Ok(())
+}
+
+/// Writes the record of a step whose kind carries data, after its step, whose row
+/// the record's foreign key refers to (ADR-0017).
+async fn insert_record(
+    tx: &mut Transaction<'_, Postgres>,
+    plan: &Plan<'_>,
+    state: &State,
+) -> sqlx::Result<()> {
+    match plan.asked.detail {
+        Detail::None => Ok(()),
+        Detail::Authorization { expires_at } => {
+            sqlx::query!(
+                "INSERT INTO payment_authorizations \
+                     (transition_id, payment_id, amount, payment_amount, expires_at) \
+                 VALUES ($1, $2, $3, $4, $5)",
+                plan.id.get(),
+                plan.asked.payment.get(),
+                plan.asked.amount,
+                state.requested.get(),
+                expires_at.get()
+            )
+            .execute(&mut **tx)
+            .await?;
+            Ok(())
+        }
+    }
 }
 
 fn parse_status(label: &str) -> PaymentStatus {

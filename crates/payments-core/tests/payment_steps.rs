@@ -17,20 +17,20 @@ use std::fs;
 use std::path::Path;
 
 use common::payments::{
-    AUTHORIZED, Books, REQUESTED, Step, insert_authorization, open_books, payment_at, refund_step,
+    AUTHORIZED, REQUESTED, Step, books, committed_at, insert_authorization, refund_step, status_of,
+    steps, take_lock,
 };
 use common::{
-    CHECK_VIOLATION, UNIQUE_VIOLATION, assert_guard, assert_violation, runtime_connection,
-    runtime_pool, runtime_pool_of_one, runtime_pool_with_lock_timeout, runtime_transaction,
-    sqlstate, test_uuid, transition_id, wait_for_lock_wait,
+    CHECK_VIOLATION, UNIQUE_VIOLATION, assert_guard, assert_violation, runtime_pool,
+    runtime_pool_of_one, runtime_pool_with_lock_timeout, runtime_transaction, sqlstate, test_uuid,
+    transition_id, wait_for_lock_wait,
 };
 use futures_util::future::{join, join_all};
 use payments_core::db::commit;
 use payments_core::ids::PaymentId;
 use payments_core::lifecycle::{Event, IllegalTransition, PaymentStatus, next};
 use payments_core::payments::{
-    Outcome, Recorded, StepCommand, StepError, cancel, decline, expire, find_payment, lock_key,
-    settle, void,
+    Outcome, Recorded, StepCommand, StepError, cancel, decline, expire, lock_key, settle, void,
 };
 use sqlx::{PgPool, Postgres, Transaction};
 
@@ -56,53 +56,12 @@ async fn send(app: &PgPool, event: Event, command: &StepCommand) -> Result<Outco
     }
 }
 
-/// A merchant and its accounts.
-async fn books(pool: &PgPool) -> Result<Books, Box<dyn Error>> {
-    let mut conn = runtime_connection(pool).await?;
-    Ok(open_books(&mut conn).await?)
-}
-
-/// Commits a payment that stands at `status`, and returns its newest step.
-async fn committed_at(
-    pool: &PgPool,
-    books: &Books,
-    status: PaymentStatus,
-) -> Result<Step, Box<dyn Error>> {
-    let mut tx = runtime_transaction(pool).await?;
-    let step = payment_at(&mut tx, books, status).await?;
-    commit(tx).await?;
-    Ok(step)
-}
-
 /// A command with step ID `n` on the payment that `step` belongs to.
 fn command_on(n: u32, step: &Step) -> StepCommand {
     StepCommand {
         step: transition_id(n),
         payment: PaymentId::try_from(step.payment_id).expect("a UUIDv7"),
     }
-}
-
-/// How many steps a payment has.
-async fn steps(pool: &PgPool, payment: PaymentId) -> sqlx::Result<i64> {
-    sqlx::query_scalar!(
-        r#"SELECT count(*) AS "count!" FROM payment_transitions WHERE payment_id = $1"#,
-        payment.get()
-    )
-    .fetch_one(pool)
-    .await
-}
-
-async fn status_of(app: &PgPool, payment: PaymentId) -> Result<PaymentStatus, Box<dyn Error>> {
-    let payment = find_payment(app, payment).await?;
-    Ok(payment.ok_or("the payment exists")?.status)
-}
-
-/// Takes a payment's lock, as every command does first (ADR-0018).
-async fn take_lock(tx: &mut Transaction<'_, Postgres>, payment: PaymentId) -> sqlx::Result<()> {
-    sqlx::query!("SELECT pg_advisory_xact_lock($1)", lock_key(payment))
-        .execute(&mut **tx)
-        .await?;
-    Ok(())
 }
 
 /// A first attempt of `command`, uncommitted: under the lock, with its step
