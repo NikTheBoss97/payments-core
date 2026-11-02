@@ -1,0 +1,26 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT normal_side FROM account_kinds WHERE kind = 'fee_revenue'",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "normal_side",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "account_kinds",
+            "name": "normal_side"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "7e8a583dc464059b7ab1f1544574300e2633b725b3c5c8e7813c490877e59576"
+}

@@ -9,7 +9,7 @@ mod common;
 
 use std::error::Error;
 
-use common::{account_id, runtime_pool, sqlstate, transaction_id};
+use common::{account_id, runtime_pool, seed_kind, sqlstate, transaction_id};
 use payments_core::accounts::{AccountKey, AccountKind, NormalSide, Party, open_account};
 use payments_core::balances::{Balance, BalanceError, balance};
 use payments_core::ids::{AccountId, TransactionId};
@@ -114,6 +114,7 @@ async fn a_balance_beyond_bigint_is_an_overflow(pool: PgPool) -> TestResult {
     // 9,224 entries at the cap on one side of each account: the smallest
     // count whose sum passes the range of i64 (ADR-0003). The posting itself
     // balances, so the ledger accepts it; only the read overflows.
+    seed_kind(&pool, "cash", "debit").await?;
     let app = runtime_pool(&pool).await?;
     let cash = open(&app, 1, "cash", NormalSide::Debit).await?;
     let payable = open(&app, 2, "merchant_payable", NormalSide::Credit).await?;

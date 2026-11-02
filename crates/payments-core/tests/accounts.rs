@@ -14,7 +14,7 @@ mod common;
 use common::{
     APPEND_ONLY, CHECK_VIOLATION, FOREIGN_KEY_VIOLATION, INSUFFICIENT_PRIVILEGE,
     NOT_NULL_VIOLATION, UNIQUE_VIOLATION, assert_guard, assert_violation, runtime_connection,
-    sqlstate,
+    seed_kind, sqlstate,
 };
 use sqlx::{PgConnection, PgPool};
 use uuid::Uuid;
@@ -128,7 +128,7 @@ async fn the_business_key_is_unique(pool: PgPool) -> sqlx::Result<()> {
 
     // Changing any one column of the key makes another account.
     let other_kind = NewAccount {
-        kind: "cash",
+        kind: "merchant_payable",
         ..NewAccount::valid()
     };
     let other_party = NewAccount {
@@ -189,6 +189,9 @@ async fn kinds_are_lowercase_names(pool: PgPool) -> sqlx::Result<()> {
     }
 
     let longest = "a".repeat(63);
+    for kind in ["cash", "psp2_receivable", longest.as_str()] {
+        seed_kind(&pool, kind, "credit").await?;
+    }
     for kind in ["cash", "fee_revenue", "psp2_receivable", longest.as_str()] {
         let account = NewAccount {
             kind,
@@ -277,7 +280,7 @@ async fn the_normal_side_is_debit_or_credit(pool: PgPool) -> sqlx::Result<()> {
     .unwrap_err();
     assert_eq!(sqlstate(missing), NOT_NULL_VIOLATION);
 
-    for (kind, normal_side) in [("cash", "debit"), ("fee_revenue", "credit")] {
+    for (kind, normal_side) in [("psp_receivable", "debit"), ("fee_revenue", "credit")] {
         let account = NewAccount {
             kind,
             normal_side,
@@ -286,6 +289,42 @@ async fn the_normal_side_is_debit_or_credit(pool: PgPool) -> sqlx::Result<()> {
         account.insert(&mut app).await?;
     }
     assert_eq!(account_count(&pool).await?, 2);
+    Ok(())
+}
+
+#[sqlx::test]
+async fn the_kind_and_its_side_must_be_in_the_chart(pool: PgPool) -> sqlx::Result<()> {
+    let mut app = runtime_connection(&pool).await?;
+    for (kind, normal_side) in [
+        // A kind the chart does not have.
+        ("cash", "debit"),
+        // Kinds the chart has, on the side it does not give them.
+        ("psp_receivable", "credit"),
+        ("merchant_payable", "debit"),
+        ("fee_revenue", "debit"),
+    ] {
+        let account = NewAccount {
+            kind,
+            normal_side,
+            ..NewAccount::valid()
+        };
+        let err = account.insert_rejected(&mut app).await;
+        assert_violation(err, FOREIGN_KEY_VIOLATION, "accounts_kind_normal_side_fkey");
+    }
+
+    for (kind, normal_side) in [
+        ("psp_receivable", "debit"),
+        ("merchant_payable", "credit"),
+        ("fee_revenue", "credit"),
+    ] {
+        let account = NewAccount {
+            kind,
+            normal_side,
+            ..NewAccount::valid()
+        };
+        account.insert(&mut app).await?;
+    }
+    assert_eq!(account_count(&pool).await?, 3);
     Ok(())
 }
 

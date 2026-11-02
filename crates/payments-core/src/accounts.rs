@@ -461,6 +461,11 @@ mod tests {
                 UnknownCurrency,
             ),
             // Another key, or another rule that the types rule out: a bug.
+            (
+                Some("23503"),
+                Some("accounts_kind_normal_side_fkey"),
+                Invariant,
+            ),
             (Some("23503"), Some("another_fkey"), Invariant),
             (Some("23505"), Some("accounts_pkey"), Invariant),
             (Some("23514"), Some("accounts_kind_check"), Invariant),
