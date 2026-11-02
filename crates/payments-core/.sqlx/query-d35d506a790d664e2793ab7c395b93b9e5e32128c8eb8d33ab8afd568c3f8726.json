@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE account_kinds SET normal_side = 'debit' WHERE kind = 'fee_revenue'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "d35d506a790d664e2793ab7c395b93b9e5e32128c8eb8d33ab8afd568c3f8726"
+}

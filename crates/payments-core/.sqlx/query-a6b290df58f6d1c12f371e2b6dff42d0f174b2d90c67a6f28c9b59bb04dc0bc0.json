@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM account_kinds",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "a6b290df58f6d1c12f371e2b6dff42d0f174b2d90c67a6f28c9b59bb04dc0bc0"
+}

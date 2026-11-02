@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO account_kinds (kind, normal_side) VALUES ('cash', $1)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "03efa2e05b32e515d5d45320898f44e288bca4e74f8a8ecef2aa112228309d7a"
+}

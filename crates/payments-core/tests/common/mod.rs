@@ -94,6 +94,20 @@ async fn runtime_pool_with(pool: &PgPool, lock_timeout_ms: Option<i32>) -> sqlx:
         .await
 }
 
+/// Adds a kind to the chart of accounts, as a migration would, for a
+/// ledger-level test that needs one the chart does not have (ADR-0020). Pass
+/// the test's own pool: the runtime role can only read the chart.
+pub async fn seed_kind(pool: &PgPool, kind: &str, side: &str) -> sqlx::Result<()> {
+    sqlx::query!(
+        "INSERT INTO account_kinds (kind, normal_side) VALUES ($1, $2)",
+        kind,
+        side
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 /// A fixed UUIDv7 for tests (ADR-0005): 2026-01-01T00:00:00Z, with `n` in its
 /// last four bytes, so a failing test names a readable ID such as
 /// `019b76da-a800-7000-8000-000000000001`.

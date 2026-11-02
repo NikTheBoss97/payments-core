@@ -151,8 +151,11 @@ async fn both_normal_sides_round_trip_through_the_database(pool: PgPool) -> Test
     // SQL binds NormalSide::as_str() and Rust parses what comes back
     // (ADR-0009). This stands in for the check an enum type would give.
     let app = runtime_pool(&pool).await?;
-    for (n, side) in [(1, NormalSide::Debit), (2, NormalSide::Credit)] {
-        let key = platform(&format!("kind_{n}"), "EUR");
+    for (n, kind, side) in [
+        (1, "psp_receivable", NormalSide::Debit),
+        (2, "fee_revenue", NormalSide::Credit),
+    ] {
+        let key = platform(kind, "EUR");
         let id = open_account(&app, account_id(n), &key, side).await?;
         assert_eq!(
             find_account(&app, &key).await?,
@@ -166,9 +169,40 @@ async fn both_normal_sides_round_trip_through_the_database(pool: PgPool) -> Test
     Ok(())
 }
 
-/// Whether the accounts table accepts this kind and party. The insert runs
-/// in a savepoint, so a rejection does not abort the surrounding
-/// transaction, and the row is never kept.
+#[sqlx::test]
+async fn a_kind_outside_the_chart_is_a_bug(pool: PgPool) -> TestResult {
+    // Library code builds keys only through AccountRef (ADR-0020), so neither
+    // a kind the chart lacks nor a chart kind on its other side can arise.
+    let app = runtime_pool(&pool).await?;
+    for (n, key, side) in [
+        (1, platform("cash", "EUR"), NormalSide::Debit),
+        (2, platform("fee_revenue", "EUR"), NormalSide::Debit),
+    ] {
+        let err = open_account(&app, account_id(n), &key, side)
+            .await
+            .unwrap_err();
+        let AccountError::Invariant {
+            key: reported,
+            source,
+        } = err
+        else {
+            panic!("expected Invariant, got {err:?}");
+        };
+        assert_eq!(reported, key);
+        assert_violation(
+            source,
+            FOREIGN_KEY_VIOLATION,
+            "accounts_kind_normal_side_fkey",
+        );
+    }
+    app.close().await;
+    Ok(())
+}
+
+/// Whether the accounts table's CHECKs accept this kind and party. The chart's
+/// foreign key runs after the CHECKs, so reaching it means that the spelling
+/// passed. The insert runs in a savepoint, so a rejection does not abort the
+/// surrounding transaction, and the row is never kept.
 async fn accepts(conn: &mut PgConnection, kind: &str, party: &str) -> sqlx::Result<bool> {
     sqlx::query!("SAVEPOINT spelling")
         .execute(&mut *conn)
@@ -190,11 +224,12 @@ async fn accepts(conn: &mut PgConnection, kind: &str, party: &str) -> sqlx::Resu
     match insert {
         Ok(_) => Ok(true),
         Err(err) => {
-            let code = err.as_database_error().and_then(|db| db.code());
-            if code.as_deref() == Some(CHECK_VIOLATION) {
-                Ok(false)
-            } else {
-                Err(err)
+            let db = err.as_database_error();
+            let code = db.and_then(|db| db.code());
+            match (code.as_deref(), db.and_then(|db| db.constraint())) {
+                (Some(CHECK_VIOLATION), _) => Ok(false),
+                (Some(FOREIGN_KEY_VIOLATION), Some("accounts_kind_normal_side_fkey")) => Ok(true),
+                _ => Err(err),
             }
         }
     }

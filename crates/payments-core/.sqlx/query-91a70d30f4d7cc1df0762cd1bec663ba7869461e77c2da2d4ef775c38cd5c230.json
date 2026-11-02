@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO account_kinds (kind, normal_side) VALUES ('fee_revenue', 'debit')",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "91a70d30f4d7cc1df0762cd1bec663ba7869461e77c2da2d4ef775c38cd5c230"
+}

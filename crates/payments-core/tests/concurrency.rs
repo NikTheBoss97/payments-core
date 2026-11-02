@@ -13,7 +13,7 @@ mod common;
 use std::collections::HashMap;
 use std::error::Error;
 
-use common::{account_id, runtime_pool, transaction_id};
+use common::{account_id, runtime_pool, seed_kind, transaction_id};
 use futures_util::future::join_all;
 use payments_core::accounts::{AccountKey, AccountKind, NormalSide, Party, open_account};
 use payments_core::balances::balance;
@@ -97,8 +97,12 @@ async fn concurrent_postings_match_an_in_memory_model(pool: PgPool) -> TestResul
         } else {
             NormalSide::Debit
         };
-        eur.push(open(&app, n, &format!("kind_{n}"), "EUR", side).await?);
+        let kind = format!("kind_{n}");
+        seed_kind(&pool, &kind, side.as_str()).await?;
+        eur.push(open(&app, n, &kind, "EUR", side).await?);
     }
+    seed_kind(&pool, "kind_7", "debit").await?;
+    seed_kind(&pool, "kind_8", "credit").await?;
     let usd = vec![
         open(&app, 7, "kind_7", "USD", NormalSide::Debit).await?,
         open(&app, 8, "kind_8", "USD", NormalSide::Credit).await?,
@@ -161,6 +165,7 @@ async fn concurrent_retries_apply_a_posting_once(pool: PgPool) -> TestResult {
     // Eight copies of one posting, as eight retries racing each other: one
     // inserts it, and the others wait for it to commit, find the same ID and
     // compare (ADR-0015).
+    seed_kind(&pool, "cash", "debit").await?;
     let app = runtime_pool(&pool).await?;
     let cash = open(&app, 1, "cash", "EUR", NormalSide::Debit).await?;
     let payable = open(&app, 2, "merchant_payable", "EUR", NormalSide::Credit).await?;

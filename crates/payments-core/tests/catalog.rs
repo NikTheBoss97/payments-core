@@ -70,6 +70,7 @@ async fn the_runtime_role_has_exactly_the_expected_privileges(pool: PgPool) -> s
     assert_eq!(
         granted,
         [
+            "account_kinds SELECT",
             "accounts SELECT",
             "accounts.currency INSERT",
             "accounts.id INSERT",
@@ -179,6 +180,16 @@ async fn every_guard_trigger_fires_always(pool: PgPool) -> sqlx::Result<()> {
     triggers.sort();
 
     let expected: Vec<[String; 4]> = [
+        (
+            "account_kinds",
+            "account_kinds_append_only",
+            "reject_change",
+        ),
+        (
+            "account_kinds",
+            "account_kinds_no_truncate",
+            "reject_change",
+        ),
         ("accounts", "accounts_append_only", "reject_change"),
         ("accounts", "accounts_no_truncate", "reject_change"),
         ("currencies", "currencies_append_only", "reject_change"),
@@ -289,6 +300,8 @@ async fn every_column_has_its_type_and_is_not_null(pool: PgPool) -> sqlx::Result
     assert_eq!(
         columns,
         [
+            "account_kinds.kind text not null",
+            "account_kinds.normal_side text not null",
             "accounts.currency currency_code not null",
             "accounts.id uuid not null",
             "accounts.kind text not null",

@@ -1,0 +1,38 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT kind, normal_side FROM account_kinds ORDER BY kind",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "kind",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "account_kinds",
+            "name": "kind"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "normal_side",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "account_kinds",
+            "name": "normal_side"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "da89ba78390b55bd0f9edc713ee0883ecbe8637c53328b5fc40cf1d0100593e5"
+}

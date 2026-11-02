@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM account_kinds WHERE kind = 'fee_revenue'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "70f4f74b1077de03377215be3cc487682d08df93f0ec5ce08527b314b084ae55"
+}
