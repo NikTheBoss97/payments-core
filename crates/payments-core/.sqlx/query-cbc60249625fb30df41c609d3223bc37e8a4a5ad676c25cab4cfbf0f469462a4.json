@@ -1,0 +1,63 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT (SELECT count(*) FROM payments) AS \"payments!\",\n                  (SELECT count(*) FROM payment_transitions) AS \"steps!\",\n                  (SELECT count(*) FROM ledger_transactions) AS \"headers!\",\n                  (SELECT count(*) FROM ledger_entries) AS \"entries!\",\n                  (SELECT count(*) FROM payment_authorizations) AS \"authorizations!\",\n                  (SELECT count(*) FROM payment_captures) AS \"captures!\",\n                  (SELECT count(*) FROM payment_refunds) AS \"refunds!\"",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "payments!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 1,
+        "name": "steps!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 2,
+        "name": "headers!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 3,
+        "name": "entries!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 4,
+        "name": "authorizations!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 5,
+        "name": "captures!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 6,
+        "name": "refunds!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "cbc60249625fb30df41c609d3223bc37e8a4a5ad676c25cab4cfbf0f469462a4"
+}

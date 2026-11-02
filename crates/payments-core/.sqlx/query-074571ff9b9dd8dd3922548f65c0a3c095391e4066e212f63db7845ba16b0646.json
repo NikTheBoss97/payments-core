@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DO $$ DECLARE target text; BEGIN FOREACH target IN ARRAY ARRAY['accounts', 'payments', 'payment_transitions', 'ledger_transactions', 'ledger_entries', 'payment_authorizations', 'payment_captures', 'payment_refunds'] LOOP EXECUTE format('CREATE TRIGGER die_before BEFORE INSERT ON %I FOR EACH ROW EXECUTE FUNCTION die_if_planned()', target); EXECUTE format('CREATE TRIGGER die_after AFTER INSERT ON %I FOR EACH ROW EXECUTE FUNCTION die_if_planned()', target); END LOOP; END $$",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "074571ff9b9dd8dd3922548f65c0a3c095391e4066e212f63db7845ba16b0646"
+}
