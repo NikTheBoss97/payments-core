@@ -26,6 +26,7 @@ use payments_core::payments::{
 };
 use payments_core::times::BusinessTime;
 use sqlx::PgPool;
+use sqlx::types::chrono::{DateTime, Utc};
 
 type TestResult = Result<(), Box<dyn Error>>;
 
@@ -295,6 +296,33 @@ async fn a_time_finer_than_the_database_still_settles_a_retry(pool: PgPool) -> T
             authorize(&app, &command).await?,
             Outcome::AlreadyApplied(AUTHORIZED_REPLY),
             "{text}"
+        );
+    }
+    app.close().await;
+    Ok(())
+}
+
+#[sqlx::test]
+async fn the_first_and_last_times_that_can_be_built_are_stored(pool: PgPool) -> TestResult {
+    // The type and the columns' CHECKs accept the same range (ADR-0022), so
+    // neither end of the type's range is refused by the database.
+    let (app, merchant) = app_with_merchant(&pool).await?;
+    let first = DateTime::from_timestamp_micros(-210_866_803_200_000_000).ok_or("a valid time")?;
+    for (n, time) in [(1, first), (2, DateTime::<Utc>::MAX_UTC)] {
+        let payment = created(&app, merchant, n).await?;
+        let command = Authorize {
+            expires_at: BusinessTime::new(time)?,
+            ..authorize_command(n, payment)
+        };
+        assert_eq!(
+            authorize(&app, &command).await?,
+            Outcome::Applied(AUTHORIZED_REPLY),
+            "{time:?}"
+        );
+        assert_eq!(
+            authorize(&app, &command).await?,
+            Outcome::AlreadyApplied(AUTHORIZED_REPLY),
+            "{time:?}"
         );
     }
     app.close().await;

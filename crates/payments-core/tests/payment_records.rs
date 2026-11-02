@@ -25,6 +25,7 @@ use common::{
 use payments_core::db::{CommitError, commit};
 use payments_core::lifecycle::PaymentStatus;
 use sqlx::PgPool;
+use sqlx::postgres::PgQueryResult;
 use uuid::Uuid;
 
 #[sqlx::test]
@@ -340,6 +341,99 @@ async fn a_refund_matches_its_step_and_links_one_posting(pool: PgPool) -> sqlx::
         UNIQUE_VIOLATION,
         "payment_refunds_ledger_transaction_id_key",
     );
+    tx.rollback().await
+}
+
+/// Times that a `timestamptz` holds and Rust cannot read: sqlx panics when it
+/// decodes one (ADR-0022). They are text here for the same reason.
+const UNREADABLE_TIMES: [&str; 3] = ["infinity", "-infinity", "262143-01-01 00:00:00+00"];
+/// The first and the last time that the business-time type accepts.
+const BOUND_TIMES: [&str; 2] = [
+    "4714-11-24 00:00:00+00 BC",
+    "262142-12-31 23:59:59.999999+00",
+];
+
+/// Asserts that a record's insert held a bound time and refused any other.
+#[track_caller]
+fn assert_time_guard(result: sqlx::Result<PgQueryResult>, time: &str, constraint: &str) {
+    if BOUND_TIMES.contains(&time) {
+        result.unwrap_or_else(|err| panic!("{time}: {err}"));
+    } else {
+        assert_violation(result.expect_err(time), CHECK_VIOLATION, constraint);
+    }
+}
+
+#[sqlx::test]
+async fn a_records_time_is_one_that_rust_can_read(pool: PgPool) -> sqlx::Result<()> {
+    let mut tx = runtime_transaction(&pool).await?;
+    let books = open_books(&mut tx).await?;
+    let authorization =
+        payment_with_first_step(&mut tx)
+            .await?
+            .then("authorize", "authorized", AUTHORIZED, 0);
+    authorization.insert(&mut tx).await?;
+    let capture = authorized_payment(&mut tx, &books)
+        .await?
+        .then("capture", "captured", AUTHORIZED, AUTHORIZED);
+    capture.insert(&mut tx).await?;
+    let capture_posting = write_posting(&mut tx, &books.capture_lines(AUTHORIZED, FEE)).await?;
+    let refund = captured_payment(&mut tx, &books)
+        .await?
+        .then("refund", "refunded", AUTHORIZED, 0);
+    refund.insert(&mut tx).await?;
+    let refund_posting = write_posting(&mut tx, &books.refund_lines(AUTHORIZED)).await?;
+    for time in UNREADABLE_TIMES.into_iter().chain(BOUND_TIMES) {
+        savepoint(&mut tx).await?;
+        let result = sqlx::query!(
+            "INSERT INTO payment_authorizations \
+                 (transition_id, payment_id, amount, payment_amount, expires_at) \
+             VALUES ($1, $2, $3, $4, $5::text::timestamptz)",
+            authorization.id,
+            authorization.payment_id,
+            authorization.amount,
+            REQUESTED,
+            time
+        )
+        .execute(&mut *tx)
+        .await;
+        assert_time_guard(result, time, "payment_authorizations_expires_at_check");
+        back_to_savepoint(&mut tx).await?;
+
+        savepoint(&mut tx).await?;
+        let result = sqlx::query!(
+            "INSERT INTO payment_captures \
+                 (transition_id, payment_id, amount, authorized_amount, fee, captured_at, \
+                  ledger_transaction_id) \
+             VALUES ($1, $2, $3, $4, $5, $6::text::timestamptz, $7)",
+            capture.id,
+            capture.payment_id,
+            capture.amount,
+            AUTHORIZED,
+            FEE,
+            time,
+            capture_posting
+        )
+        .execute(&mut *tx)
+        .await;
+        assert_time_guard(result, time, "payment_captures_captured_at_check");
+        back_to_savepoint(&mut tx).await?;
+
+        savepoint(&mut tx).await?;
+        let result = sqlx::query!(
+            "INSERT INTO payment_refunds \
+                 (transition_id, payment_id, amount, refunded_at, ledger_transaction_id) \
+             VALUES ($1, $2, $3, $4::text::timestamptz, $5)",
+            refund.id,
+            refund.payment_id,
+            refund.amount,
+            time,
+            refund_posting
+        )
+        .execute(&mut *tx)
+        .await;
+        assert_time_guard(result, time, "payment_refunds_refunded_at_check");
+        back_to_savepoint(&mut tx).await?;
+    }
     tx.rollback().await
 }
 
