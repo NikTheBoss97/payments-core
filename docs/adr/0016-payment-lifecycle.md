@@ -7,9 +7,9 @@
 
 ## Context
 
-Phase 2 puts payments on top of the ledger. CLAUDE.md names their seven
-statuses (created, authorized, captured, settled, failed, voided and
-refunded) and invariant I5: a payment never makes an invalid state
+Phase 2 puts payments on top of the ledger. A payment has seven statuses
+(created, authorized, captured, settled, failed, voided and refunded), and
+invariant I5 (DESIGN.md) says that it never makes an invalid state
 transition. What each status means, which events move a payment between
 them and which partial operations exist are product decisions, fixed here
 before any code.
@@ -40,7 +40,7 @@ Until then the caller, in practice the tests, reports what the PSP decided.
 | **Seven statuses, nine events, eleven legal moves** | Chosen |
 | The same, plus a settle step from `refunded` to `refunded` | One more move, and a partial unique index to allow it once, for a fact that phase 6 records for each settled movement anyway |
 | Eleven internal states, such as "captured and partly refunded", mapped onto the seven statuses | No single place lists the legal moves, and settling each refund on its own books settlement in phase 2, ahead of phase 6 |
-| A separate `expired` status, as at Adyen and Braintree | Changes the seven statuses that CLAUDE.md names. `voided` with the step kind `expire` records the same fact, as Stripe and Checkout.com do |
+| A separate `expired` status, as at Adyen and Braintree | An eighth status for a fact that `voided` with the step kind `expire` records just as well, as Stripe and Checkout.com do |
 | Several authorization attempts per payment, as at Stripe | `failed` would describe an attempt instead of the payment. With one attempt, as at Adyen and Braintree, `failed` is final and a new attempt is a new payment |
 | One Rust type per status (typestate) | A payment's status comes from a database row at run time, so a typed value is a snapshot that may already be stale |
 
@@ -145,6 +145,12 @@ Until then the caller, in practice the tests, reports what the PSP decided.
   later settlement; phase 6's settlement rows do.
 - Until phase 4, nothing records a request that is in flight at the PSP,
   because phase 2 sends none.
+
+## Amendments
+
+- 2026-11-02: the Context and the Options state the seven statuses
+  themselves, rather than pointing to a local working file that can change
+  and that readers of the repository do not have. The decision is unchanged.
 
 ## References
 

@@ -64,7 +64,7 @@ async fn a_cancelled_begin_leaves_its_connection_idle(pool: PgPool) -> TestResul
         .fetch_one(&mut *holder)
         .await?;
 
-    // What CLAUDE.md forbids in the application, on purpose: the future of a
+    // What ADR-0014 forbids in the application, on purpose: the future of a
     // begin() is dropped while the server runs its BEGIN, as a timeout or a
     // select! would drop it. Its statement waits for lock 1, so the drop
     // lands while the server is inside the new transaction.
