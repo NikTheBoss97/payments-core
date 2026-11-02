@@ -136,6 +136,21 @@ Shape of the errors:
     proven to roll back; a trigger that corrupts a write that the types
     allowed, so that only a deferred check can reject it.
 
+## Amendments
+
+- 2026-11-02: three points that building the commands made precise. The
+  decision is unchanged.
+  - The classifier takes the SQLSTATE alone, not (stage, SQLSTATE, constraint
+    name): every unique key leads to the same lookup, so none of its rules
+    needs the rest, and a `COMMIT` is read by the one function of ADR-0014.
+  - Creating a payment also carries a candidate ID for each of its accounts
+    (ADR-0009). A retry does not compare them, because an account's key is its
+    identity. A candidate that another account already has, on a key that is
+    new, is a bug that surfaces as `CreateError::Account` before the payment is
+    inserted, so a changed retry that reuses its candidates can report that
+    instead of `Mismatch`. Nothing of the payment is stored either way.
+  - Registering a merchant (ADR-0017) has an enum of its own, `RegisterError`.
+
 ## References
 
 - J. H. Saltzer, D. P. Reed and D. D. Clark, [End-to-End Arguments in System Design](https://doi.org/10.1145/357401.357402) (ACM Transactions on Computer Systems, 1984).

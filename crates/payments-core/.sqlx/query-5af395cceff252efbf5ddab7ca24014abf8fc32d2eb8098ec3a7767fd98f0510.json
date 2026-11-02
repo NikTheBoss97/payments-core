@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT EXISTS (SELECT 1 FROM merchants WHERE id = $1) AS \"registered!\"",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "registered!",
+        "type_info": "Bool",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "5af395cceff252efbf5ddab7ca24014abf8fc32d2eb8098ec3a7767fd98f0510"
+}

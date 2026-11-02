@@ -1,0 +1,124 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT id, seq, prev_seq, kind, from_status, to_status, amount,\n                  prev_refundable, refundable\n             FROM payment_transitions WHERE payment_id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "payment_transitions",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "seq",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "payment_transitions",
+            "name": "seq"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "prev_seq",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "payment_transitions",
+            "name": "prev_seq"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "kind",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "payment_transitions",
+            "name": "kind"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "from_status",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "payment_transitions",
+            "name": "from_status"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "to_status",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "payment_transitions",
+            "name": "to_status"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "amount",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "payment_transitions",
+            "name": "amount"
+          }
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "prev_refundable",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "payment_transitions",
+            "name": "prev_refundable"
+          }
+        }
+      },
+      {
+        "ordinal": 8,
+        "name": "refundable",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "payment_transitions",
+            "name": "refundable"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "e0441336358b3a67d82b4c7a5ce6b108db88ac1ed2f75420a44ce81d2d56f30c"
+}
