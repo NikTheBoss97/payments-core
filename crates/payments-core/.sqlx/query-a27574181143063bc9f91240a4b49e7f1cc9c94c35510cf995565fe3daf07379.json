@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO merchants (id, recorded_at) VALUES ($1, DEFAULT)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "a27574181143063bc9f91240a4b49e7f1cc9c94c35510cf995565fe3daf07379"
+}

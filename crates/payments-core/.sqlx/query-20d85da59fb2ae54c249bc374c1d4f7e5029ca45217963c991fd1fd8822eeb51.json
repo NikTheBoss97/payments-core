@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE payments SET amount = 1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "20d85da59fb2ae54c249bc374c1d4f7e5029ca45217963c991fd1fd8822eeb51"
+}

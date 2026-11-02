@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO payments (id, merchant_id, psp, currency, amount, fee_bps, recorded_at) VALUES ($1, $2, 'mock', 'EUR', 100, 0, DEFAULT)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "af5cf6a5e317d3799184593aec694718ba0c75658c7880e67d5e788fa6f5393c"
+}

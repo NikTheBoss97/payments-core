@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE merchants SET id = id",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "8fa37280d4a6ae3aa252042594866305ab8c4d6763339c7479a6790313f796b5"
+}

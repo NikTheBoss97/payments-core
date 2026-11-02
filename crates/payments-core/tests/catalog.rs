@@ -84,6 +84,15 @@ async fn the_runtime_role_has_exactly_the_expected_privileges(pool: PgPool) -> s
             "ledger_transactions.currency INSERT",
             "ledger_transactions.entry_count INSERT",
             "ledger_transactions.id INSERT",
+            "merchants SELECT",
+            "merchants.id INSERT",
+            "payments SELECT",
+            "payments.amount INSERT",
+            "payments.currency INSERT",
+            "payments.fee_bps INSERT",
+            "payments.id INSERT",
+            "payments.merchant_id INSERT",
+            "payments.psp INSERT",
         ]
     );
     Ok(())
@@ -219,6 +228,10 @@ async fn every_guard_trigger_fires_always(pool: PgPool) -> sqlx::Result<()> {
             "ledger_transactions_no_truncate",
             "reject_change",
         ),
+        ("merchants", "merchants_append_only", "reject_change"),
+        ("merchants", "merchants_no_truncate", "reject_change"),
+        ("payments", "payments_append_only", "reject_change"),
+        ("payments", "payments_no_truncate", "reject_change"),
     ]
     .into_iter()
     .map(|(table, trigger, function)| [table.into(), trigger.into(), "A".into(), function.into()])
@@ -320,6 +333,15 @@ async fn every_column_has_its_type_and_is_not_null(pool: PgPool) -> sqlx::Result
             "ledger_transactions.entry_count integer not null",
             "ledger_transactions.id uuid not null",
             "ledger_transactions.recorded_at timestamp with time zone not null",
+            "merchants.id uuid not null",
+            "merchants.recorded_at timestamp with time zone not null",
+            "payments.amount bigint not null",
+            "payments.currency currency_code not null",
+            "payments.fee_bps integer not null",
+            "payments.id uuid not null",
+            "payments.merchant_id uuid not null",
+            "payments.psp text not null",
+            "payments.recorded_at timestamp with time zone not null",
         ]
     );
     Ok(())
