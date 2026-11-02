@@ -12,7 +12,7 @@
 //! pin each guard trigger and the function it runs, and pin the type and
 //! nullability of every column.
 
-use sqlx::PgPool;
+use sqlx::{Connection, PgConnection, PgPool};
 
 #[sqlx::test]
 async fn the_runtime_role_has_exactly_the_expected_privileges(pool: PgPool) -> sqlx::Result<()> {
@@ -172,7 +172,9 @@ async fn the_runtime_role_has_exactly_its_session_defaults(pool: PgPool) -> sqlx
     // Role settings apply at login, not after SET ROLE, so the behaviour
     // tests never see them (ADR-0005). The lock timeout bounds a retried
     // posting's wait, and outlasts the idle timeout, so the retry outlives a
-    // first attempt left idle after a lost COMMIT. "*" means every database.
+    // first attempt left idle after a lost COMMIT. The session timeout ends a
+    // session that leaked a session-level lock (ADR-0018). "*" means every
+    // database.
     let mut settings = sqlx::query_scalar!(
         r#"
         SELECT format('%s %s', COALESCE(d.datname, '*'), c.setting) AS "setting!"
@@ -189,9 +191,39 @@ async fn the_runtime_role_has_exactly_its_session_defaults(pool: PgPool) -> sqlx
         settings,
         [
             "* idle_in_transaction_session_timeout=30s",
+            "* idle_session_timeout=30min",
             "* lock_timeout=35s",
         ]
     );
+    Ok(())
+}
+
+#[sqlx::test]
+async fn a_runtime_login_gets_those_defaults_at_read_committed(pool: PgPool) -> sqlx::Result<()> {
+    // A real login, not SET ROLE, so this is what the application gets. No code
+    // sets an isolation level, and a command relies on this one: its read comes
+    // after the lock, and sees what the lock's previous holder committed
+    // (ADR-0018).
+    let options = (*pool.connect_options())
+        .clone()
+        .username("payments_app")
+        .password("payments_app");
+    let mut conn = PgConnection::connect_with(&options).await?;
+    let row = sqlx::query!(
+        r#"SELECT current_user::text AS "user!",
+                  current_setting('transaction_isolation') AS "isolation!",
+                  current_setting('lock_timeout') AS "lock_timeout!",
+                  current_setting('idle_in_transaction_session_timeout') AS "idle_in_transaction!",
+                  current_setting('idle_session_timeout') AS "idle_session!""#
+    )
+    .fetch_one(&mut conn)
+    .await?;
+    assert_eq!(row.user, "payments_app");
+    assert_eq!(row.isolation, "read committed");
+    assert_eq!(row.lock_timeout, "35s");
+    assert_eq!(row.idle_in_transaction, "30s");
+    assert_eq!(row.idle_session, "30min");
+    conn.close().await?;
     Ok(())
 }
 

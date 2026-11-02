@@ -20,3 +20,10 @@ ALTER ROLE payments_app SET idle_in_transaction_session_timeout = '30s';
 -- retry outlasts a first attempt left idle after a lost COMMIT, then gets a
 -- definite answer.
 ALTER ROLE payments_app SET lock_timeout = '35s';
+
+-- A session-level advisory lock outlives its transaction. The library never
+-- takes one, but hand-written SQL could leak it, and no other timeout ends a
+-- session idle outside a transaction. sqlx's pool keeps an idle connection for at
+-- most about 20 minutes, so this ends only sessions the pool no longer manages
+-- (ADR-0018).
+ALTER ROLE payments_app SET idle_session_timeout = '30min';
