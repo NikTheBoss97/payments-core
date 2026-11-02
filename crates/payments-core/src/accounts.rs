@@ -5,8 +5,8 @@
 //! An account is found by its business key: its kind, the party it is kept
 //! for, and its currency. The types here accept exactly what the database's
 //! CHECKs accept, so a key built from them is never rejected for its
-//! spelling. Phase 2's typed account references become the only producers of
-//! keys, and tie each kind to its party (ADR-0009).
+//! spelling. The library builds every key through [`AccountRef`], which ties
+//! each kind to its party and its normal side (ADR-0020).
 
 use std::fmt;
 
@@ -14,7 +14,7 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::db::code_and_constraint;
-use crate::ids::AccountId;
+use crate::ids::{AccountId, MerchantId};
 use crate::money::Currency;
 
 /// Why a value cannot describe an account.
@@ -31,6 +31,9 @@ pub enum InvalidAccount {
     /// Neither `debit` nor `credit`.
     #[error(r#"normal side {0:?} must be "debit" or "credit""#)]
     NormalSide(String),
+    /// Not one of the known PSPs.
+    #[error("PSP {0:?} is not a known label")]
+    Psp(String),
 }
 
 /// What an account is: its place in the chart of accounts, such as
@@ -157,6 +160,87 @@ impl fmt::Display for NormalSide {
 impl fmt::Display for AccountKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}/{}/{}", self.kind, self.party, self.currency)
+    }
+}
+
+/// A payment service provider: a closed set of labels, parsed once
+/// (ADR-0020). Phase 2 has one, the mock PSP.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Psp {
+    Mock,
+}
+
+impl Psp {
+    /// The label the database stores. SQL binds it rather than spelling it
+    /// (ADR-0009).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Mock => "mock",
+        }
+    }
+
+    /// Parses the label the database stores.
+    ///
+    /// # Errors
+    ///
+    /// [`InvalidAccount::Psp`] for anything but a known label.
+    pub fn parse(psp: &str) -> Result<Self, InvalidAccount> {
+        match psp {
+            "mock" => Ok(Self::Mock),
+            _ => Err(InvalidAccount::Psp(psp.to_owned())),
+        }
+    }
+}
+
+/// An account in the chart (ADR-0020). Every key the library uses comes from
+/// one of these, so a kind cannot be paired with the wrong party or side.
+/// [`AccountKey`] stays public for ledger-level tests, which open accounts of
+/// any kind they seed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AccountRef {
+    /// What a PSP owes the platform.
+    PspReceivable(Psp, Currency),
+    /// What the platform owes a merchant.
+    MerchantPayable(MerchantId, Currency),
+    /// The platform's fees.
+    FeeRevenue(Currency),
+}
+
+impl AccountRef {
+    /// The account's business key.
+    #[must_use]
+    pub fn key(self) -> AccountKey {
+        let (kind, party, currency) = match self {
+            Self::PspReceivable(psp, currency) => (
+                "psp_receivable",
+                Party::label(psp.as_str()).expect("a PSP's label is a valid party"),
+                currency,
+            ),
+            Self::MerchantPayable(merchant, currency) => (
+                "merchant_payable",
+                Party::merchant(merchant.get()),
+                currency,
+            ),
+            Self::FeeRevenue(currency) => (
+                "fee_revenue",
+                Party::label("platform").expect("platform is a valid party"),
+                currency,
+            ),
+        };
+        AccountKey {
+            kind: AccountKind::parse(kind).expect("the chart's kinds are valid labels"),
+            party,
+            currency,
+        }
+    }
+
+    /// The side on which the chart keeps this account.
+    #[must_use]
+    pub fn normal_side(self) -> NormalSide {
+        match self {
+            Self::PspReceivable(..) => NormalSide::Debit,
+            Self::MerchantPayable(..) | Self::FeeRevenue(_) => NormalSide::Credit,
+        }
     }
 }
 
@@ -521,8 +605,51 @@ mod tests {
                 InvalidAccount::NormalSide("dr\n".into()),
                 r#"normal side "dr\n" must be "debit" or "credit""#,
             ),
+            (
+                InvalidAccount::Psp("stripe".into()),
+                r#"PSP "stripe" is not a known label"#,
+            ),
         ] {
             assert_eq!(error.to_string(), text);
+        }
+    }
+
+    #[test]
+    fn the_psp_round_trips_its_label() {
+        assert_eq!(Psp::Mock.as_str(), "mock");
+        assert_eq!(Psp::parse("mock"), Ok(Psp::Mock));
+        for label in ["", "Mock", "mock ", "stripe"] {
+            assert_eq!(
+                Psp::parse(label),
+                Err(InvalidAccount::Psp(label.into())),
+                "{label:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_reference_names_its_key_and_its_side() {
+        let currency = |code| Currency::parse(code).expect("valid code");
+        let merchant = MerchantId::try_from(MERCHANT).expect("a UUIDv7");
+        for (reference, key, side) in [
+            (
+                AccountRef::PspReceivable(Psp::Mock, currency("EUR")),
+                "psp_receivable/mock/EUR",
+                NormalSide::Debit,
+            ),
+            (
+                AccountRef::MerchantPayable(merchant, currency("USD")),
+                "merchant_payable/d1b2c3d4-e5f6-7a7b-8c9d-0e1f2a3b4c5d/USD",
+                NormalSide::Credit,
+            ),
+            (
+                AccountRef::FeeRevenue(currency("JPY")),
+                "fee_revenue/platform/JPY",
+                NormalSide::Credit,
+            ),
+        ] {
+            assert_eq!(reference.key().to_string(), key);
+            assert_eq!(reference.normal_side(), side, "{key}");
         }
     }
 
