@@ -13,7 +13,8 @@ use payments_core::ids::{MerchantId, PaymentId};
 use payments_core::lifecycle::PaymentStatus;
 use payments_core::money::{BasisPoints, Currency, PositiveAmount};
 use payments_core::payments::{
-    AccountCandidates, Authorize, Capture, CreatePayment, create_payment, find_payment, lock_key,
+    AccountCandidates, Authorize, Capture, CreatePayment, Refund, create_payment, find_payment,
+    lock_key,
 };
 use payments_core::times::BusinessTime;
 use sqlx::{PgConnection, PgPool, Postgres, Transaction};
@@ -87,6 +88,25 @@ pub fn capture_command(n: u32, payment: PaymentId) -> Capture {
         payment,
         amount: PositiveAmount::new(AUTHORIZED).expect("valid amount"),
         captured_at: capture_time(),
+    }
+}
+
+/// When the test refunds took effect.
+pub fn refund_time() -> BusinessTime {
+    let time = "2026-01-12T16:45:00.111222Z".parse().expect("a valid time");
+    BusinessTime::new(time).expect("a time that can be stored")
+}
+
+/// The command that refunds this much of a payment. Its step ID is `3000 + n`,
+/// apart from those of the commands above, and its posting's ID is `1000 + n`,
+/// apart from those of the captures.
+pub fn refund_command(n: u32, payment: PaymentId, minor: i64) -> Refund {
+    Refund {
+        step: transition_id(n.checked_add(3000).expect("a small n")),
+        posting: transaction_id(n.checked_add(1000).expect("a small n")),
+        payment,
+        amount: PositiveAmount::new(minor).expect("valid amount"),
+        refunded_at: refund_time(),
     }
 }
 
