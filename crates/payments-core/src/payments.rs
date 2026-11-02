@@ -686,6 +686,149 @@ fn credit_line(account: AccountId, minor: i64) -> Option<Entry> {
     })
 }
 
+/// The command that records a refund, and posts it (ADR-0016, ADR-0020).
+#[derive(Debug)]
+pub struct Refund {
+    /// The step's ID, which identifies this command.
+    pub step: TransitionId,
+    /// The ID of the ledger transaction that this refund posts.
+    pub posting: TransactionId,
+    pub payment: PaymentId,
+    /// The refunded amount. Below what can still be refunded it is partial, at
+    /// that amount it is final, and above it the command is refused.
+    pub amount: PositiveAmount,
+    /// When the refund took effect, as the PSP reported it (ADR-0022).
+    pub refunded_at: BusinessTime,
+}
+
+/// Why a [`Refund`] was not applied. Only [`RefundError::NotConfirmed`] may have
+/// stored its step.
+#[derive(Debug, thiserror::Error)]
+pub enum RefundError {
+    /// No payment has this ID.
+    #[error("payment {payment} does not exist")]
+    NotFound { payment: PaymentId },
+    /// The status or the amount refuses it. Nothing is stored, and a retry is
+    /// decided again (ADR-0019).
+    #[error(transparent)]
+    Refused(Refused),
+    /// An account of the posting does not exist. Creating a payment opens them,
+    /// and accounts are never deleted, so a writer that skipped that broke a
+    /// rule: a bug, never retried.
+    #[error("account {key} does not exist")]
+    MissingAccount { key: AccountKey },
+    /// The command's step ID is stored with other content: a bug, never
+    /// retried.
+    #[error("step {step} is stored with other content")]
+    Mismatch { step: Uuid },
+    /// The database caught what the domain types should have prevented, or a
+    /// writer that skipped the payment's lock got there first (ADR-0018): a bug,
+    /// never retried.
+    #[error("step {step}: the database rejected it as invalid")]
+    Invariant {
+        step: Uuid,
+        #[source]
+        source: sqlx::Error,
+    },
+    /// The step may or may not be stored. Send the identical command again
+    /// later, never one with new IDs (ADR-0019).
+    #[error("step {step} may or may not be stored: send the command again")]
+    NotConfirmed {
+        step: Uuid,
+        #[source]
+        source: sqlx::Error,
+    },
+}
+
+impl RefundError {
+    fn new(command: &Refund, failed: Failed<PostingRefusal>) -> Self {
+        let step = command.step.get();
+        match failed {
+            Failed::NotFound => Self::NotFound {
+                payment: command.payment,
+            },
+            Failed::Refused(PostingRefusal::Refused(refused)) => Self::Refused(refused),
+            Failed::Refused(PostingRefusal::MissingAccount(key)) => Self::MissingAccount { key },
+            Failed::Mismatch => Self::Mismatch { step },
+            Failed::Duplicate(source) | Failed::Invariant(source) => {
+                Self::Invariant { step, source }
+            }
+            Failed::NotConfirmed(source) => Self::NotConfirmed { step, source },
+        }
+    }
+}
+
+/// Records that the PSP refunded part or all of what is left of a capture, and
+/// posts it: the merchant pays, and the platform keeps its fee (ADR-0020). The
+/// step, the posting and the record commit together.
+///
+/// # Errors
+///
+/// See [`RefundError`].
+pub async fn refund(pool: &PgPool, command: &Refund) -> Result<Outcome, RefundError> {
+    let fail = |failed| RefundError::new(command, failed);
+    // Outside any transaction, as for a capture.
+    let terms = read_terms(pool, command.payment).await.map_err(fail)?;
+    let payable = posting_account(
+        pool,
+        AccountRef::MerchantPayable(terms.merchant, terms.currency),
+    )
+    .await
+    .map_err(fail)?;
+    let receivable = posting_account(pool, AccountRef::PspReceivable(terms.psp, terms.currency))
+        .await
+        .map_err(fail)?;
+    let posting = refund_posting(
+        same_posting_id(&command.posting),
+        terms.currency,
+        payable,
+        receivable,
+        command.amount,
+    );
+    let plan = Plan {
+        id: &command.step,
+        asked: Asked {
+            payment: command.payment,
+            kind: StepKind::Refund,
+            amount: command.amount.get(),
+            detail: Detail::Refund {
+                refunded_at: command.refunded_at,
+                posting: command.posting.get(),
+            },
+        },
+        posting: Some(&posting),
+    };
+    apply(pool, &plan, |state| {
+        lifecycle::refund(state.status, command.amount, state.refundable)
+            .map_err(PostingRefusal::Refused)
+    })
+    .await
+    .map_err(fail)
+}
+
+/// ADR-0020's lines for a refund of R: the merchant's payable +R and the PSP's
+/// receivable -R. They depend on R alone, because the platform keeps its fee.
+fn refund_posting(
+    id: TransactionId,
+    currency: Currency,
+    payable: AccountId,
+    receivable: AccountId,
+    refunded: PositiveAmount,
+) -> LedgerTransaction {
+    let entries = vec![
+        Entry {
+            account: payable,
+            amount: refunded.debit(),
+        },
+        Entry {
+            account: receivable,
+            amount: refunded.credit(),
+        },
+    ];
+    LedgerTransaction::new(id, currency, entries)
+        .expect("a debit and a credit of one amount balance")
+}
+
 /// A second value of a command's posting ID. A retry must post under the same
 /// one, and a command is only borrowed, so this is written out (ADR-0005).
 fn same_posting_id(id: &TransactionId) -> TransactionId {
@@ -882,6 +1025,11 @@ pub(crate) enum Detail {
     Capture {
         fee: i64,
         captured_at: BusinessTime,
+        /// The link to the ledger (ADR-0011).
+        posting: Uuid,
+    },
+    Refund {
+        refunded_at: BusinessTime,
         /// The link to the ledger (ADR-0011).
         posting: Uuid,
     },
@@ -1107,7 +1255,9 @@ async fn read_state<R>(
                   stored_authorization.expires_at AS "expires_at?",
                   stored_capture.fee AS "fee?",
                   stored_capture.captured_at AS "captured_at?",
-                  stored_capture.ledger_transaction_id AS "capture_posting?"
+                  stored_capture.ledger_transaction_id AS "capture_posting?",
+                  stored_refund.refunded_at AS "refunded_at?",
+                  stored_refund.ledger_transaction_id AS "refund_posting?"
              FROM payments p
             CROSS JOIN LATERAL (
                   SELECT t.seq, t.to_status, t.refundable
@@ -1122,6 +1272,8 @@ async fn read_state<R>(
                     ON stored_authorization.transition_id = stored.id
              LEFT JOIN payment_captures stored_capture
                     ON stored_capture.transition_id = stored.id
+             LEFT JOIN payment_refunds stored_refund
+                    ON stored_refund.transition_id = stored.id
             WHERE p.id = $1"#,
         plan.asked.payment.get(),
         plan.id.get()
@@ -1166,13 +1318,16 @@ async fn read_state<R>(
                             captured_at: stored_time(row.captured_at.expect(HAS_RECORD)),
                             posting: row.capture_posting.expect(HAS_RECORD),
                         },
+                        StepKind::Refund => Detail::Refund {
+                            refunded_at: stored_time(row.refunded_at.expect(HAS_RECORD)),
+                            posting: row.refund_posting.expect(HAS_RECORD),
+                        },
                         StepKind::Create
                         | StepKind::Decline
                         | StepKind::Cancel
                         | StepKind::Void
                         | StepKind::Expire
-                        | StepKind::Settle
-                        | StepKind::Refund => Detail::None,
+                        | StepKind::Settle => Detail::None,
                     },
                 },
                 recorded: Recorded {
@@ -1286,6 +1441,24 @@ async fn insert_record(
                 authorized.get(),
                 fee,
                 captured_at.get(),
+                posting
+            )
+            .execute(&mut **tx)
+            .await?;
+            Ok(())
+        }
+        Detail::Refund {
+            refunded_at,
+            posting,
+        } => {
+            sqlx::query!(
+                "INSERT INTO payment_refunds \
+                     (transition_id, payment_id, amount, refunded_at, ledger_transaction_id) \
+                 VALUES ($1, $2, $3, $4, $5)",
+                plan.id.get(),
+                plan.asked.payment.get(),
+                plan.asked.amount,
+                refunded_at.get(),
                 posting
             )
             .execute(&mut **tx)
@@ -1424,6 +1597,24 @@ mod tests {
             capture_lines(8_000, 8_000),
             [("receivable", 8_000), ("fees", -8_000)]
         );
+    }
+
+    #[test]
+    fn a_refunds_posting_has_the_lines_of_adr_0020() {
+        let (payable, receivable) = (AccountId::now_v7(), AccountId::now_v7());
+        let posting = refund_posting(
+            TransactionId::now_v7(),
+            Currency::parse("EUR").expect("valid code"),
+            payable,
+            receivable,
+            PositiveAmount::new(3_000).expect("valid amount"),
+        );
+        let lines: Vec<_> = posting
+            .entries()
+            .iter()
+            .map(|entry| (entry.account, entry.amount.get()))
+            .collect();
+        assert_eq!(lines, [(payable, 3_000), (receivable, -3_000)]);
     }
 
     proptest! {

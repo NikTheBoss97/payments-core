@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "CREATE TRIGGER lose_record BEFORE INSERT ON payment_refunds FOR EACH ROW EXECUTE FUNCTION lose_row()",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "60ade449924f1f265ec26c5a3207c24c4971484dd3adbaaa82bdfeecf1e69545"
+}
