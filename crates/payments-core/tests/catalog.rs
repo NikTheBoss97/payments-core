@@ -86,6 +86,17 @@ async fn the_runtime_role_has_exactly_the_expected_privileges(pool: PgPool) -> s
             "ledger_transactions.id INSERT",
             "merchants SELECT",
             "merchants.id INSERT",
+            "payment_transitions SELECT",
+            "payment_transitions.amount INSERT",
+            "payment_transitions.from_status INSERT",
+            "payment_transitions.id INSERT",
+            "payment_transitions.kind INSERT",
+            "payment_transitions.payment_id INSERT",
+            "payment_transitions.prev_refundable INSERT",
+            "payment_transitions.prev_seq INSERT",
+            "payment_transitions.refundable INSERT",
+            "payment_transitions.seq INSERT",
+            "payment_transitions.to_status INSERT",
             "payments SELECT",
             "payments.amount INSERT",
             "payments.currency INSERT",
@@ -230,7 +241,18 @@ async fn every_guard_trigger_fires_always(pool: PgPool) -> sqlx::Result<()> {
         ),
         ("merchants", "merchants_append_only", "reject_change"),
         ("merchants", "merchants_no_truncate", "reject_change"),
+        (
+            "payment_transitions",
+            "payment_transitions_append_only",
+            "reject_change",
+        ),
+        (
+            "payment_transitions",
+            "payment_transitions_no_truncate",
+            "reject_change",
+        ),
         ("payments", "payments_append_only", "reject_change"),
+        ("payments", "payments_commit_check", "check_payment_genesis"),
         ("payments", "payments_no_truncate", "reject_change"),
     ]
     .into_iter()
@@ -276,6 +298,12 @@ async fn every_guard_function_has_a_pinned_search_path(pool: PgPool) -> sqlx::Re
         [
             (
                 "check_ledger_transaction".to_owned(),
+                pinned.to_owned(),
+                false,
+                false
+            ),
+            (
+                "check_payment_genesis".to_owned(),
                 pinned.to_owned(),
                 false,
                 false
@@ -335,6 +363,17 @@ async fn every_column_has_its_type_and_is_not_null(pool: PgPool) -> sqlx::Result
             "ledger_transactions.recorded_at timestamp with time zone not null",
             "merchants.id uuid not null",
             "merchants.recorded_at timestamp with time zone not null",
+            "payment_transitions.amount bigint not null",
+            "payment_transitions.from_status text not null",
+            "payment_transitions.id uuid not null",
+            "payment_transitions.kind text not null",
+            "payment_transitions.payment_id uuid not null",
+            "payment_transitions.prev_refundable bigint not null",
+            "payment_transitions.prev_seq integer not null",
+            "payment_transitions.recorded_at timestamp with time zone not null",
+            "payment_transitions.refundable bigint not null",
+            "payment_transitions.seq integer not null",
+            "payment_transitions.to_status text not null",
             "payments.amount bigint not null",
             "payments.currency currency_code not null",
             "payments.fee_bps integer not null",

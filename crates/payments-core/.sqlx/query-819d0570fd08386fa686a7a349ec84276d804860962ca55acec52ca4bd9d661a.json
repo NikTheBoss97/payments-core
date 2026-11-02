@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM payment_transitions",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "819d0570fd08386fa686a7a349ec84276d804860962ca55acec52ca4bd9d661a"
+}
