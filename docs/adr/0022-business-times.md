@@ -103,6 +103,13 @@ so a lock entry that is never built costs nothing.
     succeed. Holding the type now proves that the database accepts the value, as
     it does for IDs and money. chrono's latest time is within PostgreSQL's range,
     but a leap second in that very second folds beyond it, and is refused too.
+  - **What the database holds.** `payment_authorizations_expires_at_check`,
+    `payment_captures_captured_at_check` and `payment_refunds_refunded_at_check`
+    bound each column to what the type accepts. A `timestamptz` also holds
+    `infinity` and times past chrono's latest, and sqlx panics when it decodes
+    one, so hand-written SQL could make a retry panic. The database now refuses
+    such a write, with the usual pair of code and name, as it does for every
+    other domain type.
 
 ## References
 
