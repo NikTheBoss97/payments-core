@@ -278,6 +278,11 @@ async fn every_guard_trigger_fires_always(pool: PgPool) -> sqlx::Result<()> {
         ),
         (
             "payment_captures",
+            "payment_captures_commit_check",
+            "check_payment_posting",
+        ),
+        (
+            "payment_captures",
             "payment_captures_no_truncate",
             "reject_change",
         ),
@@ -285,6 +290,11 @@ async fn every_guard_trigger_fires_always(pool: PgPool) -> sqlx::Result<()> {
             "payment_refunds",
             "payment_refunds_append_only",
             "reject_change",
+        ),
+        (
+            "payment_refunds",
+            "payment_refunds_commit_check",
+            "check_payment_posting",
         ),
         (
             "payment_refunds",
@@ -359,6 +369,12 @@ async fn every_guard_function_has_a_pinned_search_path(pool: PgPool) -> sqlx::Re
             ),
             (
                 "check_payment_genesis".to_owned(),
+                pinned.to_owned(),
+                false,
+                false
+            ),
+            (
+                "check_payment_posting".to_owned(),
                 pinned.to_owned(),
                 false,
                 false

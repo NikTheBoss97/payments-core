@@ -52,7 +52,7 @@ pub async fn commit(tx: Transaction<'_, Postgres>) -> Result<(), CommitError> {
 /// writes the commit record. A cancel or terminate signal held during the
 /// commit can arrive after it, with any other code (ADR-0014).
 fn proves_rollback(code: Option<&str>) -> bool {
-    matches!(code, Some("LG002" | "LG003" | "LG004" | "LG005"))
+    matches!(code, Some("LG002" | "LG003" | "LG004" | "LG005" | "LG006"))
 }
 
 /// The SQLSTATE and constraint name of a database error, each `None` when
@@ -78,6 +78,7 @@ mod tests {
             (Some("LG003"), true),
             (Some("LG004"), true),
             (Some("LG005"), true),
+            (Some("LG006"), true),
             // A cancel or terminate held during the commit can arrive after
             // it, so these prove nothing.
             (Some("57014"), false),
@@ -98,7 +99,8 @@ mod tests {
     proptest! {
         #[test]
         fn every_other_code_leaves_the_outcome_unknown(code in "[0-9A-Z]{5}") {
-            let expected = ["LG002", "LG003", "LG004", "LG005"].contains(&code.as_str());
+            let expected =
+                ["LG002", "LG003", "LG004", "LG005", "LG006"].contains(&code.as_str());
             prop_assert_eq!(proves_rollback(Some(&code)), expected);
         }
     }
