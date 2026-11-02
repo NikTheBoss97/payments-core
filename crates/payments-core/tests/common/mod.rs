@@ -12,6 +12,8 @@
     reason = "each test crate uses a different subset of these helpers"
 )]
 
+pub mod payments;
+
 use payments_core::ids::{AccountId, TransactionId};
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{PgConnection, PgPool, Postgres, Transaction};
