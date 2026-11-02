@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "TRUNCATE payment_refunds",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "a204b5874641014cce6141d80b36ab365a05c65b41a92eb65bd141cd6b746919"
+}
