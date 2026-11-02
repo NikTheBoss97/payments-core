@@ -344,6 +344,43 @@ async fn a_refund_matches_its_step_and_links_one_posting(pool: PgPool) -> sqlx::
     tx.rollback().await
 }
 
+#[sqlx::test]
+async fn a_step_has_one_record(pool: PgPool) -> sqlx::Result<()> {
+    // `LG004` asks only that a record exists, so these keys alone stop a second
+    // one, which could link a second posting to one step. A second capture or
+    // refund here has a posting of its own, so that no other key refuses it. A
+    // second authorization also repeats its payment and amount, since its step
+    // fixes both, and PostgreSQL reports the primary key.
+    let mut app = runtime_connection(&pool).await?;
+    let books = open_books(&mut app).await?;
+    let mut tx = runtime_transaction(&pool).await?;
+
+    let authorized = authorized_payment(&mut tx, &books).await?;
+    savepoint(&mut tx).await?;
+    let err = insert_authorization(&mut tx, &authorized, REQUESTED)
+        .await
+        .unwrap_err();
+    back_to_savepoint(&mut tx).await?;
+    assert_violation(err, UNIQUE_VIOLATION, "payment_authorizations_pkey");
+
+    let captured = captured_payment(&mut tx, &books).await?;
+    let posting = write_posting(&mut tx, &books.capture_lines(AUTHORIZED, FEE)).await?;
+    savepoint(&mut tx).await?;
+    let err = insert_capture(&mut tx, &captured, AUTHORIZED, FEE, posting)
+        .await
+        .unwrap_err();
+    back_to_savepoint(&mut tx).await?;
+    assert_violation(err, UNIQUE_VIOLATION, "payment_captures_pkey");
+
+    let refund = refund_step(&mut tx, &books, &captured, "captured", 1_000).await?;
+    let posting = write_posting(&mut tx, &books.refund_lines(1_000)).await?;
+    savepoint(&mut tx).await?;
+    let err = insert_refund(&mut tx, &refund, posting).await.unwrap_err();
+    back_to_savepoint(&mut tx).await?;
+    assert_violation(err, UNIQUE_VIOLATION, "payment_refunds_pkey");
+    tx.rollback().await
+}
+
 /// Times that a `timestamptz` holds and Rust cannot read: sqlx panics when it
 /// decodes one (ADR-0022). They are text here for the same reason.
 const UNREADABLE_TIMES: [&str; 3] = ["infinity", "-infinity", "262143-01-01 00:00:00+00"];
