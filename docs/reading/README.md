@@ -13,9 +13,10 @@ publication: its title, authors, year and link.
 |---|---|---|
 | [Ledgers and accounting](ledgers-and-accounting.md) | Double-entry bookkeeping, ledgers as immutable logs, and recording time. | 20 |
 | [Money and identifiers](money-and-identifiers.md) | Representing amounts and currencies exactly, splitting them without losing a unit, and generating identifiers. | 10 |
-| [Schema design and database errors](schema-and-errors.md) | Constraints, privileges and operator resolution in PostgreSQL, NULLs and keys, and error codes that programs can act on. | 13 |
+| [Schema design and database errors](schema-and-errors.md) | Constraints, privileges and operator resolution in PostgreSQL, NULLs and keys, and error codes that programs can act on. | 14 |
 | [Transactions and concurrency](transactions-and-concurrency.md) | Isolation levels, locking, coordination and what a database transaction guarantees. | 11 |
-| [Idempotency and messaging](idempotency-and-messaging.md) | Idempotency keys, retries, transactional messaging and webhooks. | 12 |
+| [Idempotency and messaging](idempotency-and-messaging.md) | Idempotency keys, retries, transactional messaging and webhooks. | 17 |
+| [Authentication and tenant isolation](authentication-and-tenancy.md) | API keys, object-level authorization and row-level security. | 7 |
 | [Payments lifecycle](payments-lifecycle.md) | Payment statuses and state machines, authorization and settlement, compensation and reconciliation. | 11 |
 | [Testing for correctness](testing.md) | Property-based testing, mutation testing, failure injection and testing database guarantees. | 10 |
 | [Modelling the domain in Rust](rust.md) | Types that carry their invariants, and making illegal states unrepresentable. | 7 |
