@@ -150,6 +150,15 @@ Shape of the errors:
     inserted, so a changed retry that reuses its candidates can report that
     instead of `Mismatch`. Nothing of the payment is stored either way.
   - Registering a merchant (ADR-0017) has an enum of its own, `RegisterError`.
+- 2026-11-03: two points from phase 3. The decision is unchanged.
+  - Class `42` joins what the classifier reads as `Invariant`. A statement refused
+    for lack of a privilege, or by a row-level security policy (`42501`), is
+    permanent, and until now it fell through to `NotConfirmed`, which told a caller
+    to retry something that can never succeed (ADR-0025).
+  - Phase 3 replays the rendered answer that a key's record stores, rather than
+    reading the stored step, and each attempt through HTTP has fresh IDs (ADR-0026).
+    The values are the same. The refusals that this record left to phase 3 are
+    stored there too, and `AlreadyApplied` stays for the library's own callers.
 
 ## References
 
