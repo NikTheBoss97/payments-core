@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT format('%s %s', COALESCE(d.datname, '*'), c.setting) AS \"setting!\"\n              FROM pg_db_role_setting s\n              JOIN pg_roles r ON r.oid = s.setrole\n              LEFT JOIN pg_database d ON d.oid = s.setdatabase\n             CROSS JOIN unnest(s.setconfig) AS c (setting)\n             WHERE r.rolname = $1::text\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "setting!",
+        "type_info": "Text",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "065c5b4f0dbc8d9302345483d041d975e0792826ce27a683e74759e9b5ba8c49"
+}

@@ -130,71 +130,92 @@ async fn the_runtime_role_has_exactly_the_expected_privileges(pool: PgPool) -> s
 }
 
 #[sqlx::test]
-async fn the_runtime_role_cannot_switch_the_guards_off(pool: PgPool) -> sqlx::Result<()> {
+async fn the_runtime_roles_cannot_switch_the_guards_off(pool: PgPool) -> sqlx::Result<()> {
     // A superuser can disable any trigger. A member of another role can act as
     // it, even through SET ROLE without inheriting its privileges. CREATE on
     // public would let the role add an operator that the guard functions'
     // search_path finds. A role allowed to set session_replication_role can
-    // switch off foreign-key checks (ADR-0004).
-    let role = sqlx::query!(
+    // switch off foreign-key checks (ADR-0004). Only the system role may bypass
+    // row-level security, and merchant routes never hold its pool (ADR-0025).
+    let roles = sqlx::query!(
         r#"
-        SELECT rolsuper AS "superuser!",
+        SELECT r.rolname::text AS "role!",
+               rolsuper AS "superuser!",
+               rolbypassrls AS "bypasses_row_security!",
                EXISTS (SELECT 1 FROM pg_auth_members WHERE member = r.oid)
                    AS "member_of_a_role!",
-               has_schema_privilege('payments_app', 'public', 'CREATE')
+               has_schema_privilege(r.rolname, 'public', 'CREATE')
                    AS "can_create_in_public!",
-               has_parameter_privilege('payments_app', 'session_replication_role', 'SET')
+               has_parameter_privilege(r.rolname, 'session_replication_role', 'SET')
                    AS "can_set_replication_role!"
           FROM pg_roles r
-         WHERE r.rolname = 'payments_app'
+         WHERE r.rolname IN ('payments_app', 'payments_tenant')
+         ORDER BY r.rolname
         "#
     )
-    .fetch_one(&pool)
+    .fetch_all(&pool)
     .await?;
-    assert!(!role.superuser, "payments_app is a superuser");
-    assert!(
-        !role.member_of_a_role,
-        "payments_app can act as another role"
+    let bypassing: Vec<(&str, bool)> = roles
+        .iter()
+        .map(|role| (role.role.as_str(), role.bypasses_row_security))
+        .collect();
+    assert_eq!(
+        bypassing,
+        [("payments_app", true), ("payments_tenant", false)]
     );
-    assert!(
-        !role.can_create_in_public,
-        "payments_app can create objects in public"
-    );
-    assert!(
-        !role.can_set_replication_role,
-        "payments_app can set session_replication_role"
-    );
+    for role in &roles {
+        let name = &role.role;
+        assert!(!role.superuser, "{name} is a superuser");
+        assert!(!role.member_of_a_role, "{name} can act as another role");
+        assert!(
+            !role.can_create_in_public,
+            "{name} can create objects in public"
+        );
+        assert!(
+            !role.can_set_replication_role,
+            "{name} can set session_replication_role"
+        );
+    }
     Ok(())
 }
 
+/// The roles that the application logs in as, whose password is their name in
+/// local development and CI (ADR-0008).
+const LOGIN_ROLES: [&str; 2] = ["payments_app", "payments_tenant"];
+
 #[sqlx::test]
-async fn the_runtime_role_has_exactly_its_session_defaults(pool: PgPool) -> sqlx::Result<()> {
+async fn the_runtime_roles_have_exactly_their_session_defaults(pool: PgPool) -> sqlx::Result<()> {
     // Role settings apply at login, not after SET ROLE, so the behaviour
     // tests never see them (ADR-0005). The lock timeout bounds a retried
     // posting's wait, and outlasts the idle timeout, so the retry outlives a
     // first attempt left idle after a lost COMMIT. The session timeout ends a
     // session that leaked a session-level lock (ADR-0018). "*" means every
     // database.
-    let mut settings = sqlx::query_scalar!(
-        r#"
-        SELECT format('%s %s', COALESCE(d.datname, '*'), c.setting) AS "setting!"
-          FROM pg_db_role_setting s
-          LEFT JOIN pg_database d ON d.oid = s.setdatabase
-         CROSS JOIN unnest(s.setconfig) AS c (setting)
-         WHERE s.setrole = 'payments_app'::regrole
-        "#
-    )
-    .fetch_all(&pool)
-    .await?;
-    settings.sort();
-    assert_eq!(
-        settings,
-        [
-            "* idle_in_transaction_session_timeout=30s",
-            "* idle_session_timeout=30min",
-            "* lock_timeout=35s",
-        ]
-    );
+    for role in LOGIN_ROLES {
+        let mut settings = sqlx::query_scalar!(
+            r#"
+            SELECT format('%s %s', COALESCE(d.datname, '*'), c.setting) AS "setting!"
+              FROM pg_db_role_setting s
+              JOIN pg_roles r ON r.oid = s.setrole
+              LEFT JOIN pg_database d ON d.oid = s.setdatabase
+             CROSS JOIN unnest(s.setconfig) AS c (setting)
+             WHERE r.rolname = $1::text
+            "#,
+            role
+        )
+        .fetch_all(&pool)
+        .await?;
+        settings.sort();
+        assert_eq!(
+            settings,
+            [
+                "* idle_in_transaction_session_timeout=30s",
+                "* idle_session_timeout=30min",
+                "* lock_timeout=35s",
+            ],
+            "{role}"
+        );
+    }
     Ok(())
 }
 
@@ -204,26 +225,29 @@ async fn a_runtime_login_gets_those_defaults_at_read_committed(pool: PgPool) -> 
     // sets an isolation level, and a command relies on this one: its read comes
     // after the lock, and sees what the lock's previous holder committed
     // (ADR-0018).
-    let options = (*pool.connect_options())
-        .clone()
-        .username("payments_app")
-        .password("payments_app");
-    let mut conn = PgConnection::connect_with(&options).await?;
-    let row = sqlx::query!(
-        r#"SELECT current_user::text AS "user!",
-                  current_setting('transaction_isolation') AS "isolation!",
-                  current_setting('lock_timeout') AS "lock_timeout!",
-                  current_setting('idle_in_transaction_session_timeout') AS "idle_in_transaction!",
-                  current_setting('idle_session_timeout') AS "idle_session!""#
-    )
-    .fetch_one(&mut conn)
-    .await?;
-    assert_eq!(row.user, "payments_app");
-    assert_eq!(row.isolation, "read committed");
-    assert_eq!(row.lock_timeout, "35s");
-    assert_eq!(row.idle_in_transaction, "30s");
-    assert_eq!(row.idle_session, "30min");
-    conn.close().await?;
+    for role in LOGIN_ROLES {
+        let options = (*pool.connect_options())
+            .clone()
+            .username(role)
+            .password(role);
+        let mut conn = PgConnection::connect_with(&options).await?;
+        let row = sqlx::query!(
+            r#"SELECT current_user::text AS "user!",
+                      current_setting('transaction_isolation') AS "isolation!",
+                      current_setting('lock_timeout') AS "lock_timeout!",
+                      current_setting('idle_in_transaction_session_timeout')
+                          AS "idle_in_transaction!",
+                      current_setting('idle_session_timeout') AS "idle_session!""#
+        )
+        .fetch_one(&mut conn)
+        .await?;
+        assert_eq!(row.user, role);
+        assert_eq!(row.isolation, "read committed", "{role}");
+        assert_eq!(row.lock_timeout, "35s", "{role}");
+        assert_eq!(row.idle_in_transaction, "30s", "{role}");
+        assert_eq!(row.idle_session, "30min", "{role}");
+        conn.close().await?;
+    }
     Ok(())
 }
 

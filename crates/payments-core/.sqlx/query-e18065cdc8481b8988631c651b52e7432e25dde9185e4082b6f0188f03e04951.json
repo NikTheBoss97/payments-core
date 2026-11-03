@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT current_user::text AS \"user!\",\n                  current_setting('transaction_isolation') AS \"isolation!\",\n                  current_setting('lock_timeout') AS \"lock_timeout!\",\n                  current_setting('idle_in_transaction_session_timeout') AS \"idle_in_transaction!\",\n                  current_setting('idle_session_timeout') AS \"idle_session!\"",
+  "query": "SELECT current_user::text AS \"user!\",\n                      current_setting('transaction_isolation') AS \"isolation!\",\n                      current_setting('lock_timeout') AS \"lock_timeout!\",\n                      current_setting('idle_in_transaction_session_timeout')\n                          AS \"idle_in_transaction!\",\n                      current_setting('idle_session_timeout') AS \"idle_session!\"",
   "describe": {
     "columns": [
       {
@@ -45,5 +45,5 @@
       null
     ]
   },
-  "hash": "179e3a113f16e480d8249c595435b4c6ab2c8335be60ec09d038d7ba8c6ee5d7"
+  "hash": "e18065cdc8481b8988631c651b52e7432e25dde9185e4082b6f0188f03e04951"
 }

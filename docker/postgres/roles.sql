@@ -6,9 +6,11 @@
 
 -- Runtime role used by the application (ADR-0004). It is not a superuser,
 -- owns no tables and belongs to no other role, so it cannot disable the
--- ledger's triggers. Migrations grant it SELECT and INSERT.
+-- ledger's triggers. Migrations grant it SELECT and INSERT. BYPASSRLS makes it
+-- the system role, which reaches every merchant's rows: operator routes, looking
+-- up an API key, and later phases. Merchant routes never hold its pool (ADR-0025).
 CREATE ROLE payments_app LOGIN PASSWORD 'payments_app'
-    NOSUPERUSER NOCREATEDB NOCREATEROLE;
+    NOSUPERUSER NOCREATEDB NOCREATEROLE BYPASSRLS;
 
 -- A session left idle inside an open transaction keeps its locks until the
 -- server notices. After a lost COMMIT, this bounds the wait to 30 seconds
@@ -27,3 +29,13 @@ ALTER ROLE payments_app SET lock_timeout = '35s';
 -- most about 20 minutes, so this ends only sessions the pool no longer manages
 -- (ADR-0018).
 ALTER ROLE payments_app SET idle_session_timeout = '30min';
+
+-- Login role for a merchant's requests (ADR-0025). Row-level security applies to
+-- it, so it sees nothing until a transaction names its merchant, and a path that
+-- forgets fails closed. It belongs to no other role, and the three settings above
+-- bound its waits for the same reasons.
+CREATE ROLE payments_tenant LOGIN PASSWORD 'payments_tenant'
+    NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS;
+ALTER ROLE payments_tenant SET idle_in_transaction_session_timeout = '30s';
+ALTER ROLE payments_tenant SET lock_timeout = '35s';
+ALTER ROLE payments_tenant SET idle_session_timeout = '30min';

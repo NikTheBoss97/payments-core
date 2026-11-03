@@ -1,0 +1,66 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT r.rolname::text AS \"role!\",\n               rolsuper AS \"superuser!\",\n               rolbypassrls AS \"bypasses_row_security!\",\n               EXISTS (SELECT 1 FROM pg_auth_members WHERE member = r.oid)\n                   AS \"member_of_a_role!\",\n               has_schema_privilege(r.rolname, 'public', 'CREATE')\n                   AS \"can_create_in_public!\",\n               has_parameter_privilege(r.rolname, 'session_replication_role', 'SET')\n                   AS \"can_set_replication_role!\"\n          FROM pg_roles r\n         WHERE r.rolname IN ('payments_app', 'payments_tenant')\n         ORDER BY r.rolname\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "role!",
+        "type_info": "Text",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 1,
+        "name": "superuser!",
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "pg_roles",
+            "name": "rolsuper"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "bypasses_row_security!",
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "pg_roles",
+            "name": "rolbypassrls"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "member_of_a_role!",
+        "type_info": "Bool",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 4,
+        "name": "can_create_in_public!",
+        "type_info": "Bool",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 5,
+        "name": "can_set_replication_role!",
+        "type_info": "Bool",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      null,
+      true,
+      true,
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "86af54a21b9647e0e4c0fa05712102055febcf22725f245f6445547ab3eea7ef"
+}
