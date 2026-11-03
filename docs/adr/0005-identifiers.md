@@ -132,6 +132,10 @@ what happened.
   `Clone`, so one ID cannot quietly serve two commands (ADR-0019).
   `PaymentId` and `MerchantId` are `Copy`: they name things that already
   exist, and every command on a payment repeats them.
+- 2026-11-03: `(scope, key)` for idempotency records is `(merchant_id, key)`,
+  the authenticated merchant's, and the operator's keys have a table of their
+  own (ADR-0026). The record decides whether an attempt runs, so each attempt
+  through HTTP gets fresh IDs, and a retry there never sends the same IDs again.
 
 ## References
 
