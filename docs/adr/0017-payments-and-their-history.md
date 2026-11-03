@@ -176,7 +176,9 @@ A's serialization.
 ## Amendments
 
 - 2026-11-03: `merchants` also holds `fee_bps`, the rate that the operator sets
-  for the merchant (ADR-0024), and registering a merchant carries it. Row-level
+  for the merchant (ADR-0024), and registering a merchant carries it. Registering
+  again at another rate is a `Mismatch` rather than a silent no-op, as for any
+  changed retry (ADR-0019). Row-level
   security now applies to `merchants`, `payments`, the history and the record
   tables for the new `payments_tenant` role (ADR-0025). The history and its
   constraints are unchanged, and `payments_app` sees and writes what it did.
