@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO idempotency_records (merchant_id, key, fingerprint, status, body, recorded_at) VALUES ($1, 'k', $2, 200, '{}', now())",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Bytea"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "02549fd5eb5e5251ad5fc85e1dbb65ebc20bac4685bac11f24e4c5cc13ac0653"
+}

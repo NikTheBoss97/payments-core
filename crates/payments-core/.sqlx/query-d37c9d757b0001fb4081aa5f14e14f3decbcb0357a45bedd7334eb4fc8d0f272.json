@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE operator_idempotency_records SET body = '{}'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "d37c9d757b0001fb4081aa5f14e14f3decbcb0357a45bedd7334eb4fc8d0f272"
+}

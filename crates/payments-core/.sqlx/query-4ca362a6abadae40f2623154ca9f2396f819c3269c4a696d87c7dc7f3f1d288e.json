@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "TRUNCATE operator_idempotency_records",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "4ca362a6abadae40f2623154ca9f2396f819c3269c4a696d87c7dc7f3f1d288e"
+}

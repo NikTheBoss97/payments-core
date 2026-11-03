@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM idempotency_records",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "1543d22509762d9030ac01b532a7616a7c2a7294e368129641b28c6f63b56a79"
+}

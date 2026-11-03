@@ -1,0 +1,26 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT fingerprint FROM idempotency_records",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "fingerprint",
+        "type_info": "Bytea",
+        "origin": {
+          "Table": {
+            "table": "idempotency_records",
+            "name": "fingerprint"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "5b8b99d10d434fb6bf0ba884e779b89d93c544feeb799fddd4f3786842a0315e"
+}

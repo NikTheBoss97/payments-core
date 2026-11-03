@@ -100,6 +100,11 @@ async fn the_runtime_role_has_exactly_the_expected_privileges(pool: PgPool) -> s
             "merchants SELECT",
             "merchants.fee_bps INSERT",
             "merchants.id INSERT",
+            "operator_idempotency_records SELECT",
+            "operator_idempotency_records.body INSERT",
+            "operator_idempotency_records.fingerprint INSERT",
+            "operator_idempotency_records.key INSERT",
+            "operator_idempotency_records.status INSERT",
             "payment_authorizations SELECT",
             "payment_authorizations.amount INSERT",
             "payment_authorizations.expires_at INSERT",
@@ -158,6 +163,12 @@ async fn the_tenant_role_has_exactly_the_expected_privileges(pool: PgPool) -> sq
             "accounts.normal_side INSERT",
             "accounts.party INSERT",
             "currencies SELECT",
+            "idempotency_records SELECT",
+            "idempotency_records.body INSERT",
+            "idempotency_records.fingerprint INSERT",
+            "idempotency_records.key INSERT",
+            "idempotency_records.merchant_id INSERT",
+            "idempotency_records.status INSERT",
             "ledger_entries INSERT",
             "ledger_entries SELECT",
             "ledger_transactions SELECT",
@@ -382,6 +393,16 @@ async fn every_guard_trigger_fires_always(pool: PgPool) -> sqlx::Result<()> {
         ("currencies", "currencies_append_only", "reject_change"),
         ("currencies", "currencies_no_truncate", "reject_change"),
         (
+            "idempotency_records",
+            "idempotency_records_append_only",
+            "reject_change",
+        ),
+        (
+            "idempotency_records",
+            "idempotency_records_no_truncate",
+            "reject_change",
+        ),
+        (
             "ledger_entries",
             "ledger_entries_append_only",
             "reject_change",
@@ -408,6 +429,16 @@ async fn every_guard_trigger_fires_always(pool: PgPool) -> sqlx::Result<()> {
         ),
         ("merchants", "merchants_append_only", "reject_change"),
         ("merchants", "merchants_no_truncate", "reject_change"),
+        (
+            "operator_idempotency_records",
+            "operator_idempotency_records_append_only",
+            "reject_change",
+        ),
+        (
+            "operator_idempotency_records",
+            "operator_idempotency_records_no_truncate",
+            "reject_change",
+        ),
         (
             "payment_authorizations",
             "payment_authorizations_append_only",
@@ -581,6 +612,12 @@ async fn every_column_has_its_type_and_is_not_null(pool: PgPool) -> sqlx::Result
             "api_keys.recorded_at timestamp with time zone not null",
             "currencies.code currency_code not null",
             "currencies.decimals smallint not null",
+            "idempotency_records.body text not null",
+            "idempotency_records.fingerprint bytea not null",
+            "idempotency_records.key text not null",
+            "idempotency_records.merchant_id uuid not null",
+            "idempotency_records.recorded_at timestamp with time zone not null",
+            "idempotency_records.status smallint not null",
             "ledger_entries.account_id uuid not null",
             "ledger_entries.amount bigint not null",
             "ledger_entries.currency currency_code not null",
@@ -594,6 +631,11 @@ async fn every_column_has_its_type_and_is_not_null(pool: PgPool) -> sqlx::Result
             "merchants.fee_bps integer not null",
             "merchants.id uuid not null",
             "merchants.recorded_at timestamp with time zone not null",
+            "operator_idempotency_records.body text not null",
+            "operator_idempotency_records.fingerprint bytea not null",
+            "operator_idempotency_records.key text not null",
+            "operator_idempotency_records.recorded_at timestamp with time zone not null",
+            "operator_idempotency_records.status smallint not null",
             "payment_authorizations.amount bigint not null",
             "payment_authorizations.expires_at timestamp with time zone not null",
             "payment_authorizations.kind text not null",
@@ -682,6 +724,12 @@ async fn every_constraint_keeps_its_name(pool: PgPool) -> sqlx::Result<()> {
             "currencies_decimals_check",
             "currencies_pkey",
             "currency_code_check",
+            "idempotency_records_body_check",
+            "idempotency_records_fingerprint_check",
+            "idempotency_records_key_check",
+            "idempotency_records_merchant_fkey",
+            "idempotency_records_pkey",
+            "idempotency_records_status_check",
             "ledger_entries_account_fkey",
             "ledger_entries_amount_check",
             "ledger_entries_header_fkey",
@@ -695,6 +743,11 @@ async fn every_constraint_keeps_its_name(pool: PgPool) -> sqlx::Result<()> {
             "merchants_fee_bps_check",
             "merchants_id_check",
             "merchants_pkey",
+            "operator_idempotency_records_body_check",
+            "operator_idempotency_records_fingerprint_check",
+            "operator_idempotency_records_key_check",
+            "operator_idempotency_records_pkey",
+            "operator_idempotency_records_status_check",
             "payment_authorizations_amount_check",
             "payment_authorizations_expires_at_check",
             "payment_authorizations_payment_fkey",
@@ -761,6 +814,7 @@ async fn row_level_security_covers_exactly_what_a_merchant_owns(pool: PgPool) ->
     assert_eq!(
         tables,
         [
+            "idempotency_records",
             "merchants",
             "payment_authorizations",
             "payment_captures",
@@ -800,6 +854,10 @@ async fn every_policy_keeps_its_text(pool: PgPool) -> sqlx::Result<()> {
     assert_eq!(
         policies,
         [
+            format!(
+                "idempotency_records_tenant_isolation PERMISSIVE ALL {{payments_tenant}}: \
+                 (merchant_id = {setting}); check: none"
+            ),
             format!(
                 "merchants_tenant_isolation PERMISSIVE SELECT {{payments_tenant}}: \
                  (id = {setting}); check: none"

@@ -1,0 +1,26 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT body FROM idempotency_records WHERE key = 'k'",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "body",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "idempotency_records",
+            "name": "body"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "642cb2660cef9fc4942cf78e1e1fa5dea63dd282b5817d925cf48c7850fadd10"
+}
