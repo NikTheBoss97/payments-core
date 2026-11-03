@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SET SESSION AUTHORIZATION payments_app",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "ab77968e38abac47568de21d1b1627e168eabed3b187f41218933bfae4f3f027"
+}

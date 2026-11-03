@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DROP POLICY payments_tenant_isolation ON payments",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "7a1575b9e59bd3a492bf26aa2aca61650d63033531a3cddedc0b8ed1f96a99bc"
+}

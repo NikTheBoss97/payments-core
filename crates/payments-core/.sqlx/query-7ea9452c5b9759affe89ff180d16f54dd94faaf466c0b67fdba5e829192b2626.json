@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SET LOCAL ROLE payments_tenant",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "7ea9452c5b9759affe89ff180d16f54dd94faaf466c0b67fdba5e829192b2626"
+}

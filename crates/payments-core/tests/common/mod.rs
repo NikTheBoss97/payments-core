@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 
 use payments_core::ids::{AccountId, MerchantId, PaymentId, TransactionId, TransitionId};
 use sqlx::postgres::PgPoolOptions;
-use sqlx::{PgConnection, PgPool, Postgres, Transaction};
+use sqlx::{Connection, PgConnection, PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
 /// SQLSTATE raised by the append-only trigger (ADR-0004).
@@ -57,6 +57,43 @@ pub async fn runtime_transaction(pool: &PgPool) -> sqlx::Result<Transaction<'sta
         .execute(&mut *tx)
         .await?;
     Ok(tx)
+}
+
+/// Names the merchant of the current database transaction (ADR-0025), which the
+/// tenant role's policies read. It lasts until the transaction ends.
+pub async fn name_merchant(conn: &mut PgConnection, merchant: Uuid) -> sqlx::Result<()> {
+    sqlx::query!(
+        "SELECT set_config('app.merchant', $1, true)",
+        merchant.to_string()
+    )
+    .fetch_one(conn)
+    .await?;
+    Ok(())
+}
+
+/// A database transaction that acts as the tenant role, `payments_tenant`, until
+/// it ends, and has named this merchant.
+pub async fn tenant_transaction(
+    pool: &PgPool,
+    merchant: Uuid,
+) -> sqlx::Result<Transaction<'static, Postgres>> {
+    let mut tx = pool.begin().await?;
+    sqlx::query!("SET LOCAL ROLE payments_tenant")
+        .execute(&mut *tx)
+        .await?;
+    name_merchant(&mut tx, merchant).await?;
+    Ok(tx)
+}
+
+/// A real login as the tenant role, which is what merchant routes hold. A session
+/// that a superuser moved with `SET ROLE` can always move back, so a test that
+/// tries to get out of the role needs this.
+pub async fn tenant_login(pool: &PgPool) -> sqlx::Result<PgConnection> {
+    let options = (*pool.connect_options())
+        .clone()
+        .username("payments_tenant")
+        .password("payments_tenant");
+    PgConnection::connect_with(&options).await
 }
 
 /// A pool whose connections act as the runtime role, to call the library's
