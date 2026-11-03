@@ -31,6 +31,11 @@ pub fn eur() -> Currency {
     Currency::parse("EUR").expect("valid code")
 }
 
+/// The fee rate of the test merchants and their payments: 2.5%.
+pub fn fee_rate() -> BasisPoints {
+    BasisPoints::new(250).expect("valid rate")
+}
+
 /// The command that creates payment `n` for this merchant: 100.00 EUR through
 /// the mock PSP, at a fee rate of 2.5%. Its IDs are fixed, so calling this again
 /// builds the identical command, which is what a retry sends (ADR-0019).
@@ -46,7 +51,7 @@ pub fn create_command(n: u32, merchant: MerchantId) -> CreatePayment {
         psp: Psp::Mock,
         currency: eur(),
         amount: PositiveAmount::new(REQUESTED).expect("valid amount"),
-        fee_rate: BasisPoints::new(250).expect("valid rate"),
+        fee_rate: fee_rate(),
         accounts: AccountCandidates {
             fee_revenue: candidate(0),
             merchant_payable: candidate(1),
@@ -163,7 +168,7 @@ pub async fn uncaused_postings(pool: &PgPool) -> sqlx::Result<Vec<Uuid>> {
 /// Registers a new merchant and returns its ID.
 pub async fn register_merchant(conn: &mut PgConnection) -> sqlx::Result<Uuid> {
     let id = Uuid::now_v7();
-    sqlx::query!("INSERT INTO merchants (id) VALUES ($1)", id)
+    sqlx::query!("INSERT INTO merchants (id, fee_bps) VALUES ($1, 250)", id)
         .execute(conn)
         .await?;
     Ok(id)

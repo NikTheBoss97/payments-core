@@ -14,7 +14,7 @@ mod common;
 use std::error::Error;
 
 use common::payments::{
-    authorize_command, balance_of, capture_command, create_command, eur, refund_command,
+    authorize_command, balance_of, capture_command, create_command, eur, fee_rate, refund_command,
     unbalanced_currencies, uncaused_postings,
 };
 use common::{merchant_id, runtime_pool, transaction_id, transition_id};
@@ -346,7 +346,7 @@ async fn random_histories_match_the_model(pool: PgPool) -> TestResult {
     let app = runtime_pool(&pool).await?;
     let merchants = [merchant_id(1), merchant_id(2), merchant_id(3)];
     for merchant in merchants {
-        register_merchant(&app, merchant).await?;
+        register_merchant(&app, merchant, fee_rate()).await?;
     }
     let payments: Vec<(MerchantId, u32)> = (1..=40)
         .map(|n: u32| {

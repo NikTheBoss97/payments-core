@@ -17,7 +17,7 @@ use std::error::Error;
 use std::time::{Duration, Instant};
 
 use common::payments::{
-    AUTHORIZED, FEE, authorize_command, balance_of, capture_command, create_command, eur,
+    AUTHORIZED, FEE, authorize_command, balance_of, capture_command, create_command, eur, fee_rate,
     refund_command, status_of, take_lock, unbalanced_currencies, uncaused_postings,
 };
 use common::{
@@ -129,7 +129,7 @@ async fn stored(pool: &PgPool) -> sqlx::Result<[i64; 7]> {
 async fn crash_test(pool: &PgPool) -> Result<(PgPool, MerchantId), Box<dyn Error>> {
     let app = runtime_pool_of_one(pool).await?;
     let merchant = merchant_id(1);
-    register_merchant(&app, merchant).await?;
+    register_merchant(&app, merchant, fee_rate()).await?;
     install_crash_points(pool).await?;
     Ok((app, merchant))
 }
@@ -184,7 +184,7 @@ async fn creating_a_payment_killed_anywhere_stores_nothing_and_settles(pool: PgP
     for (n, point) in (1..).zip(points) {
         // A merchant of its own, so that each payment has a new account to open.
         let merchant = merchant_id(n + 100);
-        register_merchant(&app, merchant).await?;
+        register_merchant(&app, merchant, fee_rate()).await?;
         let before = stored(&pool).await?;
         let command = create_command(n, merchant);
         plan_death(&app, point).await?;
@@ -512,7 +512,7 @@ async fn a_commit_that_commits_and_loses_its_session_is_settled_by_sending_again
     // exactly once (ADR-0014).
     let app = slow_commit_pool(&pool).await?;
     let merchant = merchant_id(1);
-    register_merchant(&app, merchant).await?;
+    register_merchant(&app, merchant, fee_rate()).await?;
     let reply = Recorded {
         seq: 2,
         from: PaymentStatus::Authorized,

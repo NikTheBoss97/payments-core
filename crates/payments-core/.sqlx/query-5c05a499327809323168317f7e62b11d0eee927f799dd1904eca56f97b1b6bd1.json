@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT fee_bps FROM merchants WHERE id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "fee_bps",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "merchants",
+            "name": "fee_bps"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "5c05a499327809323168317f7e62b11d0eee927f799dd1904eca56f97b1b6bd1"
+}

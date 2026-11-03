@@ -9,7 +9,7 @@ mod common;
 
 use std::error::Error;
 
-use common::payments::{REQUESTED, create_command, eur};
+use common::payments::{REQUESTED, create_command, eur, fee_rate};
 use common::{
     CHECK_VIOLATION, UNIQUE_VIOLATION, account_id, assert_guard, assert_violation, merchant_id,
     payment_id, runtime_pool, runtime_pool_of_one, transition_id,
@@ -20,8 +20,8 @@ use payments_core::ids::MerchantId;
 use payments_core::lifecycle::PaymentStatus;
 use payments_core::money::{BasisPoints, Currency, PositiveAmount};
 use payments_core::payments::{
-    AccountCandidates, CreateError, CreatePayment, Outcome, Payment, Recorded, create_payment,
-    find_payment, register_merchant,
+    AccountCandidates, CreateError, CreatePayment, Outcome, Payment, Recorded, RegisterError,
+    create_payment, find_payment, register_merchant,
 };
 use sqlx::PgPool;
 
@@ -51,7 +51,7 @@ async fn stored(pool: &PgPool) -> sqlx::Result<(i64, i64, i64)> {
 async fn app_with_merchant(pool: &PgPool) -> Result<(PgPool, MerchantId), Box<dyn Error>> {
     let app = runtime_pool(pool).await?;
     let merchant = merchant_id(1);
-    register_merchant(&app, merchant).await?;
+    register_merchant(&app, merchant, fee_rate()).await?;
     Ok((app, merchant))
 }
 
@@ -69,8 +69,8 @@ async fn invariant(app: &PgPool, command: &CreatePayment) -> sqlx::Error {
 async fn a_merchant_registers_once_however_often_it_is_called(pool: PgPool) -> TestResult {
     let app = runtime_pool(&pool).await?;
     let id = merchant_id(1);
-    register_merchant(&app, id).await?;
-    register_merchant(&app, id).await?;
+    register_merchant(&app, id, fee_rate()).await?;
+    register_merchant(&app, id, fee_rate()).await?;
     let merchants = sqlx::query_scalar!(
         r#"SELECT count(*) AS "count!" FROM merchants WHERE id = $1"#,
         id.get()
@@ -78,6 +78,41 @@ async fn a_merchant_registers_once_however_often_it_is_called(pool: PgPool) -> T
     .fetch_one(&pool)
     .await?;
     assert_eq!(merchants, 1);
+    app.close().await;
+    Ok(())
+}
+
+#[sqlx::test]
+async fn a_merchant_keeps_the_rate_it_registered_at(pool: PgPool) -> TestResult {
+    let app = runtime_pool(&pool).await?;
+    let id = merchant_id(1);
+    let rate = BasisPoints::new(300)?;
+    register_merchant(&app, id, rate).await?;
+    register_merchant(&app, id, rate).await?;
+    let stored = sqlx::query_scalar!("SELECT fee_bps FROM merchants WHERE id = $1", id.get())
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(stored, 300);
+    app.close().await;
+    Ok(())
+}
+
+#[sqlx::test]
+async fn registering_at_another_rate_is_a_mismatch_and_changes_nothing(pool: PgPool) -> TestResult {
+    let app = runtime_pool(&pool).await?;
+    let id = merchant_id(1);
+    register_merchant(&app, id, fee_rate()).await?;
+    let err = register_merchant(&app, id, BasisPoints::new(300)?)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, RegisterError::Mismatch { merchant } if merchant == id),
+        "{err:?}"
+    );
+    let stored = sqlx::query_scalar!("SELECT fee_bps FROM merchants WHERE id = $1", id.get())
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(stored, 250);
     app.close().await;
     Ok(())
 }
@@ -158,7 +193,7 @@ async fn payments_share_the_accounts_of_their_keys(pool: PgPool) -> TestResult {
     create_payment(&app, &create_command(2, merchant)).await?;
     assert_eq!(stored(&pool).await?, (2, 2, 3));
     let other = merchant_id(2);
-    register_merchant(&app, other).await?;
+    register_merchant(&app, other, fee_rate()).await?;
     create_payment(&app, &create_command(3, other)).await?;
     assert_eq!(stored(&pool).await?, (3, 3, 4));
     app.close().await;
@@ -216,7 +251,7 @@ async fn a_retry_gets_the_stored_reply_and_stores_nothing_new(pool: PgPool) -> T
     // keep the failed transaction's.
     let app = runtime_pool_of_one(&pool).await?;
     let merchant = merchant_id(1);
-    register_merchant(&app, merchant).await?;
+    register_merchant(&app, merchant, fee_rate()).await?;
     let command = create_command(1, merchant);
     assert_eq!(
         create_payment(&app, &command).await?,
@@ -237,7 +272,7 @@ async fn a_retry_gets_the_stored_reply_and_stores_nothing_new(pool: PgPool) -> T
 async fn a_changed_retry_is_a_mismatch_for_each_term(pool: PgPool) -> TestResult {
     let (app, merchant) = app_with_merchant(&pool).await?;
     let other_merchant = merchant_id(2);
-    register_merchant(&app, other_merchant).await?;
+    register_merchant(&app, other_merchant, fee_rate()).await?;
     create_payment(&app, &create_command(1, merchant)).await?;
     let before = find_payment(&app, payment_id(1)).await?;
     // Another merchant or currency means accounts with new keys, so those
@@ -322,7 +357,7 @@ async fn a_candidate_that_another_account_has_is_a_bug(pool: PgPool) -> TestResu
     let (app, merchant) = app_with_merchant(&pool).await?;
     create_payment(&app, &create_command(1, merchant)).await?;
     let other = merchant_id(2);
-    register_merchant(&app, other).await?;
+    register_merchant(&app, other, fee_rate()).await?;
     let reused = CreatePayment {
         accounts: create_command(1, merchant).accounts,
         ..create_command(2, other)

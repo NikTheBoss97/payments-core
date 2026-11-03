@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO merchants (id, fee_bps) VALUES ($1, 250) ON CONFLICT (id) DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "5d1f4f8d78905009ae289bc9fd8afd02902e71b9c67fb007ec8d4e3d4f718362"
+}

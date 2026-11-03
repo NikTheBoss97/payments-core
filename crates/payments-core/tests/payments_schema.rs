@@ -14,8 +14,9 @@ mod common;
 
 use common::payments::{NewPayment, VERSION_4, register_merchant};
 use common::{
-    APPEND_ONLY, CHECK_VIOLATION, FOREIGN_KEY_VIOLATION, INSUFFICIENT_PRIVILEGE, UNIQUE_VIOLATION,
-    assert_guard, assert_violation, runtime_connection, runtime_transaction, sqlstate,
+    APPEND_ONLY, CHECK_VIOLATION, FOREIGN_KEY_VIOLATION, INSUFFICIENT_PRIVILEGE,
+    NOT_NULL_VIOLATION, UNIQUE_VIOLATION, assert_guard, assert_violation, runtime_connection,
+    runtime_transaction, sqlstate,
 };
 use payments_core::accounts::Psp;
 use sqlx::PgPool;
@@ -28,7 +29,7 @@ const CAP: i64 = 1_000_000_000_000_000;
 async fn a_merchant_has_a_uuidv7_and_registers_once(pool: PgPool) -> sqlx::Result<()> {
     let mut app = runtime_connection(&pool).await?;
     for id in [Uuid::nil(), Uuid::max(), VERSION_4] {
-        let err = sqlx::query!("INSERT INTO merchants (id) VALUES ($1)", id)
+        let err = sqlx::query!("INSERT INTO merchants (id, fee_bps) VALUES ($1, 250)", id)
             .execute(&mut app)
             .await
             .unwrap_err();
@@ -36,7 +37,7 @@ async fn a_merchant_has_a_uuidv7_and_registers_once(pool: PgPool) -> sqlx::Resul
     }
 
     let id = register_merchant(&mut app).await?;
-    let err = sqlx::query!("INSERT INTO merchants (id) VALUES ($1)", id)
+    let err = sqlx::query!("INSERT INTO merchants (id, fee_bps) VALUES ($1, 250)", id)
         .execute(&mut app)
         .await
         .unwrap_err();
@@ -44,12 +45,44 @@ async fn a_merchant_has_a_uuidv7_and_registers_once(pool: PgPool) -> sqlx::Resul
 
     // How the library registers one: registering again changes nothing.
     let done = sqlx::query!(
-        "INSERT INTO merchants (id) VALUES ($1) ON CONFLICT (id) DO NOTHING",
+        "INSERT INTO merchants (id, fee_bps) VALUES ($1, 250) ON CONFLICT (id) DO NOTHING",
         id
     )
     .execute(&mut app)
     .await?;
     assert_eq!(done.rows_affected(), 0);
+    Ok(())
+}
+
+#[sqlx::test]
+async fn a_merchants_fee_is_a_rate_and_never_left_out(pool: PgPool) -> sqlx::Result<()> {
+    let mut app = runtime_connection(&pool).await?;
+    for rate in [-1, 10_001] {
+        let err = sqlx::query!(
+            "INSERT INTO merchants (id, fee_bps) VALUES ($1, $2)",
+            Uuid::now_v7(),
+            rate
+        )
+        .execute(&mut app)
+        .await
+        .unwrap_err();
+        assert_violation(err, CHECK_VIOLATION, "merchants_fee_bps_check");
+    }
+    for rate in [0, 10_000] {
+        sqlx::query!(
+            "INSERT INTO merchants (id, fee_bps) VALUES ($1, $2)",
+            Uuid::now_v7(),
+            rate
+        )
+        .execute(&mut app)
+        .await?;
+    }
+    // The operator's rate has no default: a merchant without one is refused.
+    let err = sqlx::query!("INSERT INTO merchants (id) VALUES ($1)", Uuid::now_v7())
+        .execute(&mut app)
+        .await
+        .unwrap_err();
+    assert_eq!(sqlstate(err), NOT_NULL_VIOLATION);
     Ok(())
 }
 

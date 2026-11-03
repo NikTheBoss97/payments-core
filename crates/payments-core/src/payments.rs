@@ -53,6 +53,10 @@ pub enum Outcome {
 /// Why a merchant could not be registered.
 #[derive(Debug, thiserror::Error)]
 pub enum RegisterError {
+    /// The merchant exists at another fee rate: not a retry of this registration
+    /// (ADR-0019). Nothing changed.
+    #[error("merchant {merchant} is registered at another fee rate")]
+    Mismatch { merchant: MerchantId },
     /// The database rejected what the types rule out: a bug, never retried
     /// (ADR-0013).
     #[error("the database rejected merchant {merchant} as invalid")]
@@ -71,20 +75,20 @@ pub enum RegisterError {
     },
 }
 
-/// Registers a merchant (ADR-0017). Calling it again with the same ID is safe.
+/// Registers a merchant at the fee rate that the operator set (ADR-0017,
+/// ADR-0024). Calling it again with the same values is safe.
 ///
 /// # Errors
 ///
+/// [`RegisterError::Mismatch`] if the merchant exists at another rate,
 /// [`RegisterError::Invariant`] for a bug, and [`RegisterError::NotConfirmed`]
 /// for anything else.
-pub async fn register_merchant(pool: &PgPool, id: MerchantId) -> Result<(), RegisterError> {
-    sqlx::query!(
-        "INSERT INTO merchants (id) VALUES ($1) ON CONFLICT (id) DO NOTHING",
-        id.get()
-    )
-    .execute(pool)
-    .await
-    .map_err(|source| match failure_of(&source) {
+pub async fn register_merchant(
+    pool: &PgPool,
+    id: MerchantId,
+    fee_rate: BasisPoints,
+) -> Result<(), RegisterError> {
+    let failure = |source: sqlx::Error| match failure_of(&source) {
         Failure::Duplicate | Failure::Invariant => RegisterError::Invariant {
             merchant: id,
             source,
@@ -93,8 +97,29 @@ pub async fn register_merchant(pool: &PgPool, id: MerchantId) -> Result<(), Regi
             merchant: id,
             source,
         },
-    })?;
-    Ok(())
+    };
+    let fee_bps = i32::from(fee_rate.get());
+    let inserted = sqlx::query!(
+        "INSERT INTO merchants (id, fee_bps) VALUES ($1, $2) ON CONFLICT (id) DO NOTHING",
+        id.get(),
+        fee_bps
+    )
+    .execute(pool)
+    .await
+    .map_err(failure)?;
+    if inserted.rows_affected() == 1 {
+        return Ok(());
+    }
+    // A merchant's row never changes, so this read cannot go stale.
+    let stored = sqlx::query_scalar!("SELECT fee_bps FROM merchants WHERE id = $1", id.get())
+        .fetch_one(pool)
+        .await
+        .map_err(failure)?;
+    if stored == fee_bps {
+        Ok(())
+    } else {
+        Err(RegisterError::Mismatch { merchant: id })
+    }
 }
 
 /// A payment as stored: its terms, which never change, and where it stands,
