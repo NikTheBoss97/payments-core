@@ -17,7 +17,7 @@ invariants, and [`docs/adr/`](docs/adr/) for the decisions behind them.
 |-------|-------|--------|
 | 1 | Double-entry ledger | done |
 | 2 | Payment lifecycle state machine | done |
-| 3 | Idempotency keys | — |
+| 3 | Idempotency keys, HTTP API, authentication and tenant isolation | in progress |
 | 4 | Mock PSP, signed webhooks | — |
 | 5 | Transactional outbox | — |
 | 6 | Reconciliation | — |
@@ -56,9 +56,10 @@ guard, and the failures they reproduce.
 | I1 | Every ledger transaction's entries sum to zero, so each currency sums to zero across the ledger. | Guaranteed since phase 1 | [Ledger](docs/correctness/ledger.md) |
 | I2 | The ledger's tables are append-only. | Guaranteed since phase 1 | [Ledger](docs/correctness/ledger.md) |
 | I3 | Balances are derived from the entries: none is stored. | Guaranteed since phase 1 | [Ledger](docs/correctness/ledger.md) |
-| I4 | One idempotency key produces at most one effect. | Phase 3 | |
+| I4 | One idempotency key produces at most one effect. | Phase 3, in progress: designed in [ADR-0026](docs/adr/0026-idempotency-keys.md) | |
 | I5 | A payment never makes an invalid state transition. | Guaranteed since phase 2 | [Payments](docs/correctness/payments.md) |
 | I6 | A payment's state change, its ledger entries and its outbound event commit atomically. | The state change and its entries since phase 2; the outbound event in phase 5 | [Payments](docs/correctness/payments.md) |
+| I7 | A merchant can read or change only its own payments. | Phase 3, in progress: designed in [ADR-0025](docs/adr/0025-tenant-isolation.md) | |
 
 ### Running the tests
 
