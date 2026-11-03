@@ -124,6 +124,9 @@ runtime role:
   session that is `idle in transaction (aborted)`. So a queued command goes
   ahead as soon as the holder's statement fails, and an aborted session blocks
   nobody. Nothing above depends on the difference. The decision is unchanged.
+- 2026-11-03: a command run for a merchant names that merchant in its second
+  statement (ADR-0025). The lock stays first, and setting a transaction-local
+  value reads no table, so the decision is unchanged.
 
 ## References
 

@@ -173,6 +173,14 @@ A's serialization.
 - Each new payment takes a `FOR KEY SHARE` lock on its merchant's row: the
   MultiXact traffic that ADR-0002 describes for a busy account.
 
+## Amendments
+
+- 2026-11-03: `merchants` also holds `fee_bps`, the rate that the operator sets
+  for the merchant (ADR-0024), and registering a merchant carries it. Row-level
+  security now applies to `merchants`, `payments`, the history and the record
+  tables for the new `payments_tenant` role (ADR-0025). The history and its
+  constraints are unchanged, and `payments_app` sees and writes what it did.
+
 ## References
 
 - PostgreSQL 18 manual, [Constraints](https://www.postgresql.org/docs/18/ddl-constraints.html) (check constraints; foreign keys over several columns).

@@ -76,6 +76,10 @@ superuser.
   time sqlx's pool keeps a connection idle, and a catalog test pins it with
   the other two settings. An existing local volume picks it up after
   `docker compose down -v`.
+- 2026-11-03: `roles.sql` also creates `payments_tenant`, the login for a
+  merchant's requests, with the same three settings, and gives `payments_app`
+  `BYPASSRLS` (ADR-0025). An existing local volume picks both up after
+  `docker compose down -v`.
 
 ## References
 
