@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "ALTER TABLE payments DISABLE ROW LEVEL SECURITY",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "6ba53b1fa7d9af84c3963d32175aba8c47036ef7111f3e638efd8f49c647b7d1"
+}

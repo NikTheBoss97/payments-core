@@ -1,0 +1,51 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT (SELECT count(*) FROM payments WHERE id = $1) AS \"payments!\",\n                      (SELECT count(*) FROM payment_transitions WHERE payment_id = $1) AS \"steps!\",\n                      (SELECT count(*) FROM payment_authorizations WHERE payment_id = $1)\n                          AS \"authorizations!\",\n                      (SELECT count(*) FROM payment_captures WHERE payment_id = $1)\n                          AS \"captures!\",\n                      (SELECT count(*) FROM payment_refunds WHERE payment_id = $1)\n                          AS \"refunds!\"",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "payments!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 1,
+        "name": "steps!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 2,
+        "name": "authorizations!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 3,
+        "name": "captures!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 4,
+        "name": "refunds!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null,
+      null,
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "68bbde0e65166e88cc1b5c0e333d47fb5e4e1866a568f03cb4faa93770e3b8ae"
+}

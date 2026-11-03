@@ -1,0 +1,21 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT format('%s%s', c.relname,\n                      CASE WHEN c.relforcerowsecurity THEN ' forced' ELSE '' END) AS \"table!\"\n          FROM pg_class c\n         WHERE c.relnamespace = 'public'::regnamespace\n           AND c.relkind = 'r'\n           AND c.relrowsecurity\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "table!",
+        "type_info": "Text",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "99da7f14664e61d0292d851a45521d5e8af2d3dd1e6c3c251084f057b73a6fdb"
+}

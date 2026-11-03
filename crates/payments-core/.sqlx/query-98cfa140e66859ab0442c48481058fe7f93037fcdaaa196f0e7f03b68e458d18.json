@@ -1,0 +1,26 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT DISTINCT payment_id AS \"payment!\" FROM payment_transitions",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "payment!",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "payment_transitions",
+            "name": "payment_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "98cfa140e66859ab0442c48481058fe7f93037fcdaaa196f0e7f03b68e458d18"
+}

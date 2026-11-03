@@ -10,12 +10,14 @@
 //! privileges, its grant options and its session defaults, check that it can
 //! neither create objects in the public schema nor act through another role,
 //! pin each guard trigger and the function it runs, and pin the type and
-//! nullability of every column and the name of every constraint.
+//! nullability of every column and the name of every constraint. The tenant
+//! role, `payments_tenant`, is pinned the same way, with the tables under
+//! row-level security and the text of every policy (ADR-0025).
 
 use sqlx::{Connection, PgConnection, PgPool};
 
-#[sqlx::test]
-async fn the_runtime_role_has_exactly_the_expected_privileges(pool: PgPool) -> sqlx::Result<()> {
+/// A role's privileges, sorted.
+async fn granted_to(pool: &PgPool, role: &str) -> sqlx::Result<Vec<String>> {
     // Effective privileges, so a grant to PUBLIC or through an inherited role
     // counts. Column privileges are listed only where the table-level one is
     // absent, and any privilege the role may grant on to others is listed
@@ -28,7 +30,7 @@ async fn the_runtime_role_has_exactly_the_expected_privileges(pool: PgPool) -> s
                                  'REFERENCES', 'TRIGGER', 'MAINTAIN']) AS p (privilege)
          WHERE c.relnamespace = 'public'::regnamespace
            AND c.relkind = 'r'
-           AND has_table_privilege('payments_app', c.oid, p.privilege)
+           AND has_table_privilege($1::text, c.oid, p.privilege)
         UNION ALL
         SELECT format('%s %s WITH GRANT OPTION', c.relname, p.privilege)
           FROM pg_class c
@@ -36,7 +38,7 @@ async fn the_runtime_role_has_exactly_the_expected_privileges(pool: PgPool) -> s
                                  'REFERENCES', 'TRIGGER', 'MAINTAIN']) AS p (privilege)
          WHERE c.relnamespace = 'public'::regnamespace
            AND c.relkind = 'r'
-           AND has_table_privilege('payments_app', c.oid, p.privilege || ' WITH GRANT OPTION')
+           AND has_table_privilege($1::text, c.oid, p.privilege || ' WITH GRANT OPTION')
         UNION ALL
         SELECT format('%s.%s %s', c.relname, a.attname, p.privilege)
           FROM pg_attribute a
@@ -46,8 +48,8 @@ async fn the_runtime_role_has_exactly_the_expected_privileges(pool: PgPool) -> s
            AND c.relkind = 'r'
            AND a.attnum > 0
            AND NOT a.attisdropped
-           AND has_column_privilege('payments_app', c.oid, a.attnum, p.privilege)
-           AND NOT has_table_privilege('payments_app', c.oid, p.privilege)
+           AND has_column_privilege($1::text, c.oid, a.attnum, p.privilege)
+           AND NOT has_table_privilege($1::text, c.oid, p.privilege)
         UNION ALL
         SELECT format('%s.%s %s WITH GRANT OPTION', c.relname, a.attname, p.privilege)
           FROM pg_attribute a
@@ -57,18 +59,23 @@ async fn the_runtime_role_has_exactly_the_expected_privileges(pool: PgPool) -> s
            AND c.relkind = 'r'
            AND a.attnum > 0
            AND NOT a.attisdropped
-           AND has_column_privilege('payments_app', c.oid, a.attnum,
+           AND has_column_privilege($1::text, c.oid, a.attnum,
                                     p.privilege || ' WITH GRANT OPTION')
-        "#
+        "#,
+        role
     )
-    .fetch_all(&pool)
+    .fetch_all(pool)
     .await?;
     granted.sort();
+    Ok(granted)
+}
 
+#[sqlx::test]
+async fn the_runtime_role_has_exactly_the_expected_privileges(pool: PgPool) -> sqlx::Result<()> {
     // INSERT covers every column of accounts and ledger_transactions except
     // recorded_at, which only the database sets (ADR-0012).
     assert_eq!(
-        granted,
+        granted_to(&pool, "payments_app").await?,
         [
             "account_kinds SELECT",
             "accounts SELECT",
@@ -93,6 +100,71 @@ async fn the_runtime_role_has_exactly_the_expected_privileges(pool: PgPool) -> s
             "merchants SELECT",
             "merchants.fee_bps INSERT",
             "merchants.id INSERT",
+            "payment_authorizations SELECT",
+            "payment_authorizations.amount INSERT",
+            "payment_authorizations.expires_at INSERT",
+            "payment_authorizations.payment_amount INSERT",
+            "payment_authorizations.payment_id INSERT",
+            "payment_authorizations.transition_id INSERT",
+            "payment_captures SELECT",
+            "payment_captures.amount INSERT",
+            "payment_captures.authorized_amount INSERT",
+            "payment_captures.captured_at INSERT",
+            "payment_captures.fee INSERT",
+            "payment_captures.ledger_transaction_id INSERT",
+            "payment_captures.payment_id INSERT",
+            "payment_captures.transition_id INSERT",
+            "payment_refunds SELECT",
+            "payment_refunds.amount INSERT",
+            "payment_refunds.ledger_transaction_id INSERT",
+            "payment_refunds.payment_id INSERT",
+            "payment_refunds.refunded_at INSERT",
+            "payment_refunds.transition_id INSERT",
+            "payment_transitions SELECT",
+            "payment_transitions.amount INSERT",
+            "payment_transitions.from_status INSERT",
+            "payment_transitions.id INSERT",
+            "payment_transitions.kind INSERT",
+            "payment_transitions.payment_id INSERT",
+            "payment_transitions.prev_refundable INSERT",
+            "payment_transitions.prev_seq INSERT",
+            "payment_transitions.refundable INSERT",
+            "payment_transitions.seq INSERT",
+            "payment_transitions.to_status INSERT",
+            "payments SELECT",
+            "payments.amount INSERT",
+            "payments.currency INSERT",
+            "payments.fee_bps INSERT",
+            "payments.id INSERT",
+            "payments.merchant_id INSERT",
+            "payments.psp INSERT",
+        ]
+    );
+    Ok(())
+}
+
+#[sqlx::test]
+async fn the_tenant_role_has_exactly_the_expected_privileges(pool: PgPool) -> sqlx::Result<()> {
+    // What a merchant's requests and their deferred checks need, and no more: it
+    // cannot create a merchant or see an API key (ADR-0025).
+    assert_eq!(
+        granted_to(&pool, "payments_tenant").await?,
+        [
+            "account_kinds SELECT",
+            "accounts SELECT",
+            "accounts.currency INSERT",
+            "accounts.id INSERT",
+            "accounts.kind INSERT",
+            "accounts.normal_side INSERT",
+            "accounts.party INSERT",
+            "currencies SELECT",
+            "ledger_entries INSERT",
+            "ledger_entries SELECT",
+            "ledger_transactions SELECT",
+            "ledger_transactions.currency INSERT",
+            "ledger_transactions.entry_count INSERT",
+            "ledger_transactions.id INSERT",
+            "merchants SELECT",
             "payment_authorizations SELECT",
             "payment_authorizations.amount INSERT",
             "payment_authorizations.expires_at INSERT",
@@ -663,6 +735,89 @@ async fn every_constraint_keeps_its_name(pool: PgPool) -> sqlx::Result<()> {
             "payments_merchant_fkey",
             "payments_pkey",
             "payments_psp_check",
+        ]
+    );
+    Ok(())
+}
+
+#[sqlx::test]
+async fn row_level_security_covers_exactly_what_a_merchant_owns(pool: PgPool) -> sqlx::Result<()> {
+    // Dropping a policy leaves the tenant role seeing nothing, which fails closed, but
+    // disabling row-level security on a table would open it to every merchant. Nothing
+    // is forced, because only migrations run as the owner (ADR-0025).
+    let mut tables = sqlx::query_scalar!(
+        r#"
+        SELECT format('%s%s', c.relname,
+                      CASE WHEN c.relforcerowsecurity THEN ' forced' ELSE '' END) AS "table!"
+          FROM pg_class c
+         WHERE c.relnamespace = 'public'::regnamespace
+           AND c.relkind = 'r'
+           AND c.relrowsecurity
+        "#
+    )
+    .fetch_all(&pool)
+    .await?;
+    tables.sort();
+    assert_eq!(
+        tables,
+        [
+            "merchants",
+            "payment_authorizations",
+            "payment_captures",
+            "payment_refunds",
+            "payment_transitions",
+            "payments",
+        ]
+    );
+    Ok(())
+}
+
+#[sqlx::test]
+async fn every_policy_keeps_its_text(pool: PgPool) -> sqlx::Result<()> {
+    // A policy that went on to compare the wrong column, or that applied to another
+    // role, would pass every test that its own merchant runs. With no WITH CHECK,
+    // USING also judges new rows. PostgreSQL stores a policy parsed, so this is its
+    // text as PostgreSQL prints it, with the whitespace of its line breaks reduced.
+    let mut policies = sqlx::query_scalar!(
+        r#"
+        SELECT format('%s %s %s %s: %s; check: %s', policyname, permissive, cmd, roles::text,
+                      regexp_replace(qual, '\s+', ' ', 'g'),
+                      COALESCE(with_check, 'none')) AS "policy!"
+          FROM pg_policies
+         WHERE schemaname = 'public'
+        "#
+    )
+    .fetch_all(&pool)
+    .await?;
+    policies.sort();
+    let of_a_child = |table: &str, name: &str| {
+        format!(
+            "{name} PERMISSIVE ALL {{payments_tenant}}: \
+             (EXISTS ( SELECT 1 FROM payments p WHERE (p.id = {table}.payment_id))); check: none"
+        )
+    };
+    let setting = "(NULLIF(current_setting('app.merchant'::text, true), ''::text))::uuid";
+    assert_eq!(
+        policies,
+        [
+            format!(
+                "merchants_tenant_isolation PERMISSIVE SELECT {{payments_tenant}}: \
+                 (id = {setting}); check: none"
+            ),
+            of_a_child(
+                "payment_authorizations",
+                "payment_authorizations_tenant_isolation"
+            ),
+            of_a_child("payment_captures", "payment_captures_tenant_isolation"),
+            of_a_child("payment_refunds", "payment_refunds_tenant_isolation"),
+            of_a_child(
+                "payment_transitions",
+                "payment_transitions_tenant_isolation"
+            ),
+            format!(
+                "payments_tenant_isolation PERMISSIVE ALL {{payments_tenant}}: \
+                 (merchant_id = {setting}); check: none"
+            ),
         ]
     );
     Ok(())

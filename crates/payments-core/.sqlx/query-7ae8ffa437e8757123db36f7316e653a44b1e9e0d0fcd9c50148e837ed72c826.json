@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "ALTER ROLE payments_tenant BYPASSRLS",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "7ae8ffa437e8757123db36f7316e653a44b1e9e0d0fcd9c50148e837ed72c826"
+}

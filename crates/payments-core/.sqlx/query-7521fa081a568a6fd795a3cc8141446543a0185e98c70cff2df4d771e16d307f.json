@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SET row_security = off",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "7521fa081a568a6fd795a3cc8141446543a0185e98c70cff2df4d771e16d307f"
+}
