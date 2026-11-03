@@ -12,7 +12,8 @@ use std::error::Error;
 
 use common::payments::{
     AUTHORIZED, FEE, authorize_command, balance_of, books, capture_command, committed_at,
-    created_with, eur, refund_command, status_of, steps, unbalanced_currencies, uncaused_postings,
+    created_with, eur, fee_rate, refund_command, status_of, steps, unbalanced_currencies,
+    uncaused_postings,
 };
 use common::{
     assert_guard, merchant_id, payment_id, runtime_pool, runtime_pool_of_one, transaction_id,
@@ -37,7 +38,7 @@ type TestResult = Result<(), Box<dyn Error>>;
 async fn app_with_merchant(pool: &PgPool) -> Result<(PgPool, MerchantId), Box<dyn Error>> {
     let app = runtime_pool(pool).await?;
     let merchant = merchant_id(1);
-    register_merchant(&app, merchant).await?;
+    register_merchant(&app, merchant, fee_rate()).await?;
     Ok((app, merchant))
 }
 
@@ -294,7 +295,7 @@ async fn a_retry_of_an_older_refund_gets_its_own_reply(pool: PgPool) -> TestResu
     // on the one connection of this pool (ADR-0019).
     let app = runtime_pool_of_one(&pool).await?;
     let merchant = merchant_id(1);
-    register_merchant(&app, merchant).await?;
+    register_merchant(&app, merchant, fee_rate()).await?;
     let payment = captured(&app, merchant, 1).await?;
     let first = refund_command(1, payment, 3_000);
     let first_reply = Recorded {

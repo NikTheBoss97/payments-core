@@ -12,8 +12,8 @@ use std::error::Error;
 
 use common::payments::{
     AUTHORIZED, FEE, NewPayment, REQUESTED, Step, authorize_command, balance_of, books,
-    capture_command, committed_at, created_with, eur, insert_authorization, status_of, steps,
-    unbalanced_currencies, uncaused_postings,
+    capture_command, committed_at, created_with, eur, fee_rate, insert_authorization, status_of,
+    steps, unbalanced_currencies, uncaused_postings,
 };
 use common::{
     CHECK_VIOLATION, UNIQUE_VIOLATION, assert_guard, assert_violation, merchant_id, payment_id,
@@ -50,7 +50,7 @@ const CAPTURED_REPLY: Recorded = Recorded {
 async fn app_with_merchant(pool: &PgPool) -> Result<(PgPool, MerchantId), Box<dyn Error>> {
     let app = runtime_pool(pool).await?;
     let merchant = merchant_id(1);
-    register_merchant(&app, merchant).await?;
+    register_merchant(&app, merchant, fee_rate()).await?;
     Ok((app, merchant))
 }
 
@@ -159,7 +159,7 @@ async fn the_fee_follows_the_rate_and_rounds_half_up(pool: PgPool) -> TestResult
         (6, 1, 1, 0),
     ] {
         let merchant = merchant_id(n);
-        register_merchant(&app, merchant).await?;
+        register_merchant(&app, merchant, fee_rate()).await?;
         let before = balance_of(&app, AccountRef::FeeRevenue(eur())).await?;
         let receivable_before =
             balance_of(&app, AccountRef::PspReceivable(Psp::Mock, eur())).await?;
@@ -307,7 +307,7 @@ async fn a_retry_gets_the_stored_reply_although_the_status_has_moved_on(
     // lock, so it must do that on the connection that it has.
     let app = runtime_pool_of_one(&pool).await?;
     let merchant = merchant_id(1);
-    register_merchant(&app, merchant).await?;
+    register_merchant(&app, merchant, fee_rate()).await?;
     let payment = authorized_at(&app, merchant, 1, 250).await?;
     let command = capture_command(1, payment);
     capture(&app, &command).await?;

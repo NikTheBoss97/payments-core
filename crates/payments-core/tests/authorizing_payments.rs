@@ -10,7 +10,7 @@ use std::error::Error;
 
 use common::payments::{
     AUTHORIZED, REQUESTED, authorize_command, books, committed_at, create_command, deadline,
-    status_of, steps,
+    fee_rate, status_of, steps,
 };
 use common::{
     CHECK_VIOLATION, assert_guard, assert_violation, merchant_id, payment_id, runtime_pool,
@@ -42,7 +42,7 @@ const AUTHORIZED_REPLY: Recorded = Recorded {
 async fn app_with_merchant(pool: &PgPool) -> Result<(PgPool, MerchantId), Box<dyn Error>> {
     let app = runtime_pool(pool).await?;
     let merchant = merchant_id(1);
-    register_merchant(&app, merchant).await?;
+    register_merchant(&app, merchant, fee_rate()).await?;
     Ok((app, merchant))
 }
 

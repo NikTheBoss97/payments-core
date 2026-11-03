@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO merchants (id, fee_bps) VALUES ($1, 250)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "bdbb41e5861c0b06402a3c6a2af84aeab3fbd7f45c059a8e8f41f062dc46f4fb"
+}
