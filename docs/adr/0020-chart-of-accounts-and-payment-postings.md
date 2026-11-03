@@ -128,6 +128,13 @@ Keeping account keys typed:
   `kind_1` to `kind_8`, seed those kinds as the owner first.
 - ADR-0003's open rounding rule is settled.
 
+## Amendments
+
+- 2026-11-03: over HTTP, the rate `r` comes from the merchant's `fee_bps`, which
+  the operator sets (ADR-0024), because a merchant that authenticates must not
+  choose its own fee. It is still copied onto the payment and fixed there, so
+  nothing above changes.
+
 ## References
 
 - David P. Ellerman, [The Mathematics of Double Entry Bookkeeping](https://doi.org/10.1080/0025570X.1985.11977191) (Mathematics Magazine, 1985).
