@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE api_keys SET digest = digest",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "4aa6c80525876f18a480863e707962601a3b8ac76aaae1e9708305ca3d3aad0f"
+}

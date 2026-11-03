@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO api_key_revocations (api_key_id) VALUES ($1) ON CONFLICT (api_key_id) DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "6b9ec1ff5e854084e0cf09a5873b2858c84b2c2f05eb8c9326420ac380f03c28"
+}

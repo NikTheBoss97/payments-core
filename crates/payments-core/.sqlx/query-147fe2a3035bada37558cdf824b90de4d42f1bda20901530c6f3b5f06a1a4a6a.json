@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM api_key_revocations",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "147fe2a3035bada37558cdf824b90de4d42f1bda20901530c6f3b5f06a1a4a6a"
+}
