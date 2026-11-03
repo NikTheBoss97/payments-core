@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE api_key_revocations SET api_key_id = api_key_id",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "45d80a25a8fb4cc74c4a7e42dff207dc681fe627e012419b9a277d3cf109fe86"
+}

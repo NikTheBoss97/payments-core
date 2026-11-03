@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "TRUNCATE api_keys CASCADE",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "94a61e27056c16dbb4d6b731382de5260ba62b898b5d16845c8a64fee72aa4e6"
+}

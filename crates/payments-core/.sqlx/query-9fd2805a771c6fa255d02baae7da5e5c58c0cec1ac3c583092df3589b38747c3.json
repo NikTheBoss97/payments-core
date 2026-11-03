@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "TRUNCATE api_key_revocations",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "9fd2805a771c6fa255d02baae7da5e5c58c0cec1ac3c583092df3589b38747c3"
+}
