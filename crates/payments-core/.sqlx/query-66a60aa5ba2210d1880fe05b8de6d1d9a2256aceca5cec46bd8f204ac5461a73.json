@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "REVOKE INSERT (id, entry_count, currency) ON ledger_transactions FROM payments_app",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "66a60aa5ba2210d1880fe05b8de6d1d9a2256aceca5cec46bd8f204ac5461a73"
+}
