@@ -206,6 +206,12 @@ Catching SQL built at run time, which CodeQL misses:
   an advisory on one should raise an alert with no fix pull request possible. That is
   unverified, because no such advisory exists to test with; the second `cargo-deny`
   run covers the case regardless.
+- 2026-11-04: The 5 false positives in `src/ids.rs` are gone. Each alert pointed at
+  the `"{uuid}"` message of an assertion and not at the values it compares, and adding
+  `ApiKeyId` raised a sixth. The messages added nothing, because a failing `assert_eq!`
+  prints the same UUID, so they were removed, and a new ID type raises no alert. The
+  rest of that consequence stands: values named like `uuid` still read as sensitive,
+  so the server's logs will raise alerts to read.
 
 ## References
 
