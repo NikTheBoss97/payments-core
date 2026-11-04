@@ -6,7 +6,12 @@ use axum::Router;
 use axum::body::Body;
 use axum::http::{HeaderMap, Request, StatusCode};
 use http_body_util::BodyExt;
+use payments_core::api::AppState;
+use payments_core::credentials::ApiKeySecret;
+use sqlx::PgPool;
 use tower::ServiceExt;
+
+use super::{runtime_pool, tenant_pool};
 
 /// A response, with its body read.
 #[derive(Debug)]
@@ -51,4 +56,43 @@ pub fn get(path: &str) -> Request<Body> {
         .uri(path)
         .body(Body::empty())
         .expect("a valid request")
+}
+
+/// The `Authorization` value that presents this secret.
+pub fn bearer(secret: &ApiKeySecret) -> String {
+    format!("Bearer {}", secret.expose())
+}
+
+/// A request that presents this `Authorization` value.
+pub fn get_with_authorization(path: &str, value: &str) -> Request<Body> {
+    Request::builder()
+        .uri(path)
+        .header("authorization", value)
+        .body(Body::empty())
+        .expect("a valid request")
+}
+
+/// The two login roles' pools, as the server holds them (ADR-0025). The system role's
+/// connections act through `SET ROLE`, so close both before the test returns.
+pub struct Pools {
+    pub tenant: PgPool,
+    pub system: PgPool,
+}
+
+impl Pools {
+    pub async fn login(pool: &PgPool) -> sqlx::Result<Self> {
+        Ok(Self {
+            tenant: tenant_pool(pool).await?,
+            system: runtime_pool(pool).await?,
+        })
+    }
+
+    pub fn state(&self) -> AppState {
+        AppState::new(self.tenant.clone(), self.system.clone())
+    }
+
+    pub async fn close(self) {
+        self.tenant.close().await;
+        self.system.close().await;
+    }
 }

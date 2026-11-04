@@ -6,7 +6,7 @@
 //! merchant's data. Its body comes from one pure function, because a key's record stores
 //! the bytes that a replay returns (ADR-0026).
 
-use axum::http::{StatusCode, header};
+use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use serde::Serialize;
 
@@ -16,8 +16,14 @@ const TYPE_BASE: &str = "https://github.com/NikTheBoss97/payments-core/blob/main
 /// Every way that a request can fail.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Problem {
+    /// A missing, malformed, unknown or revoked credential: one answer for all of them,
+    /// so that a client learns nothing about a key that it does not hold (ADR-0024).
+    Unauthorized,
     /// No such route, payment, merchant or API key, or another merchant's payment.
     NotFound,
+    /// The database could not answer, or the outcome is unknown. Sending the request
+    /// again is safe.
+    Unavailable,
     /// A bug, or a panic. It says nothing of its cause.
     Internal,
 }
@@ -35,7 +41,17 @@ impl Problem {
     /// The status, the section of the API's document, and the title.
     fn parts(self) -> (StatusCode, &'static str, &'static str) {
         match self {
+            Self::Unauthorized => (
+                StatusCode::UNAUTHORIZED,
+                "unauthorized",
+                "The credential is missing, unknown or revoked",
+            ),
             Self::NotFound => (StatusCode::NOT_FOUND, "not-found", "No such resource"),
+            Self::Unavailable => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "unavailable",
+                "The service could not finish this: send the request again",
+            ),
             Self::Internal => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "internal-error",
@@ -64,11 +80,17 @@ impl Problem {
 
 impl IntoResponse for Problem {
     fn into_response(self) -> Response {
-        (
+        let mut response = (
             self.status(),
             [(header::CONTENT_TYPE, "application/problem+json")],
             self.body(),
         )
-            .into_response()
+            .into_response();
+        if self == Self::Unauthorized {
+            response
+                .headers_mut()
+                .insert(header::WWW_AUTHENTICATE, HeaderValue::from_static("Bearer"));
+        }
+        response
     }
 }

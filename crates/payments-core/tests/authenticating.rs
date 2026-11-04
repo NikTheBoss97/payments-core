@@ -7,38 +7,16 @@ mod common;
 
 use std::error::Error;
 
-use common::keys::{key, print};
+use common::keys::{issued_key as issued, key, print};
 use common::payments::fee_rate;
 use common::{api_key_id, merchant_id, runtime_pool, tenant_pool};
 use payments_core::credentials::{ApiKeySecret, authenticate};
 use payments_core::idempotency::{Answer, OperatorSeal};
-use payments_core::ids::MerchantId;
-use payments_core::operator::{issue_api_key, revoke_api_key};
+use payments_core::operator::revoke_api_key;
 use payments_core::payments::register_merchant;
 use sqlx::PgPool;
 
 type TestResult = Result<(), Box<dyn Error>>;
-
-/// Issues API key `n` to this merchant, and returns its secret.
-async fn issued(
-    system: &PgPool,
-    merchant: MerchantId,
-    n: u32,
-) -> Result<ApiKeySecret, Box<dyn Error>> {
-    let secret = ApiKeySecret::generate();
-    let k = key(&format!("issue-{n}"));
-    let answer = Answer {
-        status: 201,
-        body: "{}".to_owned(),
-    };
-    let seal = OperatorSeal {
-        key: &k,
-        fingerprint: print(n),
-        answer: &answer,
-    };
-    issue_api_key(system, &seal, api_key_id(n), merchant, &secret.digest()).await?;
-    Ok(secret)
-}
 
 #[sqlx::test]
 async fn a_secret_finds_the_merchant_it_was_issued_to(pool: PgPool) -> TestResult {
