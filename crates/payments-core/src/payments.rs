@@ -1702,7 +1702,7 @@ fn parse_status(label: &str) -> PaymentStatus {
 
 /// What a failed statement means (ADR-0019).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Failure {
+pub(crate) enum Failure {
     /// Some ID already exists, and the step with the command's ID decides.
     Duplicate,
     /// The database caught what the domain types should have prevented, refused
@@ -1716,7 +1716,7 @@ enum Failure {
 /// The one classifier (ADR-0019), a pure function of the SQLSTATE: no rule needs
 /// the constraint's name, because whichever unique key PostgreSQL reports, the
 /// command looks its step up. A `COMMIT` is read by `db::commit` instead.
-fn classify(code: Option<&str>) -> Failure {
+pub(crate) fn classify(code: Option<&str>) -> Failure {
     match code {
         Some("23505") => Failure::Duplicate,
         Some("53200") => Failure::Invariant,

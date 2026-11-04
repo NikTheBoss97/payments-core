@@ -10,6 +10,7 @@ pub mod ids;
 pub mod ledger;
 pub mod lifecycle;
 pub mod money;
+pub mod operator;
 pub mod payments;
 pub mod posting;
 pub mod tenancy;

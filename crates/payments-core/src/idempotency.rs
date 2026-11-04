@@ -11,7 +11,7 @@
 use std::fmt;
 
 use sha2::{Digest, Sha256};
-use sqlx::{Postgres, Transaction};
+use sqlx::{PgPool, Postgres, Transaction};
 
 use crate::ids::MerchantId;
 use crate::lifecycle::Refused;
@@ -174,14 +174,73 @@ pub async fn recall(
     .fetch_optional(&mut *tx)
     .await
     .map_err(RecallError)?;
-    Ok(match row {
+    Ok(recalled(
+        row.map(|row| (row.fingerprint, row.status, row.body)),
+        fingerprint,
+    ))
+}
+
+/// What a key's stored fingerprint, status and body, if it has any, mean for this
+/// request.
+fn recalled(stored: Option<(Vec<u8>, i16, String)>, fingerprint: Fingerprint) -> Recall {
+    match stored {
         None => Recall::Unused,
-        Some(row) if row.fingerprint == fingerprint.as_bytes() => Recall::Answered(Answer {
-            status: row.status,
-            body: row.body,
-        }),
+        Some((stored, status, body)) if stored == fingerprint.as_bytes() => {
+            Recall::Answered(Answer { status, body })
+        }
         Some(_) => Recall::Reused,
-    })
+    }
+}
+
+/// What an operator's request stores with its effect: which key, what it was used
+/// for, and its answer. An operator's command has one final answer, known before it
+/// runs, so there is nothing to render.
+#[derive(Debug, Clone, Copy)]
+pub struct OperatorSeal<'a> {
+    pub key: &'a IdempotencyKey,
+    pub fingerprint: Fingerprint,
+    pub answer: &'a Answer,
+}
+
+impl OperatorSeal<'_> {
+    /// Stores the answer, inside the transaction that decided it.
+    pub(crate) async fn store_in(&self, tx: &mut Transaction<'_, Postgres>) -> sqlx::Result<()> {
+        sqlx::query!(
+            "INSERT INTO operator_idempotency_records (key, fingerprint, status, body) \
+             VALUES ($1, $2, $3, $4)",
+            self.key.0,
+            self.fingerprint.as_bytes(),
+            self.answer.status,
+            self.answer.body
+        )
+        .execute(&mut **tx)
+        .await?;
+        Ok(())
+    }
+}
+
+/// Looks up one of the operator's keys, which are apart from every merchant's
+/// (ADR-0026). As in [`recall`], no lock is needed.
+///
+/// # Errors
+///
+/// [`RecallError`] when the key cannot be looked up.
+pub async fn recall_operator(
+    pool: &PgPool,
+    key: &IdempotencyKey,
+    fingerprint: Fingerprint,
+) -> Result<Recall, RecallError> {
+    let row = sqlx::query!(
+        "SELECT fingerprint, status, body FROM operator_idempotency_records WHERE key = $1",
+        key.0
+    )
+    .fetch_optional(pool)
+    .await
+    .map_err(RecallError)?;
+    Ok(recalled(
+        row.map(|row| (row.fingerprint, row.status, row.body)),
+        fingerprint,
+    ))
 }
 
 #[cfg(test)]
