@@ -18,7 +18,7 @@ yanked = "deny"
 
 [licenses]
 # Any other licence stops the build until someone decides to allow it.
-allow = ["Apache-2.0", "MIT", "Unicode-3.0", "Zlib"]
+allow = ["Apache-2.0", "BSD-3-Clause", "MIT", "Unicode-3.0", "Zlib"]
 # An update may drop the last crate under a licence; that needs no decision.
 unused-allowed-license = "allow"
 

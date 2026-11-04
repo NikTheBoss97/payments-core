@@ -3,6 +3,7 @@
 //! payments-core: a payment processing backend built around a double-entry ledger.
 
 pub mod accounts;
+pub mod api;
 pub mod balances;
 pub mod credentials;
 pub mod db;
