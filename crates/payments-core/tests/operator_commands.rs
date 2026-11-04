@@ -15,9 +15,11 @@ use common::payments::fee_rate;
 use common::{api_key_id, merchant_id, runtime_pool, tenant_pool};
 use futures_util::future::join_all;
 use payments_core::credentials::SecretDigest;
-use payments_core::idempotency::{Answer, OperatorSeal, Recall, recall_operator};
-use payments_core::ids::MerchantId;
-use payments_core::operator::{OperatorError, issue_api_key, register_merchant_sealed};
+use payments_core::idempotency::{Answer, IdempotencyKey, OperatorSeal, Recall, recall_operator};
+use payments_core::ids::{ApiKeyId, MerchantId};
+use payments_core::operator::{
+    OperatorError, issue_api_key, register_merchant_sealed, revoke_api_key,
+};
 use payments_core::payments::register_merchant;
 use sqlx::PgPool;
 
@@ -378,6 +380,184 @@ async fn the_tenant_role_cannot_issue_a_key(pool: PgPool) -> TestResult {
     .unwrap_err();
     assert!(matches!(err, OperatorError::Invariant(_)), "{err:?}");
     assert_eq!(api_keys(&pool).await?, 0);
+    tenant.close().await;
+    Ok(())
+}
+
+fn revoked() -> Answer {
+    Answer {
+        status: 200,
+        body: r#"{"revoked":true}"#.to_owned(),
+    }
+}
+
+/// How many revocations are stored, whichever keys they name.
+async fn revocations(pool: &PgPool) -> sqlx::Result<i64> {
+    sqlx::query_scalar!(r#"SELECT count(*) AS "count!" FROM api_key_revocations"#)
+        .fetch_one(pool)
+        .await
+}
+
+/// API key 1, of a registered merchant.
+async fn an_api_key(system: &PgPool) -> Result<ApiKeyId, Box<dyn Error>> {
+    let merchant = a_merchant(system).await?;
+    let k = key("issue");
+    let answer = issued();
+    let seal = OperatorSeal {
+        key: &k,
+        fingerprint: print(100),
+        answer: &answer,
+    };
+    let id = api_key_id(1);
+    issue_api_key(system, &seal, id, merchant, &SecretDigest::of("a secret")).await?;
+    Ok(id)
+}
+
+#[sqlx::test]
+async fn a_revocation_stores_its_answer_with_its_row(pool: PgPool) -> TestResult {
+    let system = runtime_pool(&pool).await?;
+    let id = an_api_key(&system).await?;
+    let k = key("revoke");
+    let answer = revoked();
+    let seal = OperatorSeal {
+        key: &k,
+        fingerprint: print(1),
+        answer: &answer,
+    };
+
+    revoke_api_key(&system, &seal, id).await?;
+
+    let stored = sqlx::query_scalar!(
+        r#"SELECT count(*) AS "count!" FROM api_key_revocations WHERE api_key_id = $1"#,
+        id.get()
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(stored, 1);
+    assert_eq!(
+        recall_operator(&system, &k, print(1)).await?,
+        Recall::Answered(revoked())
+    );
+    system.close().await;
+    Ok(())
+}
+
+#[sqlx::test]
+async fn revoking_a_revoked_key_answers_too_and_changes_nothing(pool: PgPool) -> TestResult {
+    // What the request asks for already holds, and each key keeps its own answer.
+    let system = runtime_pool(&pool).await?;
+    let id = an_api_key(&system).await?;
+    let answer = revoked();
+    for (n, name) in [(1, "first"), (2, "second")] {
+        let k = key(name);
+        let seal = OperatorSeal {
+            key: &k,
+            fingerprint: print(n),
+            answer: &answer,
+        };
+        revoke_api_key(&system, &seal, id).await?;
+        assert_eq!(
+            recall_operator(&system, &k, print(n)).await?,
+            Recall::Answered(revoked()),
+            "{name}"
+        );
+    }
+    assert_eq!(revocations(&pool).await?, 1);
+    system.close().await;
+    Ok(())
+}
+
+#[sqlx::test]
+async fn a_revocation_of_no_key_is_refused_and_stores_nothing(pool: PgPool) -> TestResult {
+    let system = runtime_pool(&pool).await?;
+    let k = key("revoke");
+    let answer = revoked();
+    let seal = OperatorSeal {
+        key: &k,
+        fingerprint: print(1),
+        answer: &answer,
+    };
+    let err = revoke_api_key(&system, &seal, api_key_id(1))
+        .await
+        .unwrap_err();
+    assert!(matches!(err, OperatorError::NotFound), "{err:?}");
+    assert_eq!(revocations(&pool).await?, 0);
+    assert_eq!(
+        recall_operator(&system, &k, print(1)).await?,
+        Recall::Unused
+    );
+    system.close().await;
+    Ok(())
+}
+
+#[sqlx::test]
+async fn copies_of_a_revocation_racing_give_one_answer(pool: PgPool) -> TestResult {
+    let system = runtime_pool(&pool).await?;
+    let id = an_api_key(&system).await?;
+    let k = key("revoke");
+    let answer = revoked();
+    let seal = OperatorSeal {
+        key: &k,
+        fingerprint: print(1),
+        answer: &answer,
+    };
+    let attempts = join_all((0..8).map(|_| revoke_api_key(&system, &seal, id))).await;
+
+    let applied = attempts.iter().filter(|attempt| attempt.is_ok()).count();
+    assert_eq!(applied, 1, "{attempts:?}");
+    for attempt in &attempts {
+        assert!(
+            matches!(attempt, Ok(()) | Err(OperatorError::KeyTaken)),
+            "{attempt:?}"
+        );
+    }
+    assert_eq!(revocations(&pool).await?, 1);
+    system.close().await;
+    Ok(())
+}
+
+#[sqlx::test]
+async fn revocations_of_one_key_under_different_keys_racing_all_answer(pool: PgPool) -> TestResult {
+    // Nothing but the revocation's own primary key is between them, and each request
+    // still gets its answer.
+    let system = runtime_pool(&pool).await?;
+    let id = an_api_key(&system).await?;
+    let answer = revoked();
+    let keys: Vec<IdempotencyKey> = (0..8).map(|n| key(&format!("revoke-{n}"))).collect();
+    let seals: Vec<OperatorSeal<'_>> = (0..)
+        .zip(&keys)
+        .map(|(n, k)| OperatorSeal {
+            key: k,
+            fingerprint: print(n),
+            answer: &answer,
+        })
+        .collect();
+    let attempts = join_all(seals.iter().map(|seal| revoke_api_key(&system, seal, id))).await;
+
+    for attempt in &attempts {
+        assert!(attempt.is_ok(), "{attempt:?}");
+    }
+    assert_eq!(revocations(&pool).await?, 1);
+    system.close().await;
+    Ok(())
+}
+
+#[sqlx::test]
+async fn the_tenant_role_cannot_revoke_a_key(pool: PgPool) -> TestResult {
+    let system = runtime_pool(&pool).await?;
+    let id = an_api_key(&system).await?;
+    system.close().await;
+    let tenant = tenant_pool(&pool).await?;
+    let k = key("revoke");
+    let answer = revoked();
+    let seal = OperatorSeal {
+        key: &k,
+        fingerprint: print(1),
+        answer: &answer,
+    };
+    let err = revoke_api_key(&tenant, &seal, id).await.unwrap_err();
+    assert!(matches!(err, OperatorError::Invariant(_)), "{err:?}");
+    assert_eq!(revocations(&pool).await?, 0);
     tenant.close().await;
     Ok(())
 }

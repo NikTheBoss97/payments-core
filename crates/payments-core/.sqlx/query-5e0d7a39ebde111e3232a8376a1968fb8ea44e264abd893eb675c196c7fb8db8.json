@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT merchant_id FROM api_keys WHERE digest = $1",
+  "query": "SELECT k.merchant_id FROM api_keys k WHERE k.digest = $1 AND NOT EXISTS (SELECT 1 FROM api_key_revocations r WHERE r.api_key_id = k.id)",
   "describe": {
     "columns": [
       {
@@ -24,5 +24,5 @@
       false
     ]
   },
-  "hash": "cecfa2dc1fa427933e9bb829fb40047d3b80dfc5c03879177860b40f9ccfebe2"
+  "hash": "5e0d7a39ebde111e3232a8376a1968fb8ea44e264abd893eb675c196c7fb8db8"
 }
