@@ -167,6 +167,7 @@ async fn a_panic_in_a_handler_becomes_a_500() {
         .expect("a valid request");
     let response = router.oneshot(request).await.expect("a router never fails");
     assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    // What the answer says is in `api_errors`.
 }
 
 fn body_router(probe: &Shared) -> Router {
