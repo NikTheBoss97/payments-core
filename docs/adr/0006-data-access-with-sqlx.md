@@ -143,6 +143,11 @@ Which sqlx version:
   transaction`. At the pinned commit it passes, because #4394 counts the
   transaction before the BEGIN round trip, so the dropped future queues a
   ROLLBACK, which the pool sends before reusing the connection.
+- 2026-11-04: An advisory matches a crate only from the source it names, so
+  while the pin stands, no advisory can match the sqlx crates. ADR-0027 therefore
+  checks the tree a second time without the patch. Moving to 0.9.1 also removes
+  that step and the `allow-git` entry in `deny.toml`; a leftover entry fails the
+  check.
 
 ## References
 
