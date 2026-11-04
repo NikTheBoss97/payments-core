@@ -2,10 +2,25 @@
 
 //! The HTTP API (ADR-0023).
 
+pub mod problem;
+
+use axum::Router;
 use axum::extract::Request;
-use axum::http::StatusCode;
-use axum::middleware::Next;
+use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
+
+use problem::Problem;
+
+/// Every route, under the one middleware.
+pub fn router() -> Router {
+    Router::new()
+        .fallback(no_such_route)
+        .layer(middleware::from_fn(in_its_own_task))
+}
+
+async fn no_such_route() -> Problem {
+    Problem::NotFound
+}
 
 /// Runs the rest of the stack in a task of its own, from the extractors to the response.
 ///
@@ -19,6 +34,6 @@ pub async fn in_its_own_task(request: Request, next: Next) -> Response {
         Ok(response) => response,
         // Nothing aborts this task, so it panicked, or the runtime is shutting down, in
         // which case nobody reads this.
-        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+        Err(_) => Problem::Internal.into_response(),
     }
 }

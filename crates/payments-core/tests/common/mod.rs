@@ -12,6 +12,7 @@
     reason = "each test crate uses a different subset of these helpers"
 )]
 
+pub mod api;
 pub mod crashes;
 pub mod keys;
 pub mod payments;
