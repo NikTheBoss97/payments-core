@@ -1,0 +1,58 @@
+# Author: Nicola Antonello
+
+# Scans the Rust code and these workflows with CodeQL (ADR-0027). A workflow file
+# rather than GitHub's default setup, so the scan's configuration is reviewed
+# like the rest of the repository and its actions are pinned like the others.
+name: CodeQL
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  # A new query can find an old bug in code that no commit touched.
+  schedule:
+    - cron: "41 5 * * 1"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # The one write in this repository's workflows: uploading the results.
+      security-events: write
+    strategy:
+      # A failed scan of one language should not cancel the other's.
+      fail-fast: false
+      matrix:
+        language: [rust, actions]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        if: matrix.language == 'rust'
+        run: >-
+          rustup toolchain install stable --profile minimal
+          --component rustfmt,clippy --no-self-update
+      - uses: github/codeql-action/init@1fc58d04a4d4374f921bdac573c3811c240f9c26 # v4.39.2
+        with:
+          languages: ${{ matrix.language }}
+          # Neither language needs a build. For Rust, GitHub's default setup
+          # uses this mode too.
+          build-mode: none
+          queries: security-extended
+          # No code there ships, and test assertions print IDs when they fail,
+          # which the cleartext-logging query reads as sensitive.
+          config: |
+            paths-ignore:
+              - "crates/*/tests"
+      - uses: github/codeql-action/analyze@1fc58d04a4d4374f921bdac573c3811c240f9c26 # v4.39.2
+        with:
+          category: /language:${{ matrix.language }}
