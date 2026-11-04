@@ -13,7 +13,7 @@ use common::{api_key_id, merchant_id, runtime_pool, tenant_pool};
 use payments_core::credentials::{ApiKeySecret, authenticate};
 use payments_core::idempotency::{Answer, OperatorSeal};
 use payments_core::ids::MerchantId;
-use payments_core::operator::issue_api_key;
+use payments_core::operator::{issue_api_key, revoke_api_key};
 use payments_core::payments::register_merchant;
 use sqlx::PgPool;
 
@@ -97,6 +97,39 @@ async fn anything_else_finds_nobody(pool: PgPool) -> TestResult {
             "{presented:?}"
         );
     }
+    system.close().await;
+    Ok(())
+}
+
+#[sqlx::test]
+async fn a_revoked_key_stops_on_its_next_request_and_no_other_key_does(pool: PgPool) -> TestResult {
+    let system = runtime_pool(&pool).await?;
+    let (a, b) = (merchant_id(1), merchant_id(2));
+    register_merchant(&system, a, fee_rate()).await?;
+    register_merchant(&system, b, fee_rate()).await?;
+    let revoked = issued(&system, a, 1).await?;
+    let another_of_mine = issued(&system, a, 2).await?;
+    let theirs = issued(&system, b, 3).await?;
+    assert_eq!(authenticate(&system, revoked.expose()).await?, Some(a));
+
+    let k = key("revoke");
+    let answer = Answer {
+        status: 200,
+        body: "{}".to_owned(),
+    };
+    let seal = OperatorSeal {
+        key: &k,
+        fingerprint: print(100),
+        answer: &answer,
+    };
+    revoke_api_key(&system, &seal, api_key_id(1)).await?;
+
+    assert_eq!(authenticate(&system, revoked.expose()).await?, None);
+    assert_eq!(
+        authenticate(&system, another_of_mine.expose()).await?,
+        Some(a)
+    );
+    assert_eq!(authenticate(&system, theirs.expose()).await?, Some(b));
     system.close().await;
     Ok(())
 }

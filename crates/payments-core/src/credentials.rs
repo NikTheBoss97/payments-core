@@ -86,8 +86,8 @@ impl SecretDigest {
 #[error("an API key could not be looked up")]
 pub struct AuthenticateError(#[source] sqlx::Error);
 
-/// The merchant that this secret was issued to, or `None` when no key has it. A pass
-/// through the system role's pool: no merchant is known yet (ADR-0025).
+/// The merchant that this secret was issued to, or `None` when no key has it or its
+/// key is revoked. Pass the system role's pool: no merchant is known yet (ADR-0025).
 ///
 /// # Errors
 ///
@@ -98,7 +98,9 @@ pub async fn authenticate(
 ) -> Result<Option<MerchantId>, AuthenticateError> {
     let digest = SecretDigest::of(presented);
     let merchant = sqlx::query_scalar!(
-        "SELECT merchant_id FROM api_keys WHERE digest = $1",
+        "SELECT k.merchant_id FROM api_keys k \
+         WHERE k.digest = $1 \
+           AND NOT EXISTS (SELECT 1 FROM api_key_revocations r WHERE r.api_key_id = k.id)",
         digest.as_bytes()
     )
     .fetch_optional(pool)

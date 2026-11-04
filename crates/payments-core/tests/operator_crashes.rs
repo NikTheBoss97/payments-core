@@ -19,9 +19,11 @@ use common::keys::{key, print};
 use common::payments::fee_rate;
 use common::{api_key_id, merchant_id, runtime_pool_of_one};
 use futures_util::future::join;
-use payments_core::credentials::SecretDigest;
+use payments_core::credentials::{ApiKeySecret, SecretDigest, authenticate};
 use payments_core::idempotency::{Answer, OperatorSeal, Recall, recall_operator};
-use payments_core::operator::{OperatorError, issue_api_key, register_merchant_sealed};
+use payments_core::operator::{
+    OperatorError, issue_api_key, register_merchant_sealed, revoke_api_key,
+};
 use payments_core::payments::register_merchant;
 use sqlx::PgPool;
 
@@ -36,15 +38,16 @@ fn answer() -> Answer {
 
 /// How many rows each table that an operator's command writes holds. A command that
 /// died must leave these as they were.
-async fn stored(pool: &PgPool) -> sqlx::Result<[i64; 3]> {
+async fn stored(pool: &PgPool) -> sqlx::Result<[i64; 4]> {
     let row = sqlx::query!(
         r#"SELECT (SELECT count(*) FROM merchants) AS "merchants!",
                   (SELECT count(*) FROM api_keys) AS "api_keys!",
+                  (SELECT count(*) FROM api_key_revocations) AS "revocations!",
                   (SELECT count(*) FROM operator_idempotency_records) AS "answers!""#
     )
     .fetch_one(pool)
     .await?;
-    Ok([row.merchants, row.api_keys, row.answers])
+    Ok([row.merchants, row.api_keys, row.revocations, row.answers])
 }
 
 #[sqlx::test]
@@ -96,7 +99,7 @@ async fn a_sealed_registration_killed_anywhere_leaves_no_answer_and_settles(
             .unwrap_err();
         assert!(matches!(err, OperatorError::KeyTaken), "{point}: {err:?}");
     }
-    assert_eq!(stored(&pool).await?, [registered, 0, registered]);
+    assert_eq!(stored(&pool).await?, [registered, 0, 0, registered]);
     app.close().await;
     Ok(())
 }
@@ -159,7 +162,77 @@ async fn a_sealed_issue_killed_anywhere_leaves_no_answer_and_settles(pool: PgPoo
             .unwrap_err();
         assert!(matches!(err, OperatorError::KeyTaken), "{point}: {err:?}");
     }
-    assert_eq!(stored(&pool).await?, [1, issued, issued]);
+    assert_eq!(stored(&pool).await?, [1, issued, 0, issued]);
+    app.close().await;
+    Ok(())
+}
+
+#[sqlx::test]
+async fn a_sealed_revocation_killed_anywhere_leaves_the_key_working_and_settles(
+    pool: PgPool,
+) -> TestResult {
+    install_crash_points(&pool).await?;
+    let app = runtime_pool_of_one(&pool).await?;
+    let merchant = merchant_id(1);
+    register_merchant(&app, merchant, fee_rate()).await?;
+    let answer = answer();
+    let points = [
+        "die_before api_key_revocations",
+        "die_after api_key_revocations",
+    ]
+    .into_iter()
+    .chain(OPERATOR_KEY_POINTS)
+    .chain([OPERATOR_AT_COMMIT]);
+    let mut revoked = 0;
+    for (n, point) in (1_u32..).zip(points) {
+        let secret = ApiKeySecret::generate();
+        let issue = key(&format!("issue-{n}"));
+        let issue_seal = OperatorSeal {
+            key: &issue,
+            fingerprint: print(n + 1_000),
+            answer: &answer,
+        };
+        let id = api_key_id(n);
+        issue_api_key(&app, &issue_seal, id, merchant, &secret.digest()).await?;
+
+        let k = key(&format!("revoke-{n}"));
+        let seal = OperatorSeal {
+            key: &k,
+            fingerprint: print(n),
+            answer: &answer,
+        };
+        let before = stored(&pool).await?;
+        plan_death(&app, point).await?;
+        let err = revoke_api_key(&app, &seal, id).await.unwrap_err();
+        assert!(
+            matches!(err, OperatorError::NotConfirmed(_)),
+            "{point}: {err:?}"
+        );
+        assert_eq!(stored(&pool).await?, before, "{point}");
+        assert_eq!(
+            recall_operator(&app, &k, print(n)).await?,
+            Recall::Unused,
+            "{point}"
+        );
+        assert_eq!(
+            authenticate(&app, secret.expose()).await?,
+            Some(merchant),
+            "{point}"
+        );
+
+        revoke_api_key(&app, &seal, id).await?;
+        assert_eq!(
+            recall_operator(&app, &k, print(n)).await?,
+            Recall::Answered(answer.clone()),
+            "{point}"
+        );
+        assert_eq!(authenticate(&app, secret.expose()).await?, None, "{point}");
+        revoked += 1;
+
+        let err = revoke_api_key(&app, &seal, id).await.unwrap_err();
+        assert!(matches!(err, OperatorError::KeyTaken), "{point}: {err:?}");
+    }
+    assert_eq!(stored(&pool).await?, [1, revoked, revoked, revoked * 2]);
     app.close().await;
     Ok(())
 }
@@ -216,7 +289,7 @@ async fn a_commit_that_commits_and_loses_its_session_is_settled_by_the_key(
         "no kill landed inside a commit in {ATTEMPTS} attempts"
     );
     let attempts = i64::from(ATTEMPTS);
-    assert_eq!(stored(&pool).await?, [attempts, 0, attempts]);
+    assert_eq!(stored(&pool).await?, [attempts, 0, 0, attempts]);
     app.close().await;
     Ok(())
 }

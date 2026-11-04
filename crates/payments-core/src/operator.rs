@@ -24,10 +24,10 @@ use crate::payments::{Failure, classify};
 /// may have stored it.
 #[derive(Debug, thiserror::Error)]
 pub enum OperatorError {
-    /// What the request names does not exist: no merchant to issue a key to. Nothing
-    /// is stored, because IDs are made by the server, so this cannot become true later
-    /// (ADR-0023).
-    #[error("no such merchant")]
+    /// What the request names does not exist: no merchant to issue a key to, or no key
+    /// to revoke. Nothing is stored, because IDs are made by the server, so this cannot
+    /// become true later (ADR-0023).
+    #[error("no such merchant or API key")]
     NotFound,
     /// The idempotency key already holds an answer, so this attempt rolled back whole.
     /// Look the key up for the answer (ADR-0026).
@@ -134,6 +134,31 @@ pub async fn issue_api_key(
         id.get(),
         merchant.get(),
         digest.as_bytes()
+    )
+    .execute(&mut *tx)
+    .await
+    .map_err(effect)?;
+    finish(tx, seal).await
+}
+
+/// Revokes an API key, under one of the operator's keys. The key stops working on its
+/// next request (ADR-0024). Revoking it again changes nothing and answers too: what the
+/// request asks for already holds.
+///
+/// # Errors
+///
+/// See [`OperatorError`].
+pub async fn revoke_api_key(
+    pool: &PgPool,
+    seal: &OperatorSeal<'_>,
+    id: ApiKeyId,
+) -> Result<(), OperatorError> {
+    let effect = |source| OperatorError::at(Stage::Effect, source);
+    let mut tx = pool.begin().await.map_err(effect)?;
+    sqlx::query!(
+        "INSERT INTO api_key_revocations (api_key_id) VALUES ($1) \
+         ON CONFLICT (api_key_id) DO NOTHING",
+        id.get()
     )
     .execute(&mut *tx)
     .await
