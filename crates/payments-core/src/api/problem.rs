@@ -101,3 +101,60 @@ impl IntoResponse for Problem {
         response
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every problem. The match stops a new one from compiling until it is added here.
+    const ALL: [Problem; 5] = [
+        Problem::Unauthorized,
+        Problem::NotFound,
+        Problem::MethodNotAllowed,
+        Problem::Unavailable,
+        Problem::Internal,
+    ];
+
+    fn _every_problem_is_listed(problem: Problem) {
+        match problem {
+            Problem::Unauthorized
+            | Problem::NotFound
+            | Problem::MethodNotAllowed
+            | Problem::Unavailable
+            | Problem::Internal => {}
+        }
+    }
+
+    #[test]
+    fn every_problem_has_a_section_in_the_document_its_type_points_to() {
+        let document = include_str!("../../../../docs/api.md");
+        for problem in ALL {
+            let (_, section, _) = problem.parts();
+            let heading = format!("### {section}");
+            assert!(
+                document.lines().any(|line| line == heading),
+                "docs/api.md has no {heading}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_body_is_json_that_agrees_with_its_status() {
+        for problem in ALL {
+            let body: serde_json::Value =
+                serde_json::from_str(&problem.body()).expect("a body is JSON");
+            assert_eq!(body["status"], problem.status().as_u16(), "{problem:?}");
+            let kind = body["type"].as_str().expect("a type is a string");
+            assert!(kind.starts_with("https://"), "not absolute: {kind}");
+            assert!(body["title"].is_string(), "{problem:?}");
+        }
+    }
+
+    #[test]
+    fn no_two_problems_share_a_type() {
+        let mut sections: Vec<&str> = ALL.iter().map(|problem| problem.parts().1).collect();
+        sections.sort_unstable();
+        sections.dedup();
+        assert_eq!(sections.len(), ALL.len());
+    }
+}

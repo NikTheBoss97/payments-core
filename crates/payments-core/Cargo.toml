@@ -30,6 +30,10 @@ thiserror = "2.0.21"
 # The server's runtime (ADR-0023). 1.54.0 has a data race in its timers
 # (GHSA-5wjr-9356-4wc8), so this asks for the release that reverted it.
 tokio = { version = "1.54.1", features = ["macros", "net", "rt-multi-thread"] }
+# The server's log (ADR-0023). sqlx builds tracing already, and this leaves out the
+# default features: an environment filter and colours have no use here.
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "std"] }
 # UUIDv7 IDs, created by the caller (ADR-0005: 1.27 or later).
 uuid = { version = "1.28", features = ["v7"] }
 
@@ -47,9 +51,10 @@ proptest = { version = "1.12.0", default-features = false, features = ["std"] }
 # #[sqlx::test] applies the migrations to each test database; the library
 # never runs them (ADR-0008). Cargo adds this feature to the one above.
 sqlx = { version = "0.9", default-features = false, features = ["migrate"] }
-# The sockets, timers and signals of the tests that hang up on the server (ADR-0023).
-# Cargo adds these features to the one above.
-tokio = { version = "1.54.1", features = ["io-util", "sync", "time"] }
+# The sockets, timers and signals of the tests that hang up on the server, and the
+# process of the test that starts it (ADR-0023). Cargo adds these features to the one
+# above.
+tokio = { version = "1.54.1", features = ["io-util", "process", "sync", "time"] }
 # ServiceExt::oneshot, to send a request to the router without a socket (ADR-0023).
 # axum builds this crate already.
 tower = { version = "0.5", default-features = false, features = ["util"] }
