@@ -1,0 +1,182 @@
+// Author: Nicola Antonello
+
+//! API keys, and finding the merchant that presented one (ADR-0024).
+//!
+//! A secret is 32 random bytes, sent as a Bearer token and shown once. Only its
+//! SHA-256 digest is stored, and authenticating hashes what was presented and looks
+//! the digest up. Nothing here is guessable, so no password hash is needed, and an
+//! equality test on a digest reveals nothing useful about the secret.
+
+use std::fmt;
+
+use sha2::{Digest, Sha256};
+use sqlx::PgPool;
+
+use crate::ids::MerchantId;
+
+/// An API key's secret: `pck_` and 64 lowercase hex digits. It cannot print itself,
+/// so that no log line can hold one by accident: reading it takes a call to
+/// [`expose`](Self::expose).
+///
+/// ```
+/// use payments_core::credentials::ApiKeySecret;
+///
+/// let secret = ApiKeySecret::generate();
+/// assert_eq!(format!("{secret:?}"), "ApiKeySecret(..)");
+/// ```
+///
+/// ```compile_fail
+/// use payments_core::credentials::ApiKeySecret;
+///
+/// let secret = ApiKeySecret::generate();
+/// println!("{secret}"); // no Display
+/// ```
+pub struct ApiKeySecret(String);
+
+impl ApiKeySecret {
+    /// A new secret, from the operating system's random source.
+    #[must_use]
+    pub fn generate() -> Self {
+        let mut bytes = [0_u8; 32];
+        getrandom::fill(&mut bytes).expect("a secret needs the operating system's random bytes");
+        let digits: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
+        Self(format!("pck_{digits}"))
+    }
+
+    /// The secret itself, for the one answer that shows it.
+    #[must_use]
+    pub fn expose(&self) -> &str {
+        &self.0
+    }
+
+    /// What is stored in its place.
+    #[must_use]
+    pub fn digest(&self) -> SecretDigest {
+        SecretDigest::of(&self.0)
+    }
+}
+
+impl fmt::Debug for ApiKeySecret {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("ApiKeySecret(..)")
+    }
+}
+
+/// The SHA-256 digest of a presented or a new secret.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SecretDigest([u8; 32]);
+
+impl SecretDigest {
+    /// The digest of what was presented, whatever that is: a malformed secret has a
+    /// digest that no key has.
+    #[must_use]
+    pub fn of(secret: &str) -> Self {
+        Self(Sha256::digest(secret).into())
+    }
+
+    #[must_use]
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+/// Why a presented secret could not be looked up. Looking it up again is safe, and it
+/// says nothing about whether the secret is good (ADR-0024).
+#[derive(Debug, thiserror::Error)]
+#[error("an API key could not be looked up")]
+pub struct AuthenticateError(#[source] sqlx::Error);
+
+/// The merchant that this secret was issued to, or `None` when no key has it. A pass
+/// through the system role's pool: no merchant is known yet (ADR-0025).
+///
+/// # Errors
+///
+/// [`AuthenticateError`] when the key cannot be looked up.
+pub async fn authenticate(
+    pool: &PgPool,
+    presented: &str,
+) -> Result<Option<MerchantId>, AuthenticateError> {
+    let digest = SecretDigest::of(presented);
+    let merchant = sqlx::query_scalar!(
+        "SELECT merchant_id FROM api_keys WHERE digest = $1",
+        digest.as_bytes()
+    )
+    .fetch_optional(pool)
+    .await
+    .map_err(AuthenticateError)?;
+    Ok(merchant.map(|id| {
+        MerchantId::try_from(id).expect("api_keys_merchant_fkey points at a merchant's UUIDv7 ID")
+    }))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashSet;
+
+    use super::*;
+
+    fn hex(digest: SecretDigest) -> String {
+        digest
+            .as_bytes()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect()
+    }
+
+    // These tests print nothing that came from a secret, even a throwaway one: a failure
+    // message is a log line too.
+
+    #[test]
+    fn a_new_secret_is_the_prefix_and_64_lowercase_hex_digits() {
+        let generated = ApiKeySecret::generate();
+        let digits = generated
+            .expose()
+            .strip_prefix("pck_")
+            .expect("the prefix a secret scanner looks for");
+        assert_eq!(digits.len(), 64);
+        assert!(
+            digits
+                .bytes()
+                .all(|digit| matches!(digit, b'0'..=b'9' | b'a'..=b'f'))
+        );
+    }
+
+    #[test]
+    fn no_two_secrets_are_the_same() {
+        let secrets: HashSet<String> = (0..1000)
+            .map(|_| ApiKeySecret::generate().expose().to_owned())
+            .collect();
+        assert_eq!(secrets.len(), 1000);
+    }
+
+    #[test]
+    fn a_digest_is_the_sha_256_of_the_secret() {
+        // Computed with Python's hashlib and with PostgreSQL's sha256, not with this
+        // code.
+        let zeros = format!("pck_{}", "0".repeat(64));
+        let pairs = format!("pck_{}", "ab".repeat(32));
+        for (presented, expected) in [
+            (
+                zeros.as_str(),
+                "3ef3e417230060c87cead66b3ec5474b73177abd1127177474de6252466df16c",
+            ),
+            (
+                pairs.as_str(),
+                "06a1dd6be846256db25b45a9533901bf1957f041f753f7948b3f9616e7e31335",
+            ),
+            (
+                "not a key",
+                "edfc089719c0a061bec08afad3dead4480add63a9677c13cdb5bba1779160d0f",
+            ),
+        ] {
+            assert_eq!(hex(SecretDigest::of(presented)), expected);
+        }
+    }
+
+    #[test]
+    fn a_new_secret_digests_like_the_same_text_presented() {
+        let generated = ApiKeySecret::generate();
+        assert_eq!(generated.digest(), SecretDigest::of(generated.expose()));
+        assert_ne!(generated.digest(), SecretDigest::of(""));
+    }
+}

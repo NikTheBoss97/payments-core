@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT digest = sha256(convert_to($1, 'UTF8')) AS \"matches!\" FROM api_keys",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "matches!",
+        "type_info": "Bool",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "be69442288a2ce6160f9f80ad56c6b89d5fbc5ee2a43044f1ca4478cf02ab6c4"
+}

@@ -9,8 +9,11 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
-# The fingerprint of a request under an idempotency key (ADR-0026). sqlx builds this
+# The secret of an API key, from the operating system (ADR-0024). uuid builds this
 # crate already.
+getrandom = "0.4"
+# The fingerprint of a request under an idempotency key (ADR-0026), and the digest
+# of an API key (ADR-0024). sqlx builds this crate already.
 sha2 = { version = "0.11", default-features = false }
 # PostgreSQL access through compile-time checked queries (ADR-0006).
 sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "postgres", "macros", "uuid", "chrono"] }

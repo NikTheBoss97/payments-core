@@ -176,6 +176,37 @@ impl fmt::Display for MerchantId {
     }
 }
 
+/// The ID of an API key (ADR-0024). `Copy`, because a revocation repeats it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ApiKeyId(Uuid);
+
+impl ApiKeyId {
+    /// A new ID from the system clock, through [`Uuid::now_v7`].
+    #[must_use]
+    pub fn now_v7() -> Self {
+        Self(Uuid::now_v7())
+    }
+
+    /// The inner UUID, to bind in SQL.
+    pub fn get(self) -> Uuid {
+        self.0
+    }
+}
+
+impl TryFrom<Uuid> for ApiKeyId {
+    type Error = InvalidId;
+
+    fn try_from(id: Uuid) -> Result<Self, Self::Error> {
+        check(id).map(Self)
+    }
+}
+
+impl fmt::Display for ApiKeyId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(&self.0, f)
+    }
+}
+
 /// The ID of one step of a payment's history, which identifies the command
 /// that wrote it (ADR-0019). Neither `Copy` nor `Clone`: each command gets
 /// its own ID, and a reused ID on a command with the same content reads as
@@ -261,6 +292,7 @@ mod tests {
         assert_eq!(TransactionId::try_from(V7).map(|id| id.get()), Ok(V7));
         assert_eq!(PaymentId::try_from(V7).map(PaymentId::get), Ok(V7));
         assert_eq!(MerchantId::try_from(V7).map(MerchantId::get), Ok(V7));
+        assert_eq!(ApiKeyId::try_from(V7).map(ApiKeyId::get), Ok(V7));
         assert_eq!(TransitionId::try_from(V7).map(|id| id.get()), Ok(V7));
     }
 
@@ -288,6 +320,7 @@ mod tests {
             );
             assert_eq!(PaymentId::try_from(uuid), Err(InvalidId(uuid)), "{uuid}");
             assert_eq!(MerchantId::try_from(uuid), Err(InvalidId(uuid)), "{uuid}");
+            assert_eq!(ApiKeyId::try_from(uuid), Err(InvalidId(uuid)), "{uuid}");
             assert_eq!(TransitionId::try_from(uuid), Err(InvalidId(uuid)), "{uuid}");
         }
     }
@@ -298,19 +331,29 @@ mod tests {
         let transactions: Vec<Uuid> = (0..1000).map(|_| TransactionId::now_v7().get()).collect();
         let payments: Vec<Uuid> = (0..1000).map(|_| PaymentId::now_v7().get()).collect();
         let merchants: Vec<Uuid> = (0..1000).map(|_| MerchantId::now_v7().get()).collect();
+        let api_keys: Vec<Uuid> = (0..1000).map(|_| ApiKeyId::now_v7().get()).collect();
         let transitions: Vec<Uuid> = (0..1000).map(|_| TransitionId::now_v7().get()).collect();
-        let all = [accounts, transactions, payments, merchants, transitions].concat();
+        let all = [
+            accounts,
+            transactions,
+            payments,
+            merchants,
+            api_keys,
+            transitions,
+        ]
+        .concat();
         for id in &all {
             assert_eq!(AccountId::try_from(*id).map(AccountId::get), Ok(*id));
             assert_eq!(TransactionId::try_from(*id).map(|t| t.get()), Ok(*id));
             assert_eq!(PaymentId::try_from(*id).map(PaymentId::get), Ok(*id));
             assert_eq!(MerchantId::try_from(*id).map(MerchantId::get), Ok(*id));
+            assert_eq!(ApiKeyId::try_from(*id).map(ApiKeyId::get), Ok(*id));
             assert_eq!(TransitionId::try_from(*id).map(|t| t.get()), Ok(*id));
         }
         // One process-wide generator serves every type (ADR-0005), so no ID
         // repeats across them either.
         let distinct: HashSet<&Uuid> = all.iter().collect();
-        assert_eq!(distinct.len(), 5000);
+        assert_eq!(distinct.len(), 6000);
     }
 
     #[test]
@@ -320,11 +363,13 @@ mod tests {
         let transaction = TransactionId::try_from(V7).expect("valid ID");
         let payment = PaymentId::try_from(V7).expect("valid ID");
         let merchant = MerchantId::try_from(V7).expect("valid ID");
+        let api_key = ApiKeyId::try_from(V7).expect("valid ID");
         let transition = TransitionId::try_from(V7).expect("valid ID");
         assert_eq!(account.to_string(), text);
         assert_eq!(transaction.to_string(), text);
         assert_eq!(payment.to_string(), text);
         assert_eq!(merchant.to_string(), text);
+        assert_eq!(api_key.to_string(), text);
         assert_eq!(transition.to_string(), text);
         assert_eq!(
             InvalidId(Uuid::nil()).to_string(),
@@ -355,6 +400,7 @@ mod tests {
             prop_assert_eq!(TransactionId::try_from(uuid).is_ok(), valid);
             prop_assert_eq!(PaymentId::try_from(uuid).is_ok(), valid);
             prop_assert_eq!(MerchantId::try_from(uuid).is_ok(), valid);
+            prop_assert_eq!(ApiKeyId::try_from(uuid).is_ok(), valid);
             prop_assert_eq!(TransitionId::try_from(uuid).is_ok(), valid);
         }
     }
