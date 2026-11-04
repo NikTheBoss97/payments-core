@@ -43,6 +43,20 @@ impl IdempotencyKey {
             Err(InvalidKey)
         }
     }
+
+    /// Reads an `Idempotency-Key` header's value, which is a Structured Field string:
+    /// the key between double quotes. A key holds no `"` or `\`, so the string has no
+    /// escapes to read.
+    ///
+    /// # Errors
+    ///
+    /// [`InvalidKey`] for anything else, such as a bare token or a parameter.
+    pub fn from_header(value: &str) -> Result<Self, InvalidKey> {
+        value
+            .strip_prefix('"')
+            .and_then(|rest| rest.strip_suffix('"'))
+            .map_or(Err(InvalidKey), Self::new)
+    }
 }
 
 /// What a key was first used for: the SHA-256 of the request's method, path and raw
@@ -201,6 +215,60 @@ mod tests {
             over_the_limit.as_str(),
         ] {
             assert_eq!(IdempotencyKey::new(key), Err(InvalidKey), "{key:?}");
+        }
+    }
+
+    #[test]
+    fn a_header_holds_a_structured_field_string() {
+        let at_the_limit = "k".repeat(255);
+        for key in [
+            "!",
+            "8e03978e-40d5-43e8-bc93-6894a57f9324",
+            at_the_limit.as_str(),
+        ] {
+            assert_eq!(
+                IdempotencyKey::from_header(&format!("\"{key}\"")),
+                IdempotencyKey::new(key),
+                "{key:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn anything_else_in_a_header_is_refused() {
+        let over_the_limit = format!("\"{}\"", "k".repeat(256));
+        for value in [
+            // Nothing, or only the quotes.
+            "",
+            "\"",
+            "\"\"",
+            // A bare token, which is an item but not a string.
+            "abc",
+            // Not closed, or not opened.
+            "\"abc",
+            "abc\"",
+            // Quotes of the wrong kind.
+            "'abc'",
+            // A quote or an escape inside, which a key never needs.
+            "\"a\"b\"",
+            "\"a\\\"b\"",
+            "\"a\\\\b\"",
+            // A parameter, and two values, which is how two headers read when joined.
+            "\"abc\";p=1",
+            "\"abc\", \"def\"",
+            // A space outside the quotes, or inside the key.
+            " \"abc\"",
+            "\"abc\" ",
+            "\"a b\"",
+            // What the key's own rule refuses.
+            "\"é\"",
+            over_the_limit.as_str(),
+        ] {
+            assert_eq!(
+                IdempotencyKey::from_header(value),
+                Err(InvalidKey),
+                "{value:?}"
+            );
         }
     }
 
