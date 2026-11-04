@@ -2,14 +2,33 @@
 
 //! The HTTP API (ADR-0023).
 
+mod credential;
 pub mod problem;
 
 use axum::Router;
 use axum::extract::Request;
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
+use sqlx::PgPool;
 
+pub use credential::Merchant;
 use problem::Problem;
+
+/// What a request can reach: the two login roles' pools (ADR-0025).
+#[derive(Debug, Clone)]
+pub struct AppState {
+    tenant: PgPool,
+    system: PgPool,
+}
+
+impl AppState {
+    /// The pool that merchant routes hold, whose role sees nothing until a transaction
+    /// names its merchant, and the system role's, for looking a key up.
+    #[must_use]
+    pub fn new(tenant: PgPool, system: PgPool) -> Self {
+        Self { tenant, system }
+    }
+}
 
 /// Every route, under the one middleware.
 pub fn router() -> Router {
