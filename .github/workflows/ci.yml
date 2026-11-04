@@ -32,6 +32,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Nothing here pushes. Without this, the token stays in .git/config,
+          # where every dependency's build script can read it.
+          persist-credentials: false
       # rustup comes with the runner image. Naming the channel makes it fetch
       # the latest stable, the toolchain that rust-toolchain.toml selects.
       - name: Install Rust
@@ -62,6 +66,8 @@ jobs:
       DATABASE_URL: postgres://payments:payments@localhost:5432/payments
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Create database roles (ADR-0008)
         run: >-
           docker exec -i ${{ job.services.postgres.id }}
@@ -102,6 +108,8 @@ jobs:
       SQLX_REV: f1e94ec34dd5f11ad6488a3a8ac7988439a3f757
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Create database roles (ADR-0008)
         run: >-
           docker exec -i ${{ job.services.postgres.id }}
