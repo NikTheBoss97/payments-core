@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT (SELECT count(*) FROM payments) AS \"payments!\",\n                  (SELECT count(*) FROM payment_transitions) AS \"steps!\",\n                  (SELECT count(*) FROM ledger_transactions) AS \"headers!\",\n                  (SELECT count(*) FROM ledger_entries) AS \"entries!\",\n                  (SELECT count(*) FROM payment_authorizations) AS \"authorizations!\",\n                  (SELECT count(*) FROM payment_captures) AS \"captures!\",\n                  (SELECT count(*) FROM payment_refunds) AS \"refunds!\"",
+  "query": "SELECT (SELECT count(*) FROM payments) AS \"payments!\",\n                  (SELECT count(*) FROM payment_transitions) AS \"steps!\",\n                  (SELECT count(*) FROM ledger_transactions) AS \"headers!\",\n                  (SELECT count(*) FROM ledger_entries) AS \"entries!\",\n                  (SELECT count(*) FROM payment_authorizations) AS \"authorizations!\",\n                  (SELECT count(*) FROM payment_captures) AS \"captures!\",\n                  (SELECT count(*) FROM payment_refunds) AS \"refunds!\",\n                  (SELECT count(*) FROM idempotency_records) AS \"answers!\"",
   "describe": {
     "columns": [
       {
@@ -44,6 +44,12 @@
         "name": "refunds!",
         "type_info": "Int8",
         "origin": "Expression"
+      },
+      {
+        "ordinal": 7,
+        "name": "answers!",
+        "type_info": "Int8",
+        "origin": "Expression"
       }
     ],
     "parameters": {
@@ -56,8 +62,9 @@
       null,
       null,
       null,
+      null,
       null
     ]
   },
-  "hash": "cbc60249625fb30df41c609d3223bc37e8a4a5ad676c25cab4cfbf0f469462a4"
+  "hash": "b6713c27778a32ae7f3d6372d44ce5c6039126c559c27e8038ebb24d6a2be24d"
 }

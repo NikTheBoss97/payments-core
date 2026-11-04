@@ -5,6 +5,7 @@
 pub mod accounts;
 pub mod balances;
 pub mod db;
+pub mod idempotency;
 pub mod ids;
 pub mod ledger;
 pub mod lifecycle;

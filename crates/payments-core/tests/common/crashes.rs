@@ -55,7 +55,7 @@ pub async fn install_crash_points(pool: &PgPool) -> sqlx::Result<()> {
          BEGIN \
              FOREACH target IN ARRAY ARRAY['accounts', 'payments', 'payment_transitions', \
                  'ledger_transactions', 'ledger_entries', 'payment_authorizations', \
-                 'payment_captures', 'payment_refunds'] LOOP \
+                 'payment_captures', 'payment_refunds', 'idempotency_records'] LOOP \
                  EXECUTE format('CREATE TRIGGER die_before BEFORE INSERT ON %I \
                      FOR EACH ROW EXECUTE FUNCTION die_if_planned()', target); \
                  EXECUTE format('CREATE TRIGGER die_after AFTER INSERT ON %I \
@@ -84,7 +84,7 @@ pub async fn plan_death(app: &PgPool, point: &str) -> sqlx::Result<()> {
 
 /// How many rows each table that a command writes in its transaction holds. A command
 /// that died must leave these as they were.
-pub async fn stored(pool: &PgPool) -> sqlx::Result<[i64; 7]> {
+pub async fn stored(pool: &PgPool) -> sqlx::Result<[i64; 8]> {
     let row = sqlx::query!(
         r#"SELECT (SELECT count(*) FROM payments) AS "payments!",
                   (SELECT count(*) FROM payment_transitions) AS "steps!",
@@ -92,7 +92,8 @@ pub async fn stored(pool: &PgPool) -> sqlx::Result<[i64; 7]> {
                   (SELECT count(*) FROM ledger_entries) AS "entries!",
                   (SELECT count(*) FROM payment_authorizations) AS "authorizations!",
                   (SELECT count(*) FROM payment_captures) AS "captures!",
-                  (SELECT count(*) FROM payment_refunds) AS "refunds!""#
+                  (SELECT count(*) FROM payment_refunds) AS "refunds!",
+                  (SELECT count(*) FROM idempotency_records) AS "answers!""#
     )
     .fetch_one(pool)
     .await?;
@@ -104,6 +105,7 @@ pub async fn stored(pool: &PgPool) -> sqlx::Result<[i64; 7]> {
         row.authorizations,
         row.captures,
         row.refunds,
+        row.answers,
     ])
 }
 

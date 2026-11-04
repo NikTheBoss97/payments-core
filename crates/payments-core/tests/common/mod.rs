@@ -13,6 +13,7 @@
 )]
 
 pub mod crashes;
+pub mod keys;
 pub mod payments;
 
 use std::time::{Duration, Instant};

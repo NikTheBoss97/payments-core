@@ -9,6 +9,7 @@
 
 use sqlx::{PgPool, Postgres, Transaction};
 
+use crate::idempotency::Seal;
 use crate::ids::MerchantId;
 
 /// A merchant, and the pool that its requests run on.
@@ -23,6 +24,20 @@ impl<'a> Tenant<'a> {
     pub fn new(pool: &'a PgPool, merchant: MerchantId) -> Self {
         Self { pool, merchant }
     }
+
+    /// This merchant's scope, for a command that also stores its final answer under
+    /// an idempotency key, in the same transaction as its effect (ADR-0026).
+    #[must_use]
+    pub fn sealed(self, seal: &'a Seal<'a>) -> Scope<'a> {
+        Scope {
+            seal: Some(seal),
+            ..self.into()
+        }
+    }
+
+    pub(crate) fn merchant(self) -> MerchantId {
+        self.merchant
+    }
 }
 
 /// Where a unit of work runs: a [`Tenant`], or a plain pool for the system paths.
@@ -30,6 +45,7 @@ impl<'a> Tenant<'a> {
 pub struct Scope<'a> {
     pool: &'a PgPool,
     merchant: Option<MerchantId>,
+    seal: Option<&'a Seal<'a>>,
 }
 
 impl<'a> From<&'a PgPool> for Scope<'a> {
@@ -37,6 +53,7 @@ impl<'a> From<&'a PgPool> for Scope<'a> {
         Self {
             pool,
             merchant: None,
+            seal: None,
         }
     }
 }
@@ -46,6 +63,7 @@ impl<'a> From<Tenant<'a>> for Scope<'a> {
         Self {
             pool: tenant.pool,
             merchant: Some(tenant.merchant),
+            seal: None,
         }
     }
 }
@@ -54,6 +72,11 @@ impl<'a> Scope<'a> {
     /// The pool, for statements on tables outside the policies, such as `accounts`.
     pub(crate) fn pool(self) -> &'a PgPool {
         self.pool
+    }
+
+    /// The seal of a command under a key, with the merchant that owns the key.
+    pub(crate) fn seal(self) -> Option<(MerchantId, &'a Seal<'a>)> {
+        self.merchant.zip(self.seal)
     }
 
     /// Begins a database transaction that may read and write what this scope owns.
