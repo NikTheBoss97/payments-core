@@ -254,6 +254,10 @@ pub enum CreateError {
     /// retried.
     #[error("step {step} is stored with other content")]
     Mismatch { step: Uuid },
+    /// The idempotency key already holds an answer, so this attempt rolled back
+    /// whole. Look the key up for the answer (ADR-0026).
+    #[error("the idempotency key already holds an answer")]
+    KeyTaken,
     /// The database caught what the domain types should have prevented: a bug,
     /// never retried.
     #[error("payment {payment}: the database rejected it as invalid")]
@@ -331,16 +335,22 @@ pub async fn create_payment<'a>(
             Failure::NotConfirmed => Err(CreateError::NotConfirmed { payment, source }),
         };
     }
+    let first = Transition::genesis();
+    let recorded = Recorded {
+        seq: 0,
+        from: first.from(),
+        to: first.to(),
+        refundable: 0,
+    };
+    if let Err(failure) = store_sealed(&mut tx, scope, Ok(&recorded)).await {
+        return Err(match failure {
+            SealFailure::KeyTaken => CreateError::KeyTaken,
+            SealFailure::Invariant(source) => CreateError::Invariant { payment, source },
+            SealFailure::NotConfirmed(source) => CreateError::NotConfirmed { payment, source },
+        });
+    }
     match commit(tx).await {
-        Ok(()) => {
-            let first = Transition::genesis();
-            Ok(Outcome::Applied(Recorded {
-                seq: 0,
-                from: first.from(),
-                to: first.to(),
-                refundable: 0,
-            }))
-        }
+        Ok(()) => Ok(Outcome::Applied(recorded)),
         Err(CommitError::Rejected(source)) => Err(CreateError::Invariant { payment, source }),
         Err(CommitError::Unknown(source)) => Err(CreateError::NotConfirmed { payment, source }),
     }
@@ -492,6 +502,10 @@ pub enum AuthorizeError {
     /// retried.
     #[error("step {step} is stored with other content")]
     Mismatch { step: Uuid },
+    /// The idempotency key already holds an answer, so this attempt rolled back
+    /// whole. Look the key up for the answer (ADR-0026).
+    #[error("the idempotency key already holds an answer")]
+    KeyTaken,
     /// The database caught what the domain types should have prevented, or a
     /// writer that skipped the payment's lock got there first (ADR-0018): a bug,
     /// never retried.
@@ -520,6 +534,7 @@ impl AuthorizeError {
             },
             Failed::Refused(refused) => Self::Refused(refused),
             Failed::Mismatch => Self::Mismatch { step },
+            Failed::KeyTaken => Self::KeyTaken,
             Failed::Duplicate(source) | Failed::Invariant(source) => {
                 Self::Invariant { step, source }
             }
@@ -592,6 +607,10 @@ pub enum CaptureError {
     /// retried.
     #[error("step {step} is stored with other content")]
     Mismatch { step: Uuid },
+    /// The idempotency key already holds an answer, so this attempt rolled back
+    /// whole. Look the key up for the answer (ADR-0026).
+    #[error("the idempotency key already holds an answer")]
+    KeyTaken,
     /// The database caught what the domain types should have prevented, or a
     /// writer that skipped the payment's lock got there first (ADR-0018): a bug,
     /// never retried.
@@ -621,6 +640,7 @@ impl CaptureError {
             Failed::Refused(PostingRefusal::Refused(refused)) => Self::Refused(refused),
             Failed::Refused(PostingRefusal::MissingAccount(key)) => Self::MissingAccount { key },
             Failed::Mismatch => Self::Mismatch { step },
+            Failed::KeyTaken => Self::KeyTaken,
             Failed::Duplicate(source) | Failed::Invariant(source) => {
                 Self::Invariant { step, source }
             }
@@ -776,6 +796,10 @@ pub enum RefundError {
     /// retried.
     #[error("step {step} is stored with other content")]
     Mismatch { step: Uuid },
+    /// The idempotency key already holds an answer, so this attempt rolled back
+    /// whole. Look the key up for the answer (ADR-0026).
+    #[error("the idempotency key already holds an answer")]
+    KeyTaken,
     /// The database caught what the domain types should have prevented, or a
     /// writer that skipped the payment's lock got there first (ADR-0018): a bug,
     /// never retried.
@@ -805,6 +829,7 @@ impl RefundError {
             Failed::Refused(PostingRefusal::Refused(refused)) => Self::Refused(refused),
             Failed::Refused(PostingRefusal::MissingAccount(key)) => Self::MissingAccount { key },
             Failed::Mismatch => Self::Mismatch { step },
+            Failed::KeyTaken => Self::KeyTaken,
             Failed::Duplicate(source) | Failed::Invariant(source) => {
                 Self::Invariant { step, source }
             }
@@ -950,6 +975,10 @@ pub enum StepError {
     /// retried.
     #[error("step {step} is stored with other content")]
     Mismatch { step: Uuid },
+    /// The idempotency key already holds an answer, so this attempt rolled back
+    /// whole. Look the key up for the answer (ADR-0026).
+    #[error("the idempotency key already holds an answer")]
+    KeyTaken,
     /// The database caught what the domain types should have prevented, or a
     /// writer that skipped the payment's lock got there first (ADR-0018): a bug,
     /// never retried.
@@ -978,6 +1007,7 @@ impl StepError {
             },
             Failed::Refused(illegal) => Self::Illegal(illegal),
             Failed::Mismatch => Self::Mismatch { step },
+            Failed::KeyTaken => Self::KeyTaken,
             Failed::Duplicate(source) | Failed::Invariant(source) => {
                 Self::Invariant { step, source }
             }
@@ -1144,6 +1174,8 @@ pub(crate) enum Failed<R> {
     NotFound,
     Refused(R),
     Mismatch,
+    /// The idempotency key holds an answer already (ADR-0026).
+    KeyTaken,
     /// Some ID already exists, and the command has yet to look its step up.
     /// Reaching the caller, it is a duplicate that nothing explains: a bug.
     Duplicate(sqlx::Error),
@@ -1162,20 +1194,31 @@ impl<R> Failed<R> {
 }
 
 /// A command's unit of work, from `BEGIN` to `COMMIT` (ADR-0019).
-async fn apply<R>(
+async fn apply<R: FinalRefusal>(
     scope: Scope<'_>,
     plan: &Plan<'_>,
     decide: impl FnOnce(&State) -> Result<Transition, R>,
 ) -> Result<Outcome, Failed<R>> {
     let mut tx = begin_locked(scope, plan.asked.payment).await?;
     match apply_in(&mut tx, plan, decide).await {
-        Ok(Outcome::Applied(recorded)) => match commit(tx).await {
-            Ok(()) => Ok(Outcome::Applied(recorded)),
-            Err(CommitError::Rejected(source)) => Err(Failed::Invariant(source)),
-            Err(CommitError::Unknown(source)) => Err(Failed::NotConfirmed(source)),
-        },
+        Ok(Outcome::Applied(recorded)) => {
+            store_sealed(&mut tx, scope, Ok(&recorded)).await?;
+            commit_unit(tx).await?;
+            Ok(Outcome::Applied(recorded))
+        }
         // A retry wrote nothing, so dropping the transaction ends it.
         Ok(replayed) => Ok(replayed),
+        // A rejection wrote nothing. Under a key a final one is stored, so that a late
+        // duplicate cannot turn it into an effect (ADR-0026).
+        Err(Failed::Refused(refusal)) => {
+            if scope.seal().is_some()
+                && let Some(refused) = refusal.final_refusal()
+            {
+                store_sealed(&mut tx, scope, Err(&refused)).await?;
+                commit_unit(tx).await?;
+            }
+            Err(Failed::Refused(refusal))
+        }
         Err(Failed::Duplicate(duplicate)) => {
             // The failure aborted the transaction, which released the lock at
             // once (ADR-0018), and the lookup takes it again. Dropping the
@@ -1184,10 +1227,83 @@ async fn apply<R>(
             drop(tx);
             look_up_again(scope, plan, duplicate).await
         }
-        // A rejection wrote nothing, and any other failure aborted the
-        // transaction: drop it, because committing it would report success
-        // (ADR-0014).
+        // Any other failure aborted the transaction: drop it, because committing it
+        // would report success (ADR-0014).
         Err(failed) => Err(failed),
+    }
+}
+
+/// Commits a command's unit of work, through the one function of ADR-0014.
+async fn commit_unit<R>(tx: Transaction<'_, Postgres>) -> Result<(), Failed<R>> {
+    commit(tx).await.map_err(|err| match err {
+        CommitError::Rejected(source) => Failed::Invariant(source),
+        CommitError::Unknown(source) => Failed::NotConfirmed(source),
+    })
+}
+
+/// Why a sealed command's answer could not be stored. The transaction is aborted:
+/// drop it, which takes the effect with it.
+enum SealFailure {
+    /// The key has an answer: another attempt committed first (ADR-0026).
+    KeyTaken,
+    Invariant(sqlx::Error),
+    NotConfirmed(sqlx::Error),
+}
+
+impl<R> From<SealFailure> for Failed<R> {
+    fn from(failure: SealFailure) -> Self {
+        match failure {
+            SealFailure::KeyTaken => Self::KeyTaken,
+            SealFailure::Invariant(source) => Self::Invariant(source),
+            SealFailure::NotConfirmed(source) => Self::NotConfirmed(source),
+        }
+    }
+}
+
+/// Stores a sealed command's final answer in its unit of work, and does nothing for
+/// a command without a seal. A duplicate here can only be the key, whichever attempt
+/// got there first, because this is its own statement (ADR-0026).
+async fn store_sealed(
+    tx: &mut Transaction<'_, Postgres>,
+    scope: Scope<'_>,
+    decided: Result<&Recorded, &Refused>,
+) -> Result<(), SealFailure> {
+    let Some((merchant, seal)) = scope.seal() else {
+        return Ok(());
+    };
+    seal.store_in(tx, merchant, decided)
+        .await
+        .map_err(|source| match failure_of(&source) {
+            Failure::Duplicate => SealFailure::KeyTaken,
+            Failure::Invariant => SealFailure::Invariant(source),
+            Failure::NotConfirmed => SealFailure::NotConfirmed(source),
+        })
+}
+
+/// What of a command's refusal is final, and so stored under its key: what the table
+/// of moves says. A missing account says something about the books instead.
+trait FinalRefusal {
+    fn final_refusal(&self) -> Option<Refused>;
+}
+
+impl FinalRefusal for Refused {
+    fn final_refusal(&self) -> Option<Refused> {
+        Some(*self)
+    }
+}
+
+impl FinalRefusal for IllegalTransition {
+    fn final_refusal(&self) -> Option<Refused> {
+        Some(Refused::Illegal(*self))
+    }
+}
+
+impl FinalRefusal for PostingRefusal {
+    fn final_refusal(&self) -> Option<Refused> {
+        match self {
+            Self::Refused(refused) => Some(*refused),
+            Self::MissingAccount(_) => None,
+        }
     }
 }
 
