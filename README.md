@@ -74,6 +74,13 @@ warnings denied, the whole suite, a release-mode test that integer overflow
 still panics ([ADR-0003](docs/adr/0003-money-representation.md)), and a check
 that the committed sqlx query cache matches the queries.
 
+Two more workflows look past the project's own behaviour
+([ADR-0027](docs/adr/0027-supply-chain-checks.md)). `cargo-deny` fails on a
+dependency with a known advisory, an unlisted licence or an unknown source, and
+also runs daily, because an advisory can appear with no commit. CodeQL scans the
+Rust code and the workflows. It does not report SQL injection in the form sqlx 0.9
+requires, so `clippy` refuses SQL built at run time unless the call states why.
+
 ## Further reading
 
 Eight first reads. The [full reading list](docs/reading/README.md) groups
