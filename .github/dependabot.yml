@@ -1,10 +1,11 @@
 # Author: Nicola Antonello
 
-# Dependabot proposes updates for the actions that ci.yml pins to commit
-# SHAs, and keeps the version comment next to each SHA in step. One pull
-# request a week carries every update, with a Conventional Commits subject
-# such as "ci: bump the actions group with 2 updates". Rust dependencies are
-# left out: sqlx is pinned to a git commit through [patch.crates-io].
+# Dependabot proposes updates for the actions that the workflows pin to commit
+# SHAs, keeping the version comment next to each SHA in step, and for the crates
+# in Cargo.lock. For each, one pull request a week carries every update, with a
+# Conventional Commits subject such as "ci: bump the actions group with 2
+# updates". A release must be a week old to be proposed, which gives others time
+# to find a bad one; security updates skip the wait (ADR-0027).
 version: 2
 updates:
   - package-ecosystem: github-actions
@@ -12,8 +13,29 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 7
     groups:
       actions:
         patterns: ["*"]
     commit-message:
       prefix: ci
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    # Without this, only crates named in a manifest are kept up to date. Most of
+    # the tree is not.
+    allow:
+      - dependency-type: all
+    # These come from a git commit through [patch.crates-io] and move by hand,
+    # with sqlx-cli in CI (ADR-0006). This covers security updates as well.
+    ignore:
+      - dependency-name: "sqlx*"
+    groups:
+      crates:
+        patterns: ["*"]
+    commit-message:
+      prefix: build

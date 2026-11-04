@@ -110,6 +110,12 @@ so a lock entry that is never built costs nothing.
     one, so hand-written SQL could make a retry panic. The database now refuses
     such a write, with the usual pair of code and name, as it does for every
     other domain type.
+- 2026-11-04: The Context says a lock entry that is never built costs nothing,
+  because Dependabot does not watch the Cargo dependencies. Under ADR-0027
+  Dependabot reads the lock file and `cargo-deny` checks every platform, so an
+  advisory against one of chrono's unbuilt helpers raises an alert and fails CI
+  until someone decides. That is rare enough to leave the choice of chrono as it
+  was, and such an advisory would be ignored with that reason.
 
 ## References
 
