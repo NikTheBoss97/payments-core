@@ -172,6 +172,11 @@ Catching SQL built at run time, which CodeQL misses:
   GitHub, not in this repository. `rust/cleartext-logging` also reads values named
   like `account` and `uuid` as sensitive, so the server's logs will raise alerts to
   read and dismiss.
+- On a pull request, CodeQL reports only what that pull request changed. This one's
+  check read "No new alerts in code changed by this pull request", with 0 results,
+  where a push of the same code gave those 5. So a green check says nothing about
+  older code: a finding there, or from a new query, appears when `main` is scanned,
+  on the push or on the weekly run.
 - The plants used a socket as their source, because axum is not a dependency yet.
   CodeQL lists axum as supported, and that stays unverified until the server's pull
   request plants one through a handler.
