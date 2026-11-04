@@ -18,7 +18,7 @@ pub mod payments;
 
 use std::time::{Duration, Instant};
 
-use payments_core::ids::{AccountId, MerchantId, PaymentId, TransactionId, TransitionId};
+use payments_core::ids::{AccountId, ApiKeyId, MerchantId, PaymentId, TransactionId, TransitionId};
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{Connection, PgConnection, PgPool, Postgres, Transaction};
 use uuid::Uuid;
@@ -236,6 +236,11 @@ pub fn merchant_id(n: u32) -> MerchantId {
 /// A fixed payment ID, from [`test_uuid`].
 pub fn payment_id(n: u32) -> PaymentId {
     PaymentId::try_from(test_uuid(n)).expect("test_uuid builds UUIDv7 values")
+}
+
+/// A fixed API key ID, from [`test_uuid`].
+pub fn api_key_id(n: u32) -> ApiKeyId {
+    ApiKeyId::try_from(test_uuid(n)).expect("test_uuid builds UUIDv7 values")
 }
 
 /// A fixed step ID, from [`test_uuid`].
