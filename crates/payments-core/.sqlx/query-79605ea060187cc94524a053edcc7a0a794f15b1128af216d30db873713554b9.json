@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "ALTER TABLE api_keys RENAME TO api_keys_gone",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "79605ea060187cc94524a053edcc7a0a794f15b1128af216d30db873713554b9"
+}
