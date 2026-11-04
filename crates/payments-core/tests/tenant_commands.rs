@@ -25,11 +25,11 @@ use payments_core::accounts::{AccountRef, Psp};
 use payments_core::db::commit;
 use payments_core::ids::{MerchantId, PaymentId};
 use payments_core::lifecycle::PaymentStatus;
-use payments_core::money::PositiveAmount;
+use payments_core::money::{BasisPoints, PositiveAmount};
 use payments_core::payments::{
     AuthorizeError, CaptureError, CreateError, CreatePayment, Outcome, Payment, Recorded,
     RefundError, StepCommand, StepError, authorize, cancel, capture, create_payment, decline,
-    expire, find_payment, refund, register_merchant, settle, void,
+    expire, find_payment, merchant_fee_rate, refund, register_merchant, settle, void,
 };
 use payments_core::tenancy::Tenant;
 use sqlx::PgPool;
@@ -65,6 +65,49 @@ async fn authorized(
     create_payment(me, &command).await?;
     authorize(me, &authorize_command(n, command.id)).await?;
     Ok(command.id)
+}
+
+#[sqlx::test]
+async fn a_merchant_reads_the_fee_rate_that_the_operator_set_for_it(pool: PgPool) -> TestResult {
+    let (a, b) = (merchant_id(1), merchant_id(2));
+    let (rate_a, rate_b) = (BasisPoints::new(250)?, BasisPoints::new(300)?);
+    let system = runtime_pool(&pool).await?;
+    register_merchant(&system, a, rate_a).await?;
+    register_merchant(&system, b, rate_b).await?;
+    let tenant = tenant_pool_of_one(&pool).await?;
+
+    assert_eq!(
+        merchant_fee_rate(Tenant::new(&tenant, a)).await?,
+        Some(rate_a)
+    );
+    assert_eq!(
+        merchant_fee_rate(Tenant::new(&tenant, b)).await?,
+        Some(rate_b)
+    );
+    assert_eq!(
+        merchant_fee_rate(Tenant::new(&tenant, merchant_id(3))).await?,
+        None
+    );
+    // The system role skips the policy, so this shows that the query names its
+    // merchant too (ADR-0025): the first of two rows would be the wrong rate.
+    assert_eq!(
+        merchant_fee_rate(Tenant::new(&system, b)).await?,
+        Some(rate_b)
+    );
+    tenant.close().await;
+    system.close().await;
+    Ok(())
+}
+
+#[sqlx::test]
+async fn a_fee_rate_that_cannot_be_read_is_an_error_and_not_no_merchant(
+    pool: PgPool,
+) -> TestResult {
+    let tenant = tenant_pool(&pool).await?;
+    tenant.close().await;
+    let read = merchant_fee_rate(Tenant::new(&tenant, merchant_id(1))).await;
+    assert!(read.is_err(), "{read:?}");
+    Ok(())
 }
 
 #[sqlx::test]

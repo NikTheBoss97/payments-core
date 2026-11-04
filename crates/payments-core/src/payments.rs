@@ -31,7 +31,7 @@ use crate::lifecycle::{
 };
 use crate::money::{self, BasisPoints, Currency, PositiveAmount};
 use crate::posting::{self, PostInError, post_in};
-use crate::tenancy::Scope;
+use crate::tenancy::{Scope, Tenant};
 use crate::times::BusinessTime;
 
 /// Where a command landed: its step's `seq`, the statuses it moved between,
@@ -124,6 +124,39 @@ pub async fn register_merchant(
     } else {
         Err(RegisterError::Mismatch { merchant: id })
     }
+}
+
+/// Why a merchant's fee rate could not be read. Reading again is safe.
+#[derive(Debug, thiserror::Error)]
+#[error("the fee rate of merchant {merchant} could not be read")]
+pub struct FeeRateError {
+    merchant: MerchantId,
+    #[source]
+    source: sqlx::Error,
+}
+
+/// The fee rate that the operator set for this merchant, which a new payment copies
+/// (ADR-0024), or `None` when no merchant has its ID.
+///
+/// # Errors
+///
+/// [`FeeRateError`] when the rate cannot be read.
+pub async fn merchant_fee_rate(tenant: Tenant<'_>) -> Result<Option<BasisPoints>, FeeRateError> {
+    let merchant = tenant.merchant();
+    let failure = |source| FeeRateError { merchant, source };
+    let mut tx = Scope::from(tenant).begin().await.map_err(failure)?;
+    // The merchant is in the query as well as in the policy (ADR-0025).
+    let fee_bps = sqlx::query_scalar!(
+        "SELECT fee_bps FROM merchants WHERE id = $1",
+        merchant.get()
+    )
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(failure)?;
+    Ok(fee_bps.map(|fee_bps| {
+        let fee_bps = u16::try_from(fee_bps).expect("merchants_fee_bps_check keeps it in range");
+        BasisPoints::new(fee_bps).expect("merchants_fee_bps_check keeps it in range")
+    }))
 }
 
 /// A payment as stored: its terms, which never change, and where it stands,
