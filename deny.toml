@@ -1,0 +1,35 @@
+# Author: Nicola Antonello
+
+# What this project may depend on (ADR-0027). `cargo deny --locked check` reads
+# this file, on a developer's machine and in CI.
+
+[graph]
+# Every crate that can be built, whatever the feature or platform, tests included.
+# Cargo.lock also names crates behind features nothing enables, such as sqlx's
+# SQLite driver. No build contains them, and they are not checked.
+all-features = true
+
+[advisories]
+# A vulnerability always fails, and an unmaintained crate fails by default.
+# These two make the other kinds fail as well, anywhere in the tree. To accept
+# an advisory, add it to an `ignore` list with the reason it does not apply.
+unsound = "all"
+yanked = "deny"
+
+[licenses]
+# Any other licence stops the build until someone decides to allow it.
+allow = ["Apache-2.0", "MIT", "Unicode-3.0", "Zlib"]
+# An update may drop the last crate under a licence; that needs no decision.
+unused-allowed-license = "allow"
+
+[bans]
+wildcards = "deny"
+# A duplicate costs build time, not safety, and the current ones (hashbrown,
+# syn) come from other crates' requirements.
+multiple-versions = "allow"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+# The sqlx fix, until 0.9.1 is released (ADR-0006). Cargo.toml pins the commit.
+allow-git = ["https://github.com/transact-rs/sqlx"]

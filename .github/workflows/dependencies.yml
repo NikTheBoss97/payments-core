@@ -1,0 +1,65 @@
+# Author: Nicola Antonello
+
+# Checks Cargo.lock against deny.toml: known advisories, licences, wildcard
+# versions and where each crate comes from (ADR-0027).
+name: Dependencies
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  # A new advisory can name a crate that no commit touched. GitHub runs a
+  # schedule on the default branch only, and disables it in a public repository
+  # after 60 days with no activity.
+  schedule:
+    - cron: "23 5 * * *"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  deny:
+    runs-on: ubuntu-latest
+    env:
+      # Moved by hand: Dependabot does not read a version in a workflow's env.
+      DENY_VERSION: 0.20.2
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        run: >-
+          rustup toolchain install stable --profile minimal
+          --component rustfmt,clippy --no-self-update
+      # Installed from crates.io rather than through the vendor's action, which
+      # downloads a release asset with no checksum. --locked builds the versions
+      # in the crate's own lock file, and Cargo verifies each one's checksum.
+      - name: Restore cargo-deny
+        id: cargo-deny
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cargo/bin/cargo-deny
+          key: cargo-deny-${{ runner.os }}-${{ env.DENY_VERSION }}
+      - name: Install cargo-deny
+        if: steps.cargo-deny.outputs.cache-hit != 'true'
+        run: cargo install cargo-deny --locked --version "$DENY_VERSION"
+      # -D warnings fails an exception that no longer matches anything, so none
+      # outlives its reason.
+      - run: cargo deny --locked check -D warnings
+      # An advisory matches only a crate from the source it names, crates.io by
+      # default, so none can match the sqlx crates in [patch.crates-io]. Their
+      # version is the released one, so check the tree without the patch as well.
+      # Delete this step with the patch (ADR-0006).
+      - name: Check the pinned sqlx crates for advisories
+        run: |
+          sed -i '/^sqlx[-a-z]* = { git = /d' Cargo.toml
+          cargo deny check advisories
+          # A patch line the sed missed would leave this run blind, and passing.
+          if grep -q '^source = "git+' Cargo.lock; then exit 1; fi
