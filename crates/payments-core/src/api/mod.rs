@@ -3,15 +3,18 @@
 //! The HTTP API (ADR-0023).
 
 mod credential;
+mod payments;
 pub mod problem;
 
 use axum::Router;
 use axum::extract::Request;
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
+use axum::routing::get;
 use sqlx::PgPool;
 
 pub use credential::Merchant;
+pub use payments::OwnPayment;
 use problem::Problem;
 
 /// What a request can reach: the two login roles' pools (ADR-0025).
@@ -30,15 +33,23 @@ impl AppState {
     }
 }
 
-/// Every route, under the one middleware.
-pub fn router() -> Router {
+/// Every route, under the one middleware. The fallbacks come before the layer, or they
+/// would run outside it.
+pub fn router(state: AppState) -> Router {
     Router::new()
+        .route("/payments/{id}", get(payments::read_payment))
         .fallback(no_such_route)
+        .method_not_allowed_fallback(wrong_method)
         .layer(middleware::from_fn(in_its_own_task))
+        .with_state(state)
 }
 
 async fn no_such_route() -> Problem {
     Problem::NotFound
+}
+
+async fn wrong_method() -> Problem {
+    Problem::MethodNotAllowed
 }
 
 /// Runs the rest of the stack in a task of its own, from the extractors to the response.

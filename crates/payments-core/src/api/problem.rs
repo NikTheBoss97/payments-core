@@ -21,6 +21,8 @@ pub enum Problem {
     Unauthorized,
     /// No such route, payment, merchant or API key, or another merchant's payment.
     NotFound,
+    /// A route that does not take this method.
+    MethodNotAllowed,
     /// The database could not answer, or the outcome is unknown. Sending the request
     /// again is safe.
     Unavailable,
@@ -47,6 +49,11 @@ impl Problem {
                 "The credential is missing, unknown or revoked",
             ),
             Self::NotFound => (StatusCode::NOT_FOUND, "not-found", "No such resource"),
+            Self::MethodNotAllowed => (
+                StatusCode::METHOD_NOT_ALLOWED,
+                "method-not-allowed",
+                "This route does not take that method",
+            ),
             Self::Unavailable => (
                 StatusCode::SERVICE_UNAVAILABLE,
                 "unavailable",

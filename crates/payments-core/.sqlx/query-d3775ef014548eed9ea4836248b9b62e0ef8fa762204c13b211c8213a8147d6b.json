@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "ALTER TABLE payments DISABLE TRIGGER USER",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "d3775ef014548eed9ea4836248b9b62e0ef8fa762204c13b211c8213a8147d6b"
+}

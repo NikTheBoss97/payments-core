@@ -4,12 +4,15 @@
 
 mod common;
 
+use std::error::Error;
+
 use axum::Router;
 use axum::http::StatusCode;
 use axum::middleware;
 use axum::routing::get as get_route;
-use common::api::{get, send};
+use common::api::{Pools, get, send};
 use payments_core::api::{in_its_own_task, router};
+use sqlx::PgPool;
 
 const PROBLEM_JSON: &str = "application/problem+json";
 
@@ -17,15 +20,18 @@ async fn panics() -> &'static str {
     panic!("a secret in a panic, which no answer may show")
 }
 
-#[tokio::test]
-async fn a_path_that_is_no_route_is_a_problem() {
-    let reply = send(router(), get("/nothing/here")).await;
+#[sqlx::test]
+async fn a_path_that_is_no_route_is_a_problem(pool: PgPool) -> Result<(), Box<dyn Error>> {
+    let pools = Pools::login(&pool).await?;
+    let reply = send(router(pools.state()), get("/nothing/here")).await;
     assert_eq!(reply.status, StatusCode::NOT_FOUND);
     assert_eq!(reply.header("content-type"), PROBLEM_JSON);
     assert_eq!(
         reply.body,
         r#"{"type":"https://github.com/NikTheBoss97/payments-core/blob/main/docs/api.md#not-found","title":"No such resource","status":404}"#
     );
+    pools.close().await;
+    Ok(())
 }
 
 #[tokio::test]
