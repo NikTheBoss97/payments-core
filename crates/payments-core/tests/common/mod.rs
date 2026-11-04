@@ -96,6 +96,16 @@ pub async fn tenant_login(pool: &PgPool) -> sqlx::Result<PgConnection> {
     PgConnection::connect_with(&options).await
 }
 
+/// A pool that logs in as the tenant role, as the one that merchant routes hold
+/// does (ADR-0025). Close it before the test returns, as for [`runtime_pool`].
+pub async fn tenant_pool(pool: &PgPool) -> sqlx::Result<PgPool> {
+    let options = (*pool.connect_options())
+        .clone()
+        .username("payments_tenant")
+        .password("payments_tenant");
+    PgPoolOptions::new().connect_with(options).await
+}
+
 /// A pool whose connections act as the runtime role, to call the library's
 /// functions as the application does: each new connection runs `SET ROLE`
 /// first. Role settings such as `lock_timeout` apply only at login, so these

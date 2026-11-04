@@ -12,7 +12,7 @@ use std::error::Error;
 use common::payments::{REQUESTED, create_command, eur, fee_rate};
 use common::{
     CHECK_VIOLATION, UNIQUE_VIOLATION, account_id, assert_guard, assert_violation, merchant_id,
-    payment_id, runtime_pool, runtime_pool_of_one, transition_id,
+    payment_id, runtime_pool, runtime_pool_of_one, tenant_pool, transition_id,
 };
 use futures_util::future::join_all;
 use payments_core::accounts::{AccountError, AccountRef, NormalSide, Psp, find_account};
@@ -79,6 +79,23 @@ async fn a_merchant_registers_once_however_often_it_is_called(pool: PgPool) -> T
     .await?;
     assert_eq!(merchants, 1);
     app.close().await;
+    Ok(())
+}
+
+#[sqlx::test]
+async fn a_statement_refused_for_lack_of_a_privilege_is_a_bug(pool: PgPool) -> TestResult {
+    // The tenant role may not create a merchant, and never will: telling the caller
+    // that the outcome is unknown would have it retry forever (ADR-0025).
+    let tenant = tenant_pool(&pool).await?;
+    let id = merchant_id(1);
+    let err = register_merchant(&tenant, id, fee_rate())
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&err, RegisterError::Invariant { merchant, .. } if *merchant == id),
+        "{err:?}"
+    );
+    tenant.close().await;
     Ok(())
 }
 

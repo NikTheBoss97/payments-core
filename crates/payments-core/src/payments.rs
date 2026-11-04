@@ -1502,8 +1502,9 @@ fn parse_status(label: &str) -> PaymentStatus {
 enum Failure {
     /// Some ID already exists, and the step with the command's ID decides.
     Duplicate,
-    /// The database caught what the domain types should have prevented, or ran
-    /// out of shared memory for locks (ADR-0018): a bug, never retried.
+    /// The database caught what the domain types should have prevented, refused
+    /// the statement (ADR-0025), or ran out of shared memory for locks (ADR-0018):
+    /// a bug, never retried.
     Invariant,
     /// The command may or may not have been applied.
     NotConfirmed,
@@ -1516,7 +1517,11 @@ fn classify(code: Option<&str>) -> Failure {
     match code {
         Some("23505") => Failure::Duplicate,
         Some("53200") => Failure::Invariant,
-        Some(code) if code.starts_with("23") || code.starts_with("LG") => Failure::Invariant,
+        Some(code)
+            if code.starts_with("23") || code.starts_with("42") || code.starts_with("LG") =>
+        {
+            Failure::Invariant
+        }
         _ => Failure::NotConfirmed,
     }
 }
@@ -1547,14 +1552,18 @@ mod tests {
             (Some("LG006"), Invariant),
             // Out of shared memory: a batch beyond the lock table (ADR-0018).
             (Some("53200"), Invariant),
+            // A refused statement is permanent: a missing privilege or a row-level
+            // security policy (ADR-0025), a table or a column that is not there.
+            (Some("42501"), Invariant),
+            (Some("42P01"), Invariant),
+            (Some("42703"), Invariant),
             // A lock timeout, a deadlock, a cancel, a terminate, a lost
-            // connection, a missing privilege, or no SQLSTATE at all.
+            // connection, or no SQLSTATE at all.
             (Some("55P03"), NotConfirmed),
             (Some("40P01"), NotConfirmed),
             (Some("57014"), NotConfirmed),
             (Some("57P01"), NotConfirmed),
             (Some("08006"), NotConfirmed),
-            (Some("42501"), NotConfirmed),
             (None, NotConfirmed),
         ] {
             assert_eq!(classify(code), expected, "{code:?}");
@@ -1565,7 +1574,10 @@ mod tests {
         #[test]
         fn codes_outside_those_rules_are_not_confirmed(code in "[0-9A-Z]{5}") {
             prop_assume!(
-                !code.starts_with("23") && !code.starts_with("LG") && code != "53200"
+                !code.starts_with("23")
+                    && !code.starts_with("42")
+                    && !code.starts_with("LG")
+                    && code != "53200"
             );
             prop_assert_eq!(classify(Some(&code)), Failure::NotConfirmed);
         }
