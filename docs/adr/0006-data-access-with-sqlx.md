@@ -148,6 +148,10 @@ Which sqlx version:
   checks the tree a second time without the patch. Moving to 0.9.1 also removes
   that step and the `allow-git` entry in `deny.toml`; a leftover entry fails the
   check.
+- 2026-11-04: `clippy` now refuses `AssertSqlSafe` and `QueryBuilder`'s
+  constructors unless the call states why (ADR-0027). The escape hatch in Options
+  and the rule on `QueryBuilder::push_bind` stand; using either now shows up in the
+  code.
 
 ## References
 

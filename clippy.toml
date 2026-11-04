@@ -1,0 +1,12 @@
+# Author: Nicola Antonello
+
+# The ways a string built at run time can reach a query (ADR-0027). This project's
+# SQL goes through the checked macros, and sqlx refuses any other string that does
+# not come through one of these. A query that needs one says why, with
+# #[expect(clippy::disallowed_methods, reason = "...")]. CodeQL did not report SQL
+# injection through the wrapper, so this rule is what catches it.
+disallowed-methods = [
+    { path = "sqlx::AssertSqlSafe", reason = "it lets a string built at run time into a query" },
+    { path = "sqlx::QueryBuilder::new", reason = "it builds SQL at run time; prefer a checked macro" },
+    { path = "sqlx::QueryBuilder::with_arguments", reason = "it builds SQL at run time; prefer a checked macro" },
+]
