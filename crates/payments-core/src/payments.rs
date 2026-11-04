@@ -11,6 +11,9 @@
 //! cancel the server's work, and a dropped `COMMIT` is a lost one (ADR-0014).
 //! Waits are bounded on the server (ADR-0018).
 //!
+//! A command runs on a plain pool for the system paths, or for a merchant through
+//! a [`Tenant`](crate::tenancy::Tenant), whose transactions name it (ADR-0025).
+//!
 //! The lints are the same as in `money`: this module handles amounts.
 
 #![forbid(clippy::arithmetic_side_effects, clippy::as_conversions)]
@@ -28,6 +31,7 @@ use crate::lifecycle::{
 };
 use crate::money::{self, BasisPoints, Currency, PositiveAmount};
 use crate::posting::{self, PostInError, post_in};
+use crate::tenancy::Scope;
 use crate::times::BusinessTime;
 
 /// Where a command landed: its step's `seq`, the statuses it moved between,
@@ -149,12 +153,21 @@ pub enum ReadError {
     },
 }
 
-/// Reads a payment, or `None` when no payment has this ID.
+/// Reads a payment, or `None` when no payment has this ID, or when another merchant
+/// owns it and the scope is a merchant's (ADR-0025).
 ///
 /// # Errors
 ///
 /// [`ReadError::Database`] when the payment cannot be read.
-pub async fn find_payment(pool: &PgPool, id: PaymentId) -> Result<Option<Payment>, ReadError> {
+pub async fn find_payment<'a>(
+    scope: impl Into<Scope<'a>>,
+    id: PaymentId,
+) -> Result<Option<Payment>, ReadError> {
+    let failure = |source| ReadError::Database {
+        payment: id,
+        source,
+    };
+    let mut tx = scope.into().begin().await.map_err(failure)?;
     // One statement, so the terms and the newest step come from one snapshot.
     let row = sqlx::query!(
         r#"SELECT p.merchant_id, p.psp, p.currency AS "currency!", p.amount, p.fee_bps,
@@ -170,12 +183,9 @@ pub async fn find_payment(pool: &PgPool, id: PaymentId) -> Result<Option<Payment
             WHERE p.id = $1"#,
         id.get()
     )
-    .fetch_optional(pool)
+    .fetch_optional(&mut *tx)
     .await
-    .map_err(|source| ReadError::Database {
-        payment: id,
-        source,
-    })?;
+    .map_err(failure)?;
     Ok(row.map(|row| {
         let fee_bps = u16::try_from(row.fee_bps).expect("payments_fee_bps_check keeps it in range");
         Payment {
@@ -270,45 +280,53 @@ pub enum CreateError {
 /// # Errors
 ///
 /// See [`CreateError`].
-pub async fn create_payment(
-    pool: &PgPool,
+pub async fn create_payment<'a>(
+    scope: impl Into<Scope<'a>>,
     command: &CreatePayment,
 ) -> Result<Outcome, CreateError> {
+    let scope = scope.into();
     let payment = command.id;
     let fail = |source| create_failure(payment, source);
     // Merchants are append-only, so this answer cannot go stale.
+    let mut tx = scope.begin().await.map_err(fail)?;
     let registered = sqlx::query_scalar!(
         r#"SELECT EXISTS (SELECT 1 FROM merchants WHERE id = $1) AS "registered!""#,
         command.merchant.get()
     )
-    .fetch_one(pool)
+    .fetch_one(&mut *tx)
     .await
     .map_err(fail)?;
+    drop(tx);
     if !registered {
         return Err(CreateError::UnknownMerchant {
             merchant: command.merchant,
         });
     }
     for (reference, candidate) in accounts_to_open(command) {
-        open_account(pool, candidate, &reference.key(), reference.normal_side())
-            .await
-            .map_err(|err| match err {
-                AccountError::UnknownCurrency { currency, source } => {
-                    CreateError::UnknownCurrency { currency, source }
-                }
-                AccountError::Database { source, .. } => fail(source),
-                AccountError::SideMismatch { .. } | AccountError::Invariant { .. } => {
-                    CreateError::Account { source: err }
-                }
-            })?;
+        open_account(
+            scope.pool(),
+            candidate,
+            &reference.key(),
+            reference.normal_side(),
+        )
+        .await
+        .map_err(|err| match err {
+            AccountError::UnknownCurrency { currency, source } => {
+                CreateError::UnknownCurrency { currency, source }
+            }
+            AccountError::Database { source, .. } => fail(source),
+            AccountError::SideMismatch { .. } | AccountError::Invariant { .. } => {
+                CreateError::Account { source: err }
+            }
+        })?;
     }
-    let mut tx = pool.begin().await.map_err(fail)?;
+    let mut tx = scope.begin().await.map_err(fail)?;
     if let Err(source) = insert_payment(&mut tx, command).await {
         // The database transaction is aborted. Dropping it queues the ROLLBACK;
         // committing it would report success (ADR-0014).
         drop(tx);
         return match failure_of(&source) {
-            Failure::Duplicate => stored_create(pool, command, source).await,
+            Failure::Duplicate => stored_create(scope, command, source).await,
             Failure::Invariant => Err(CreateError::Invariant { payment, source }),
             Failure::NotConfirmed => Err(CreateError::NotConfirmed { payment, source }),
         };
@@ -397,11 +415,15 @@ async fn insert_payment(
 /// meets an uncommitted row with the same key waits for that transaction to
 /// end, and reports the duplicate only if it committed.
 async fn stored_create(
-    pool: &PgPool,
+    scope: Scope<'_>,
     command: &CreatePayment,
     duplicate: sqlx::Error,
 ) -> Result<Outcome, CreateError> {
     let payment = command.id;
+    let mut tx = scope
+        .begin()
+        .await
+        .map_err(|source| create_failure(payment, source))?;
     let row = sqlx::query!(
         r#"SELECT s.payment_id, s.seq, s.kind, s.from_status, s.to_status, s.refundable,
                   p.merchant_id, p.psp, p.currency AS "currency!", p.amount, p.fee_bps
@@ -410,7 +432,7 @@ async fn stored_create(
             WHERE s.id = $1"#,
         command.step.get()
     )
-    .fetch_optional(pool)
+    .fetch_optional(&mut *tx)
     .await
     .map_err(|source| create_failure(payment, source))?;
     let Some(row) = row else {
@@ -512,7 +534,10 @@ impl AuthorizeError {
 /// # Errors
 ///
 /// See [`AuthorizeError`].
-pub async fn authorize(pool: &PgPool, command: &Authorize) -> Result<Outcome, AuthorizeError> {
+pub async fn authorize<'a>(
+    scope: impl Into<Scope<'a>>,
+    command: &Authorize,
+) -> Result<Outcome, AuthorizeError> {
     let plan = Plan {
         id: &command.step,
         asked: Asked {
@@ -525,7 +550,7 @@ pub async fn authorize(pool: &PgPool, command: &Authorize) -> Result<Outcome, Au
         },
         posting: None,
     };
-    apply(pool, &plan, |state| {
+    apply(scope.into(), &plan, |state| {
         lifecycle::authorize(state.status, command.amount, state.requested)
     })
     .await
@@ -611,11 +636,16 @@ impl CaptureError {
 /// # Errors
 ///
 /// See [`CaptureError`].
-pub async fn capture(pool: &PgPool, command: &Capture) -> Result<Outcome, CaptureError> {
+pub async fn capture<'a>(
+    scope: impl Into<Scope<'a>>,
+    command: &Capture,
+) -> Result<Outcome, CaptureError> {
+    let scope = scope.into();
+    let pool = scope.pool();
     let fail = |failed| CaptureError::new(command, failed);
-    // Outside any transaction, and so before the lock: the terms never change,
+    // Outside the command's transaction, and so before the lock: the terms never change,
     // and the accounts exist before the payment does (ADR-0019, ADR-0020).
-    let terms = read_terms(pool, command.payment).await.map_err(fail)?;
+    let terms = read_terms(scope, command.payment).await.map_err(fail)?;
     let receivable = posting_account(pool, AccountRef::PspReceivable(terms.psp, terms.currency))
         .await
         .map_err(fail)?;
@@ -654,7 +684,7 @@ pub async fn capture(pool: &PgPool, command: &Capture) -> Result<Outcome, Captur
         },
         posting: Some(&posting),
     };
-    apply(pool, &plan, |state| {
+    apply(scope, &plan, |state| {
         // Before an authorization the status refuses the capture, so this limit
         // is never read.
         let limit = state.authorized.unwrap_or(state.requested);
@@ -790,10 +820,15 @@ impl RefundError {
 /// # Errors
 ///
 /// See [`RefundError`].
-pub async fn refund(pool: &PgPool, command: &Refund) -> Result<Outcome, RefundError> {
+pub async fn refund<'a>(
+    scope: impl Into<Scope<'a>>,
+    command: &Refund,
+) -> Result<Outcome, RefundError> {
+    let scope = scope.into();
+    let pool = scope.pool();
     let fail = |failed| RefundError::new(command, failed);
-    // Outside any transaction, as for a capture.
-    let terms = read_terms(pool, command.payment).await.map_err(fail)?;
+    // Outside the command's transaction, as for a capture.
+    let terms = read_terms(scope, command.payment).await.map_err(fail)?;
     let payable = posting_account(
         pool,
         AccountRef::MerchantPayable(terms.merchant, terms.currency),
@@ -823,7 +858,7 @@ pub async fn refund(pool: &PgPool, command: &Refund) -> Result<Outcome, RefundEr
         },
         posting: Some(&posting),
     };
-    apply(pool, &plan, |state| {
+    apply(scope, &plan, |state| {
         lifecycle::refund(state.status, command.amount, state.refundable)
             .map_err(PostingRefusal::Refused)
     })
@@ -868,8 +903,8 @@ pub(crate) enum PostingRefusal {
 }
 
 /// A payment's terms, or why they could not be read.
-async fn read_terms<R>(pool: &PgPool, id: PaymentId) -> Result<Payment, Failed<R>> {
-    match find_payment(pool, id).await {
+async fn read_terms<R>(scope: Scope<'_>, id: PaymentId) -> Result<Payment, Failed<R>> {
+    match find_payment(scope, id).await {
         Ok(Some(payment)) => Ok(payment),
         Ok(None) => Err(Failed::NotFound),
         Err(ReadError::Database { source, .. }) => Err(Failed::database(source)),
@@ -956,8 +991,11 @@ impl StepError {
 /// # Errors
 ///
 /// See [`StepError`].
-pub async fn decline(pool: &PgPool, command: &StepCommand) -> Result<Outcome, StepError> {
-    plain_step(pool, command, Event::Decline, StepKind::Decline).await
+pub async fn decline<'a>(
+    scope: impl Into<Scope<'a>>,
+    command: &StepCommand,
+) -> Result<Outcome, StepError> {
+    plain_step(scope.into(), command, Event::Decline, StepKind::Decline).await
 }
 
 /// Cancels a payment before its authorization (ADR-0016).
@@ -965,8 +1003,11 @@ pub async fn decline(pool: &PgPool, command: &StepCommand) -> Result<Outcome, St
 /// # Errors
 ///
 /// See [`StepError`].
-pub async fn cancel(pool: &PgPool, command: &StepCommand) -> Result<Outcome, StepError> {
-    plain_step(pool, command, Event::Cancel, StepKind::Cancel).await
+pub async fn cancel<'a>(
+    scope: impl Into<Scope<'a>>,
+    command: &StepCommand,
+) -> Result<Outcome, StepError> {
+    plain_step(scope.into(), command, Event::Cancel, StepKind::Cancel).await
 }
 
 /// Records that an authorization was voided (ADR-0016).
@@ -974,8 +1015,11 @@ pub async fn cancel(pool: &PgPool, command: &StepCommand) -> Result<Outcome, Ste
 /// # Errors
 ///
 /// See [`StepError`].
-pub async fn void(pool: &PgPool, command: &StepCommand) -> Result<Outcome, StepError> {
-    plain_step(pool, command, Event::Void, StepKind::Void).await
+pub async fn void<'a>(
+    scope: impl Into<Scope<'a>>,
+    command: &StepCommand,
+) -> Result<Outcome, StepError> {
+    plain_step(scope.into(), command, Event::Void, StepKind::Void).await
 }
 
 /// Records that the PSP reported an authorization as expired, a call that only
@@ -984,8 +1028,11 @@ pub async fn void(pool: &PgPool, command: &StepCommand) -> Result<Outcome, StepE
 /// # Errors
 ///
 /// See [`StepError`].
-pub async fn expire(pool: &PgPool, command: &StepCommand) -> Result<Outcome, StepError> {
-    plain_step(pool, command, Event::Expire, StepKind::Expire).await
+pub async fn expire<'a>(
+    scope: impl Into<Scope<'a>>,
+    command: &StepCommand,
+) -> Result<Outcome, StepError> {
+    plain_step(scope.into(), command, Event::Expire, StepKind::Expire).await
 }
 
 /// Records that the PSP reported a capture as settled (ADR-0016).
@@ -993,12 +1040,15 @@ pub async fn expire(pool: &PgPool, command: &StepCommand) -> Result<Outcome, Ste
 /// # Errors
 ///
 /// See [`StepError`].
-pub async fn settle(pool: &PgPool, command: &StepCommand) -> Result<Outcome, StepError> {
-    plain_step(pool, command, Event::Settle, StepKind::Settle).await
+pub async fn settle<'a>(
+    scope: impl Into<Scope<'a>>,
+    command: &StepCommand,
+) -> Result<Outcome, StepError> {
+    plain_step(scope.into(), command, Event::Settle, StepKind::Settle).await
 }
 
 async fn plain_step(
-    pool: &PgPool,
+    scope: Scope<'_>,
     command: &StepCommand,
     event: Event,
     kind: StepKind,
@@ -1013,7 +1063,7 @@ async fn plain_step(
         },
         posting: None,
     };
-    apply(pool, &plan, |state| next(state.status, event))
+    apply(scope, &plan, |state| next(state.status, event))
         .await
         .map_err(|failed| StepError::new(command, failed))
 }
@@ -1113,11 +1163,11 @@ impl<R> Failed<R> {
 
 /// A command's unit of work, from `BEGIN` to `COMMIT` (ADR-0019).
 async fn apply<R>(
-    pool: &PgPool,
+    scope: Scope<'_>,
     plan: &Plan<'_>,
     decide: impl FnOnce(&State) -> Result<Transition, R>,
 ) -> Result<Outcome, Failed<R>> {
-    let mut tx = begin_locked(pool, plan.asked.payment).await?;
+    let mut tx = begin_locked(scope, plan.asked.payment).await?;
     match apply_in(&mut tx, plan, decide).await {
         Ok(Outcome::Applied(recorded)) => match commit(tx).await {
             Ok(()) => Ok(Outcome::Applied(recorded)),
@@ -1132,7 +1182,7 @@ async fn apply<R>(
             // transaction first gives its connection back: a command that asks
             // the pool for a connection while it holds one can wait for itself.
             drop(tx);
-            look_up_again(pool, plan, duplicate).await
+            look_up_again(scope, plan, duplicate).await
         }
         // A rejection wrote nothing, and any other failure aborted the
         // transaction: drop it, because committing it would report success
@@ -1144,14 +1194,18 @@ async fn apply<R>(
 /// Begins a database transaction whose first statement takes the payment's lock
 /// (ADR-0018). A session-level lock would outlive the transaction, so this is
 /// the only lock function that the library calls. `lock_timeout` bounds the
-/// wait, on the server.
+/// wait, on the server. Its second statement names the merchant (ADR-0025).
 async fn begin_locked<R>(
-    pool: &PgPool,
+    scope: Scope<'_>,
     payment: PaymentId,
 ) -> Result<Transaction<'static, Postgres>, Failed<R>> {
-    let mut tx = pool.begin().await.map_err(Failed::database)?;
+    let mut tx = scope.pool().begin().await.map_err(Failed::database)?;
     sqlx::query!("SELECT pg_advisory_xact_lock($1)", lock_key(payment))
         .execute(&mut *tx)
+        .await
+        .map_err(Failed::database)?;
+    scope
+        .name_merchant(&mut tx)
         .await
         .map_err(Failed::database)?;
     Ok(tx)
@@ -1223,11 +1277,11 @@ fn posting_failure<R>(err: PostInError) -> Failed<R> {
 /// step with the command's ID decides, and none means that another writer broke
 /// a rule (ADR-0019).
 async fn look_up_again<R>(
-    pool: &PgPool,
+    scope: Scope<'_>,
     plan: &Plan<'_>,
     duplicate: sqlx::Error,
 ) -> Result<Outcome, Failed<R>> {
-    let mut tx = begin_locked(pool, plan.asked.payment).await?;
+    let mut tx = begin_locked(scope, plan.asked.payment).await?;
     match read_state(&mut tx, plan).await?.stored {
         Some(stored) => answer(&mut tx, stored, plan)
             .await

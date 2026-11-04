@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT (SELECT count(*) FROM payments) AS \"payments!\",\n                  (SELECT count(*) FROM accounts) AS \"accounts!\"",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "payments!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 1,
+        "name": "accounts!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      null,
+      null
+    ]
+  },
+  "hash": "9c6898f538cff25e3696d40940cdfe30cb5a066d58377c9ffb97c17f322bfba9"
+}

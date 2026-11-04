@@ -8,6 +8,10 @@
 //! predicts each command's outcome, and each payment's status and refundable
 //! amount after it. Payments run at the same time, so their postings share the
 //! accounts, as in production. The generator is seeded, so a failure repeats.
+//!
+//! The histories run on the system role's pool, and again as three merchants on
+//! the tenant role's (ADR-0025), where a merchant left behind on a pooled connection
+//! would show as a payment that goes missing or a wrong answer.
 
 mod common;
 
@@ -17,7 +21,7 @@ use common::payments::{
     authorize_command, balance_of, capture_command, create_command, eur, fee_rate, refund_command,
     unbalanced_currencies, uncaused_postings,
 };
-use common::{merchant_id, runtime_pool, transaction_id, transition_id};
+use common::{merchant_id, runtime_pool, tenant_pool, transaction_id, transition_id};
 use futures_util::future::join_all;
 use payments_core::accounts::{AccountRef, Psp};
 use payments_core::ids::{MerchantId, PaymentId};
@@ -28,6 +32,7 @@ use payments_core::payments::{
     StepCommand, StepError, authorize, cancel, capture, create_payment, decline, expire,
     find_payment, refund, register_merchant, settle, void,
 };
+use payments_core::tenancy::{Scope, Tenant};
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -212,7 +217,7 @@ fn refused(refused: &Refused) -> Answer {
 /// Sends a command with these IDs. A retry calls this again with the same `n`, so
 /// it sends the identical value.
 async fn send(
-    app: &PgPool,
+    app: Scope<'_>,
     command: Command,
     payment: PaymentId,
     n: u32,
@@ -276,7 +281,7 @@ async fn send(
 /// Runs one payment's random history against the model, and returns how it moved
 /// the accounts according to the model, and where it ended.
 async fn history(
-    app: &PgPool,
+    app: Scope<'_>,
     merchant: MerchantId,
     n: u32,
 ) -> Result<(Moved, PaymentStatus), Box<dyn Error>> {
@@ -341,13 +346,19 @@ async fn history(
     Ok((moved, facts.status()))
 }
 
-#[sqlx::test]
-async fn random_histories_match_the_model(pool: PgPool) -> TestResult {
-    let app = runtime_pool(&pool).await?;
+/// Runs the histories of three merchants at the same time, each in its own scope, and
+/// checks every account against the model. `pool` is the test's own, which reads the
+/// books whichever role ran the commands.
+async fn histories_match_the_model<'a>(
+    pool: &PgPool,
+    scope_of: impl Fn(MerchantId) -> Scope<'a>,
+) -> TestResult {
     let merchants = [merchant_id(1), merchant_id(2), merchant_id(3)];
+    let system = runtime_pool(pool).await?;
     for merchant in merchants {
-        register_merchant(&app, merchant, fee_rate()).await?;
+        register_merchant(&system, merchant, fee_rate()).await?;
     }
+    system.close().await;
     let payments: Vec<(MerchantId, u32)> = (1..=40)
         .map(|n: u32| {
             let at = usize::try_from(n).expect("a small n") % merchants.len();
@@ -357,7 +368,7 @@ async fn random_histories_match_the_model(pool: PgPool) -> TestResult {
     let histories = join_all(
         payments
             .iter()
-            .map(|&(merchant, n)| history(&app, merchant, n)),
+            .map(|&(merchant, n)| history(scope_of(merchant), merchant, n)),
     )
     .await;
 
@@ -378,13 +389,13 @@ async fn random_histories_match_the_model(pool: PgPool) -> TestResult {
         payable[at] += moved.payable;
     }
     assert_eq!(
-        balance_of(&app, AccountRef::PspReceivable(Psp::Mock, eur())).await?,
+        balance_of(pool, AccountRef::PspReceivable(Psp::Mock, eur())).await?,
         receivable
     );
-    assert_eq!(balance_of(&app, AccountRef::FeeRevenue(eur())).await?, fees);
+    assert_eq!(balance_of(pool, AccountRef::FeeRevenue(eur())).await?, fees);
     for (merchant, expected) in merchants.iter().zip(payable) {
         assert_eq!(
-            balance_of(&app, AccountRef::MerchantPayable(*merchant, eur())).await?,
+            balance_of(pool, AccountRef::MerchantPayable(*merchant, eur())).await?,
             expected,
             "{merchant}"
         );
@@ -394,8 +405,23 @@ async fn random_histories_match_the_model(pool: PgPool) -> TestResult {
     for status in PaymentStatus::ALL {
         assert!(ends.contains(status), "no history ended {status}: {ends:?}");
     }
-    assert_eq!(unbalanced_currencies(&pool).await?, Vec::<String>::new());
-    assert_eq!(uncaused_postings(&pool).await?, Vec::<Uuid>::new());
+    assert_eq!(unbalanced_currencies(pool).await?, Vec::<String>::new());
+    assert_eq!(uncaused_postings(pool).await?, Vec::<Uuid>::new());
+    Ok(())
+}
+
+#[sqlx::test]
+async fn random_histories_match_the_model(pool: PgPool) -> TestResult {
+    let app = runtime_pool(&pool).await?;
+    histories_match_the_model(&pool, |_| Scope::from(&app)).await?;
     app.close().await;
+    Ok(())
+}
+
+#[sqlx::test]
+async fn random_histories_of_three_merchants_match_the_model(pool: PgPool) -> TestResult {
+    let tenant = tenant_pool(&pool).await?;
+    histories_match_the_model(&pool, |merchant| Tenant::new(&tenant, merchant).into()).await?;
+    tenant.close().await;
     Ok(())
 }
