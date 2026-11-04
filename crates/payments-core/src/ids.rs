@@ -312,16 +312,12 @@ mod tests {
             uuid!("019b76da-a800-4000-8000-000000000001"),
             uuid!("019b76da-a800-8000-8000-000000000001"),
         ] {
-            assert_eq!(AccountId::try_from(uuid), Err(InvalidId(uuid)), "{uuid}");
-            assert_eq!(
-                TransactionId::try_from(uuid),
-                Err(InvalidId(uuid)),
-                "{uuid}"
-            );
-            assert_eq!(PaymentId::try_from(uuid), Err(InvalidId(uuid)), "{uuid}");
-            assert_eq!(MerchantId::try_from(uuid), Err(InvalidId(uuid)), "{uuid}");
-            assert_eq!(ApiKeyId::try_from(uuid), Err(InvalidId(uuid)), "{uuid}");
-            assert_eq!(TransitionId::try_from(uuid), Err(InvalidId(uuid)), "{uuid}");
+            assert_eq!(AccountId::try_from(uuid), Err(InvalidId(uuid)));
+            assert_eq!(TransactionId::try_from(uuid), Err(InvalidId(uuid)));
+            assert_eq!(PaymentId::try_from(uuid), Err(InvalidId(uuid)));
+            assert_eq!(MerchantId::try_from(uuid), Err(InvalidId(uuid)));
+            assert_eq!(ApiKeyId::try_from(uuid), Err(InvalidId(uuid)));
+            assert_eq!(TransitionId::try_from(uuid), Err(InvalidId(uuid)));
         }
     }
 
