@@ -6,6 +6,8 @@
 //! merchant's data. Its body comes from one pure function, because a key's record stores
 //! the bytes that a replay returns (ADR-0026).
 
+use std::error::Error;
+
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use serde::Serialize;
@@ -82,6 +84,22 @@ impl Problem {
             status: status.as_u16(),
         })
         .expect("strings and a number always serialize")
+    }
+
+    /// This problem, whose cause goes to the log, because its answer says nothing of it.
+    /// The line holds the error and what caused it, and nothing of the request, so no
+    /// header can reach it (ADR-0024).
+    #[must_use]
+    pub(super) fn because(self, error: &dyn Error) -> Self {
+        let mut chain = error.to_string();
+        let mut cause = error.source();
+        while let Some(next) = cause {
+            chain.push_str(": ");
+            chain.push_str(&next.to_string());
+            cause = next.source();
+        }
+        tracing::error!(status = self.status().as_u16(), "{chain}");
+        self
     }
 }
 

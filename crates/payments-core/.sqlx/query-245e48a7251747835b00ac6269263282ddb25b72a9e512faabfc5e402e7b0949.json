@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "ALTER TABLE payments RENAME TO payments_gone",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "245e48a7251747835b00ac6269263282ddb25b72a9e512faabfc5e402e7b0949"
+}

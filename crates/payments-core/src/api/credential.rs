@@ -51,7 +51,7 @@ impl FromRequestParts<AppState> for Merchant {
                 pool: state.tenant.clone(),
             }),
             Ok(None) => Err(Problem::Unauthorized),
-            Err(_) => Err(Problem::Unavailable),
+            Err(err) => Err(Problem::Unavailable.because(&err)),
         }
     }
 }

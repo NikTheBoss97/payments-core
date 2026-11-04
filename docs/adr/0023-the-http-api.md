@@ -125,6 +125,20 @@ Error bodies:
 - A payment cannot reach `settled`, `failed` or an expired `voided` through the API
   until phase 4. Tests reach those states through the library.
 
+## Amendments
+
+- 2026-11-04: A 5xx's answer says nothing of its cause, so the server logs it, which
+  the Decision left out, although ADR-0024 and ADR-0027 assume logs. The project's owner
+  chose `tracing` and `tracing-subscriber` over one `eprintln!`, because they are what
+  Rust services use. They cost 4 crates, the subscriber and what it needs, since sqlx
+  builds `tracing` already. A line holds the status and the error's chain, and nothing
+  of the request, so no header can reach it. A panic's message comes from Rust's own
+  hook. A request refused for its own sake logs nothing, because anyone can send one.
+- 2026-11-04: Answers that the table left out, each a `problem+json` that is not stored:
+  a path that is no route is a 404, and a wrong method is a 405 with `Allow`. An ID in a
+  path has one spelling, and any other is a 404, as no payment is. A retry that spelled
+  the ID differently would otherwise read as another request.
+
 ## References
 
 - R. Fielding, M. Nottingham and J. Reschke, [RFC 9110: HTTP Semantics](https://www.rfc-editor.org/rfc/rfc9110.html) (IETF, 2022), sections 15.5.10 (409) and 15.5.21 (422).

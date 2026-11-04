@@ -45,7 +45,7 @@ impl FromRequestParts<AppState> for OwnPayment {
                 payment,
             }),
             Ok(_) => Err(Problem::NotFound),
-            Err(_) => Err(Problem::Unavailable),
+            Err(err) => Err(Problem::Unavailable.because(&err)),
         }
     }
 }
