@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SET ROLE payments_tenant",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "8b055606ce0b1fc972c157dfcb8ef83954b5a1929508881649ef1b1230b21b55"
+}

@@ -17,7 +17,8 @@ use common::payments::{
     create_command, eur, fee_rate, refund_command, steps, unbalanced_currencies, uncaused_postings,
 };
 use common::{
-    merchant_id, runtime_pool, runtime_transaction, tenant_pool, transition_id, wait_for_lock_wait,
+    merchant_id, runtime_pool, runtime_transaction, tenant_pool, tenant_pool_of_one, transition_id,
+    wait_for_lock_wait,
 };
 use futures_util::future::{join, join_all};
 use payments_core::accounts::{AccountRef, Psp};
@@ -32,22 +33,9 @@ use payments_core::payments::{
 };
 use payments_core::tenancy::Tenant;
 use sqlx::PgPool;
-use sqlx::postgres::PgPoolOptions;
 use uuid::Uuid;
 
 type TestResult = Result<(), Box<dyn Error>>;
-
-/// A pool of one connection that logs in as the tenant role, as [`tenant_pool`] does.
-async fn tenant_pool_of_one(pool: &PgPool) -> sqlx::Result<PgPool> {
-    let options = (*pool.connect_options())
-        .clone()
-        .username("payments_tenant")
-        .password("payments_tenant");
-    PgPoolOptions::new()
-        .max_connections(1)
-        .connect_with(options)
-        .await
-}
 
 /// Registers these merchants, as the system role.
 async fn register(pool: &PgPool, merchants: &[MerchantId]) -> TestResult {

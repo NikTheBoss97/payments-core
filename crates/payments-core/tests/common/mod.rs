@@ -12,6 +12,7 @@
     reason = "each test crate uses a different subset of these helpers"
 )]
 
+pub mod crashes;
 pub mod payments;
 
 use std::time::{Duration, Instant};
@@ -99,11 +100,22 @@ pub async fn tenant_login(pool: &PgPool) -> sqlx::Result<PgConnection> {
 /// A pool that logs in as the tenant role, as the one that merchant routes hold
 /// does (ADR-0025). Close it before the test returns, as for [`runtime_pool`].
 pub async fn tenant_pool(pool: &PgPool) -> sqlx::Result<PgPool> {
-    let options = (*pool.connect_options())
+    tenant_pool_with(pool, PgPoolOptions::new()).await
+}
+
+/// A [`tenant_pool`] with one connection. It shows that a path never needs two at
+/// once, and it hands each merchant the connection that the last one used, which is
+/// what a setting left behind would leak through.
+pub async fn tenant_pool_of_one(pool: &PgPool) -> sqlx::Result<PgPool> {
+    tenant_pool_with(pool, PgPoolOptions::new().max_connections(1)).await
+}
+
+async fn tenant_pool_with(pool: &PgPool, options: PgPoolOptions) -> sqlx::Result<PgPool> {
+    let login = (*pool.connect_options())
         .clone()
         .username("payments_tenant")
         .password("payments_tenant");
-    PgPoolOptions::new().connect_with(options).await
+    options.connect_with(login).await
 }
 
 /// A pool whose connections act as the runtime role, to call the library's
