@@ -418,13 +418,15 @@ enum OpenFailure {
 
 /// The pair (code, constraint) decides, never the message (ADR-0013). Any
 /// other integrity violation, or any `LG` code, is something the types rule
-/// out. Everything else, a lost connection included, may succeed when
-/// called again.
+/// out, and a refused statement is permanent (ADR-0025). Everything else, a
+/// lost connection included, may succeed when called again.
 fn classify_open(code: Option<&str>, constraint: Option<&str>) -> OpenFailure {
     match (code, constraint) {
         (Some("23503"), Some("accounts_currency_fkey")) => OpenFailure::UnknownCurrency,
         (Some("23505"), Some("accounts_pkey")) => OpenFailure::CandidateTaken,
-        (Some(code), _) if code.starts_with("23") || code.starts_with("LG") => {
+        (Some(code), _)
+            if code.starts_with("23") || code.starts_with("42") || code.starts_with("LG") =>
+        {
             OpenFailure::Invariant
         }
         _ => OpenFailure::Database,
@@ -580,6 +582,10 @@ mod tests {
             (Some("23514"), Some("accounts_kind_check"), Invariant),
             (Some("23514"), Some("currency_code_check"), Invariant),
             (Some("LG001"), Some("accounts_append_only"), Invariant),
+            // A refused statement is permanent: a missing privilege (ADR-0025), or a
+            // table or column that is not there.
+            (Some("42501"), None, Invariant),
+            (Some("42P01"), None, Invariant),
             // Anything else may succeed when called again.
             (Some("40P01"), None, Database),
             (Some("55P03"), None, Database),

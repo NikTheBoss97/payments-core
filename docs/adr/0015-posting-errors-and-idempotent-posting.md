@@ -101,6 +101,15 @@ Implementing `Display` and `Error`:
 - The SQLSTATE, constraint and DETAIL that ADR-0013 logs are read from the
   `#[source]` error, not copied into the variants.
 
+## Amendments
+
+- 2026-11-04: `post` reads class `42` as `Invariant`, as the commands do since
+  ADR-0025. A statement refused for lack of a privilege raises `42501`, which is
+  permanent, and it fell through to `NotConfirmed`, which told a caller to post
+  again forever. The decision is unchanged. The read that compares a stored
+  transaction keeps reporting `NotConfirmed` on any failure: a role that may write
+  entries but not read them is one that a catalog test rules out.
+
 ## References
 
 - PostgreSQL 18.6 source: `RelationGetIndexList()` in [relcache.c](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/utils/cache/relcache.c) ("sorted in order by OID").

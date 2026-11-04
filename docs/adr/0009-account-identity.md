@@ -133,6 +133,10 @@ Normal side:
   the key. If the key has an account, the opening has converged on it, as it does
   when the key was there first, and otherwise another account has the candidate,
   which stays a bug. The decision is unchanged.
+- 2026-11-04: `open_account` reads class `42` as `Invariant`, for the reason in
+  ADR-0015's amendment of this date. A failed read of an account still reports
+  `Database`: a read has no outcome to misstate, so calling again is at worst
+  pointless.
 
 ## References
 

@@ -430,3 +430,33 @@ async fn a_failed_statement_aborts_the_database_transaction(pool: PgPool) -> Tes
     app.close().await;
     Ok(())
 }
+
+#[sqlx::test]
+async fn a_post_refused_for_lack_of_a_privilege_is_a_bug(pool: PgPool) -> TestResult {
+    // A refusal is permanent, so reporting an unknown outcome would have the caller
+    // post again forever (ADR-0025). The owner takes a grant back, which lasts only in
+    // this test's own database: first for the entries, then for the header.
+    let app = runtime_pool(&pool).await?;
+    let accounts = open_accounts(&app).await?;
+    let lines = [(accounts.receivable, 100), (accounts.fees, -100)];
+
+    sqlx::query!("REVOKE INSERT ON ledger_entries FROM payments_app")
+        .execute(&pool)
+        .await?;
+    let err = post(&app, &eur(transaction_id(1), &lines))
+        .await
+        .unwrap_err();
+    assert!(matches!(err, PostError::Invariant { .. }), "{err:?}");
+
+    sqlx::query!(
+        "REVOKE INSERT (id, entry_count, currency) ON ledger_transactions FROM payments_app"
+    )
+    .execute(&pool)
+    .await?;
+    let err = post(&app, &eur(transaction_id(2), &lines))
+        .await
+        .unwrap_err();
+    assert!(matches!(err, PostError::Invariant { .. }), "{err:?}");
+    app.close().await;
+    Ok(())
+}

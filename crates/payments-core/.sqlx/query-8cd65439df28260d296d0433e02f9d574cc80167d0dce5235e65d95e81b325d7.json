@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "REVOKE INSERT (id, kind, party, currency, normal_side) ON accounts FROM payments_app",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "8cd65439df28260d296d0433e02f9d574cc80167d0dce5235e65d95e81b325d7"
+}

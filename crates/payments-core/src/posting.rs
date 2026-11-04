@@ -52,7 +52,8 @@ pub enum PostInError {
         source: sqlx::Error,
     },
     /// Any other integrity violation or `LG` code: the database caught what
-    /// the domain types should have prevented, a bug (ADR-0013).
+    /// the domain types should have prevented, a bug (ADR-0013). Or a refused
+    /// statement, which is permanent (ADR-0025).
     #[error("ledger transaction {id}: the database rejected it as invalid")]
     Invariant {
         id: Uuid,
@@ -310,7 +311,9 @@ fn classify(stage: Stage, code: Option<&str>, constraint: Option<&str>) -> Failu
         (Stage::Entries, Some("23503"), Some("ledger_entries_account_fkey")) => {
             Failure::AccountNotInCurrency
         }
-        (_, Some(code), _) if code.starts_with("23") || code.starts_with("LG") => {
+        (_, Some(code), _)
+            if code.starts_with("23") || code.starts_with("42") || code.starts_with("LG") =>
+        {
             Failure::Invariant
         }
         _ => Failure::Database,
@@ -384,11 +387,15 @@ mod tests {
                 Some("ledger_transactions_append_only"),
                 Invariant,
             ),
+            // A refused statement is permanent: a missing privilege (ADR-0025), or a
+            // table or column that is not there.
+            (Header, Some("42501"), None, Invariant),
+            (Entries, Some("42501"), None, Invariant),
+            (Header, Some("42P01"), None, Invariant),
             // Anything else may work when posted again.
             (Header, Some("55P03"), None, Database),
             (Entries, Some("40P01"), None, Database),
             (Entries, Some("57014"), None, Database),
-            (Header, Some("42501"), None, Database),
             (Header, None, None, Database),
         ] {
             assert_eq!(
@@ -401,11 +408,13 @@ mod tests {
 
     proptest! {
         #[test]
-        fn codes_outside_class_23_and_lg_are_database_failures(
+        fn codes_outside_classes_23_42_and_lg_are_database_failures(
             code in "[0-9A-Z]{5}",
             header in any::<bool>(),
         ) {
-            prop_assume!(!code.starts_with("23") && !code.starts_with("LG"));
+            prop_assume!(
+                !code.starts_with("23") && !code.starts_with("42") && !code.starts_with("LG")
+            );
             let stage = if header { Stage::Header } else { Stage::Entries };
             prop_assert_eq!(classify(stage, Some(&code), Some("any_constraint")), Failure::Database);
         }

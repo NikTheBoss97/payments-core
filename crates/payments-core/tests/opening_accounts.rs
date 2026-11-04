@@ -338,3 +338,22 @@ async fn rust_accepts_exactly_the_spellings_the_checks_accept(pool: PgPool) -> T
     tx.rollback().await?;
     Ok(())
 }
+
+#[sqlx::test]
+async fn an_opening_refused_for_lack_of_a_privilege_is_a_bug(pool: PgPool) -> TestResult {
+    // A refusal is permanent, so calling again cannot help (ADR-0025). The owner takes
+    // the grant back, which lasts only in this test's own database.
+    let app = runtime_pool(&pool).await?;
+    sqlx::query!(
+        "REVOKE INSERT (id, kind, party, currency, normal_side) ON accounts FROM payments_app"
+    )
+    .execute(&pool)
+    .await?;
+    let fees = platform("fee_revenue", "EUR");
+    let err = open_account(&app, account_id(1), &fees, NormalSide::Credit)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, AccountError::Invariant { .. }), "{err:?}");
+    app.close().await;
+    Ok(())
+}
