@@ -21,4 +21,4 @@ publication: its title, authors, year and link.
 | [Testing for correctness](testing.md) | Property-based testing, mutation testing, failure injection and testing database guarantees. | 10 |
 | [Modelling the domain in Rust](rust.md) | Types that carry their invariants, and making illegal states unrepresentable. | 7 |
 | [Benchmarking](benchmarking.md) | Measuring latency and throughput without fooling yourself. | 8 |
-| [Engineering practice](engineering-practice.md) | Continuous integration and recording decisions. | 7 |
+| [Engineering practice](engineering-practice.md) | Continuous integration, the software supply chain, code scanning and recording decisions. | 18 |
