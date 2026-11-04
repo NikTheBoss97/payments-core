@@ -9,6 +9,9 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+# The HTTP server (ADR-0023). HTTP/1.1 only, and none of the default extractors: a
+# body is read raw, because its fingerprint needs the exact bytes (ADR-0026).
+axum = { version = "0.8.9", default-features = false, features = ["http1", "tokio"] }
 # The secret of an API key, from the operating system (ADR-0024). uuid builds this
 # crate already.
 getrandom = "0.4"
@@ -20,6 +23,9 @@ sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio",
 # Derives Display and Error for the error types (ADR-0015). sqlx depends on
 # it too.
 thiserror = "2.0.21"
+# The server's runtime (ADR-0023). 1.54.0 has a data race in its timers
+# (GHSA-5wjr-9356-4wc8), so this asks for the release that reverted it.
+tokio = { version = "1.54.1", features = ["macros", "net", "rt-multi-thread"] }
 # UUIDv7 IDs, created by the caller (ADR-0005: 1.27 or later).
 uuid = { version = "1.28", features = ["v7"] }
 
@@ -34,6 +40,12 @@ proptest = { version = "1.12.0", default-features = false, features = ["std"] }
 # #[sqlx::test] applies the migrations to each test database; the library
 # never runs them (ADR-0008). Cargo adds this feature to the one above.
 sqlx = { version = "0.9", default-features = false, features = ["migrate"] }
+# The sockets, timers and signals of the tests that hang up on the server (ADR-0023).
+# Cargo adds these features to the one above.
+tokio = { version = "1.54.1", features = ["io-util", "sync", "time"] }
+# ServiceExt::oneshot, to send a request to the router without a socket (ADR-0023).
+# axum builds this crate already.
+tower = { version = "0.5", default-features = false, features = ["util"] }
 
 [lints]
 workspace = true
