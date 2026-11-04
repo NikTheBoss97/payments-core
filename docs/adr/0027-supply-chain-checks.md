@@ -192,12 +192,28 @@ Catching SQL built at run time, which CodeQL misses:
   `sqlx-cli` in CI has no lock file (ADR-0006), and scanning a running server or an
   image waits until there is a server and an image.
 
+## Amendments
+
+- 2026-11-04: Dependabot's first run on `main` shows how it treats
+  `[patch.crates-io]`, which the Consequences left open. Its Cargo parser drops every
+  crate named in `[patch]` (`file_parser.rb`, under `# TODO: Handle patched
+  dependencies`), so `sqlx`, `sqlx-core`, `sqlx-macros`, `sqlx-macros-core` and
+  `sqlx-postgres` are absent from the run's dependency snapshot, whatever the `ignore`
+  says. The `ignore` stops only `sqlx-mysql` and `sqlx-sqlite`, which the lock file
+  takes from the same git commit although the manifest does not patch them. Moving to
+  0.9.1 also removes the `ignore`: left behind, it would stop every sqlx update, and
+  nothing would show that. GitHub's dependency graph lists all 7 crates at 0.9.0, so
+  an advisory on one should raise an alert with no fix pull request possible. That is
+  unverified, because no such advisory exists to test with; the second `cargo-deny`
+  run covers the case regardless.
+
 ## References
 
 - Rust Secure Code Working Group, [RustSec Advisory Database](https://rustsec.org/).
 - Embark Studios, [cargo-deny](https://embarkstudios.github.io/cargo-deny/), and its action's [Dockerfile at v2.1.1](https://github.com/EmbarkStudios/cargo-deny-action/blob/v2.1.1/Dockerfile).
 - The Cargo Book, [Publishing on crates.io](https://doc.rust-lang.org/cargo/reference/publishing.html) ("The version can never be overwritten") and [`cargo install`](https://doc.rust-lang.org/cargo/commands/cargo-install.html) (`--locked`).
 - GitHub Docs, [About Dependabot alerts](https://docs.github.com/en/code-security/dependabot/dependabot-alerts/about-dependabot-alerts), [About the GitHub Advisory Database](https://docs.github.com/en/code-security/security-advisories/working-with-global-security-advisories-from-the-github-advisory-database/about-the-github-advisory-database), [Dependabot options reference](https://docs.github.com/en/code-security/reference/supply-chain-security/dependabot-options-reference) (`cooldown`, `ignore`, `allow`), [About code scanning with CodeQL](https://docs.github.com/en/code-security/code-scanning/introduction-to-code-scanning/about-code-scanning-with-codeql), [Customizing your advanced setup](https://docs.github.com/en/code-security/code-scanning/creating-an-advanced-setup-for-code-scanning/customizing-your-advanced-setup-for-code-scanning) (`paths-ignore`) and [Events that trigger workflows](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows) (`schedule`).
+- dependabot-core `6a43f5c`: [cargo/lib/dependabot/cargo/file_parser.rb](https://github.com/dependabot/dependabot-core/blob/6a43f5c18a7120386064c4afabb6a3e803d63d90/cargo/lib/dependabot/cargo/file_parser.rb#L39-L40) (`# TODO: Handle patched dependencies`).
 - CodeQL, [Supported languages and frameworks](https://codeql.github.com/docs/codeql-overview/supported-languages-and-frameworks/), and its [model of sqlx at CLI 2.27.4](https://github.com/github/codeql/blob/codeql-cli/v2.27.4/rust/ql/lib/codeql/rust/frameworks/sqlx.model.yml).
 - sqlx `f1e94ec`: [sqlx-core/src/sql_str.rs](https://github.com/transact-rs/sqlx/blob/f1e94ec34dd5f11ad6488a3a8ac7988439a3f757/sqlx-core/src/sql_str.rs) (`SqlSafeStr` and `AssertSqlSafe`).
 - Clippy, [Lint configuration](https://doc.rust-lang.org/clippy/lint_configuration.html) (`disallowed-methods`, `disallowed-types`).
