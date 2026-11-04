@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "CREATE FUNCTION reject_at_commit() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE SQLSTATE 'LG002' USING MESSAGE = 'rejected at commit'; END $$",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "273cd2046048d80fefbbe5b25714771320fbed19fda8bdf4325ee7fca6587523"
+}
