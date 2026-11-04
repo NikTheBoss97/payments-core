@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "ALTER TABLE payments DROP CONSTRAINT payments_psp_check",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "b69924420c059251164f69d6f4a711cb3b4aafb1af69dafd0dc5660b92968343"
+}
