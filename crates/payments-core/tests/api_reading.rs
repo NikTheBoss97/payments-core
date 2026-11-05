@@ -119,6 +119,7 @@ async fn an_id_that_is_not_one_reads_exactly_like_no_payment(pool: PgPool) -> Te
     let upper = canonical.to_uppercase();
     let braced = format!("%7B{canonical}%7D");
     let urn = format!("urn:uuid:{canonical}");
+    let encoded = canonical.replacen('0', "%30", 1);
     let not_seven = Uuid::parse_str("019b76da-a800-4000-8000-000000000001")?.to_string();
     let nil = Uuid::nil().to_string();
 
@@ -132,6 +133,7 @@ async fn an_id_that_is_not_one_reads_exactly_like_no_payment(pool: PgPool) -> Te
         upper.as_str(),
         braced.as_str(),
         urn.as_str(),
+        encoded.as_str(),
         not_seven.as_str(),
         nil.as_str(),
     ] {
