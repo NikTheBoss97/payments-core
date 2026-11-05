@@ -8,7 +8,7 @@ What a client of this service can rely on. The decisions behind it are in
 [ADR-0025](adr/0025-tenant-isolation.md) (isolation) and
 [ADR-0026](adr/0026-idempotency-keys.md) (idempotency keys).
 
-This is being built route by route: so far, a payment can be created and read.
+This is being built route by route: so far, a merchant can take a payment through its life.
 
 ## Running the server
 
@@ -66,7 +66,15 @@ long answers [`unavailable`](#unavailable).
 A body is JSON, whatever its `Content-Type` says, and at most 2 MB. Unknown fields are
 refused, so a misspelt or forbidden one is never silently ignored. Amounts are integers in
 minor units: a fraction or an exponent is refused, even `100.0`. A currency is an ISO 4217
-code in upper case.
+code in upper case. A time is an RFC 3339 string that names its offset, and it is kept to
+whole microseconds in UTC.
+
+A command on a payment answers `200` with where the payment now stands: the step's `seq`, the
+statuses it moved between, and what can still be refunded.
+
+```json
+{ "seq": 1, "from": "created", "to": "authorized", "refundable": 0 }
+```
 
 ### `POST /payments`
 
@@ -87,6 +95,32 @@ operator set, and the provider is the mock until there are others.
   "to": "created",
   "refundable": 0
 }
+```
+
+### `POST /payments/{id}/authorize`
+
+Records that the provider authorized the payment, for at most the amount requested. Until
+the provider's webhooks exist, this is the merchant's word for it.
+
+```json
+{ "amount": 8000, "expires_at": "2027-01-01T00:00:00Z" }
+```
+
+### `POST /payments/{id}/capture`
+
+Records a capture, for at most the amount authorized, and posts it to the ledger.
+
+```json
+{ "amount": 8000, "captured_at": "2026-12-01T00:00:00Z" }
+```
+
+### `POST /payments/{id}/refund`
+
+Records a refund and posts it to the ledger. Below what can still be refunded it is partial,
+and at that amount it is final.
+
+```json
+{ "amount": 3000, "refunded_at": "2026-12-02T00:00:00Z" }
 ```
 
 ### `GET /payments/{id}`
@@ -152,6 +186,19 @@ gets its answer.
 
 `422`. A well-formed code that the service does not know. Nothing is stored, because
 currencies change only by a migration.
+
+### illegal-move
+
+`409`. The payment's status does not allow this. It is always about the payment, and never about
+a request still in flight, which the service does not answer. It is final and stored under the
+key, so a copy of the request delivered later gets this too, even if the status has since moved
+on. Trying again takes a new key.
+
+### amount-above-limit
+
+`422`. The amount is above what the payment allows: the amount requested, the amount authorized,
+or what can still be refunded. It is final and stored under the key, as for an
+[`illegal-move`](#illegal-move).
 
 ### unavailable
 
