@@ -1,0 +1,21 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT count(*) AS \"tables!\" FROM pg_class c\n           JOIN pg_namespace n ON n.oid = c.relnamespace\n           WHERE n.nspname = 'public' AND c.relrowsecurity",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "tables!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "1b588e11e8f5c7a33216a4cfc9e7655fcec70d42a95a9e40126ba2b35a26dad5"
+}
