@@ -11,7 +11,7 @@ mod common;
 use std::error::Error;
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use common::api::{Pools, written};
 use common::crashes::{assert_books_are_whole, balances};
@@ -30,7 +30,7 @@ use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWriteExt, BufRead
 use tokio::net::TcpStream;
 use tokio::process::{Child, Command};
 use tokio::task::JoinHandle;
-use tokio::time::timeout;
+use tokio::time::{sleep, timeout};
 use uuid::Uuid;
 
 type TestResult = Result<(), Box<dyn Error>>;
@@ -87,6 +87,19 @@ struct Server {
     collectors: Vec<JoinHandle<()>>,
 }
 
+/// What outlives a server that was killed: what starts it again, and what it wrote.
+struct Killed {
+    operator: ApiKeySecret,
+    log: Arc<Mutex<String>>,
+}
+
+impl Killed {
+    /// The binary started again, on another port, under the same operator's digest.
+    async fn restart(self, pool: &PgPool) -> Result<Server, Box<dyn Error>> {
+        Server::launched(pool, self.operator, self.log).await
+    }
+}
+
 /// Keeps a stream's lines in the log, so that the process never blocks on a full pipe.
 fn collect(
     stream: impl AsyncRead + Unpin + Send + 'static,
@@ -107,11 +120,18 @@ impl Server {
     /// Starts the binary, and waits until it says where it is listening. The port is one
     /// that the system chose, so tests never collide.
     async fn start(pool: &PgPool) -> Result<Self, Box<dyn Error>> {
-        let operator = ApiKeySecret::generate();
+        let log = Arc::new(Mutex::new(String::new()));
+        Self::launched(pool, ApiKeySecret::generate(), log).await
+    }
+
+    async fn launched(
+        pool: &PgPool,
+        operator: ApiKeySecret,
+        log: Arc<Mutex<String>>,
+    ) -> Result<Self, Box<dyn Error>> {
         let mut child = configured(pool, &operator).spawn()?;
         let stdout = child.stdout.take().expect("a piped stdout");
         let stderr = child.stderr.take().expect("a piped stderr");
-        let log = Arc::new(Mutex::new(String::new()));
         let from_stderr = collect(stderr, &log);
         let mut lines = BufReader::new(stdout).lines();
         let address = timeout(Duration::from_secs(30), async {
@@ -245,14 +265,50 @@ impl Server {
     /// drops its database without `FORCE`, which PostgreSQL refuses while a connection is
     /// open. It returns everything that the server wrote: a pipe ends with its process,
     /// so waiting for the collectors means that no line is still on its way.
-    async fn stop(mut self) -> Result<String, Box<dyn Error>> {
+    async fn stop(self) -> Result<String, Box<dyn Error>> {
+        let killed = self.kill().await?;
+        let log = killed
+            .log
+            .lock()
+            .expect("no test panics while holding this");
+        Ok(log.clone())
+    }
+
+    /// Ends the process at once. It has no graceful shutdown to skip, so this is what any stop
+    /// amounts to, and a crash as well (`docs/api.md`).
+    async fn kill(mut self) -> Result<Killed, Box<dyn Error>> {
         self.child.kill().await?;
         self.child.wait().await?;
         for collector in self.collectors {
             collector.await?;
         }
-        let log = self.log.lock().expect("no test panics while holding this");
-        Ok(log.clone())
+        Ok(Killed {
+            operator: self.operator,
+            log: self.log,
+        })
+    }
+
+    /// A `POST` on a connection of its own, whose answer nobody waits for. The connection stays
+    /// open for as long as the test holds it.
+    async fn sent(
+        &self,
+        path: &str,
+        secret: &str,
+        key: &str,
+        body: &str,
+    ) -> Result<TcpStream, Box<dyn Error>> {
+        let mut stream = TcpStream::connect(&self.address).await?;
+        let length = body.len();
+        stream
+            .write_all(
+                format!(
+                    "POST {path} HTTP/1.1\r\nHost: test\r\nAuthorization: Bearer {secret}\r\n\
+                     Idempotency-Key: \"{key}\"\r\nContent-Length: {length}\r\n\r\n{body}"
+                )
+                .as_bytes(),
+            )
+            .await?;
+        Ok(stream)
     }
 }
 
@@ -596,6 +652,163 @@ async fn copies_held_behind_a_payments_lock_at_once_on_the_binary_move_the_money
     let log = server.stop().await?;
     assert!(!log.contains("ERROR"), "{log}");
     assert_no_credential(&log, secret.expose());
+    Ok(())
+}
+
+/// Waits until the sessions of a server that was killed have ended. A session ends when it next
+/// reads from its client, and one waiting on a lock reads nothing until it has that lock, so
+/// call this once those locks are free.
+async fn wait_for_sessions_to_end(pool: &PgPool) -> TestResult {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let left = sqlx::query_scalar!(
+            r#"SELECT count(*) AS "left!" FROM pg_stat_activity
+                WHERE datname = current_database()
+                  AND usename IN ('payments_tenant', 'payments_app')"#
+        )
+        .fetch_one(pool)
+        .await?;
+        if left == 0 {
+            return Ok(());
+        }
+        assert!(
+            Instant::now() < deadline,
+            "{left} sessions outlived the server"
+        );
+        sleep(Duration::from_millis(10)).await;
+    }
+}
+
+#[sqlx::test]
+async fn what_waits_when_the_server_is_killed_is_gone_and_applies_once_after_a_restart(
+    pool: PgPool,
+) -> TestResult {
+    // A capture waits on its payment's lock, and a registration on its key's unique index, so
+    // neither can have reached its COMMIT when the process goes. Its sessions then roll back,
+    // however they end, and the server that comes up next has nothing to clean up.
+    let (secret, payment) = seeded(&pool).await?;
+    let server = Server::start(&pool).await?;
+    let operator = server.operator.expose().to_owned();
+    let authorize = format!("/payments/{payment}/authorize");
+    let (status, body) = server
+        .post(&authorize, secret.expose(), "authorize", AUTHORIZE)
+        .await?;
+    assert_eq!(status, OK, "{body}");
+    let capture = format!("/payments/{payment}/capture");
+
+    let mut holder = pool.begin().await?;
+    take_lock(&mut holder, payment).await?;
+    let fingerprint = Fingerprint::of("POST", "/merchants", REGISTER.as_bytes());
+    let mut first = pool.begin().await?;
+    sqlx::query!(
+        "INSERT INTO operator_idempotency_records (key, fingerprint, status, body) \
+         VALUES ('race', $1, 201, '{}')",
+        fingerprint.as_bytes()
+    )
+    .execute(&mut *first)
+    .await?;
+    let answers = stored_answers(&pool).await?.len();
+
+    let capturing = server
+        .sent(&capture, secret.expose(), "capture", CAPTURE)
+        .await?;
+    let registering = server
+        .sent("/merchants", &operator, "race", REGISTER)
+        .await?;
+    wait_for_lock_waits(&pool, "advisory", 1).await?;
+    wait_for_lock_waits(&pool, "transactionid", 1).await?;
+
+    let killed = server.kill().await?;
+    // They outlive the process for as long as they wait: PostgreSQL meets a lost client only
+    // when it next touches the socket, which is when each gets what it waits for.
+    wait_for_lock_waits(&pool, "advisory", 1).await?;
+    wait_for_lock_waits(&pool, "transactionid", 1).await?;
+    holder.rollback().await?;
+    first.rollback().await?;
+    wait_for_sessions_to_end(&pool).await?;
+    drop((capturing, registering));
+
+    assert_eq!(steps(&pool, payment).await?, 2);
+    assert_eq!(merchants(&pool).await?, 1);
+    assert_eq!(balances(&pool, merchant_id(1)).await?, [0, 0, 0]);
+    assert_eq!(stored_answers(&pool).await?.len(), answers);
+
+    let server = killed.restart(&pool).await?;
+    let body = server
+        .applied(OK, &capture, secret.expose(), "capture", CAPTURE)
+        .await?;
+    assert_eq!(
+        body,
+        r#"{"seq":2,"from":"authorized","to":"captured","refundable":8000}"#
+    );
+    assert_eq!(steps(&pool, payment).await?, 3);
+    assert_eq!(
+        balances(&pool, merchant_id(1)).await?,
+        [AUTHORIZED, FEE - AUTHORIZED, -FEE]
+    );
+    server
+        .applied(CREATED, "/merchants", &operator, "race", REGISTER)
+        .await?;
+    assert_eq!(merchants(&pool).await?, 2);
+    assert_books_are_whole(&pool).await?;
+
+    let log = server.stop().await?;
+    assert!(!log.contains("ERROR"), "{log}");
+    assert_no_credential(&log, &operator);
+    assert_no_credential(&log, secret.expose());
+    Ok(())
+}
+
+#[sqlx::test]
+async fn an_answer_that_nobody_received_outlives_the_server_that_gave_it(
+    pool: PgPool,
+) -> TestResult {
+    // The other side of a crash: the capture committed, and the process went before anyone read
+    // its answer. Only the key's record knows, and it needs nothing from the process.
+    let (secret, payment) = seeded(&pool).await?;
+    let server = Server::start(&pool).await?;
+    let authorize = format!("/payments/{payment}/authorize");
+    let (status, body) = server
+        .post(&authorize, secret.expose(), "authorize", AUTHORIZE)
+        .await?;
+    assert_eq!(status, OK, "{body}");
+    let capture = format!("/payments/{payment}/capture");
+
+    let capturing = server
+        .sent(&capture, secret.expose(), "capture", CAPTURE)
+        .await?;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while steps(&pool, payment).await? < 3 {
+        assert!(Instant::now() < deadline, "the capture did not land");
+        sleep(Duration::from_millis(10)).await;
+    }
+    let killed = server.kill().await?;
+    wait_for_sessions_to_end(&pool).await?;
+    drop(capturing);
+
+    let server = killed.restart(&pool).await?;
+    let (status, body) = server
+        .post(&capture, secret.expose(), "capture", CAPTURE)
+        .await?;
+    assert_eq!(status, OK, "{body}");
+    assert_eq!(
+        body,
+        r#"{"seq":2,"from":"authorized","to":"captured","refundable":8000}"#
+    );
+    assert_eq!(steps(&pool, payment).await?, 3);
+    assert_eq!(
+        balances(&pool, merchant_id(1)).await?,
+        [AUTHORIZED, FEE - AUTHORIZED, -FEE]
+    );
+    assert_books_are_whole(&pool).await?;
+
+    // The control: under a new key this is a new request, so the table of moves decides, and
+    // refuses. So the answer above came from the key, and this server does decide.
+    let (status, body) = server
+        .post(&capture, secret.expose(), "another", CAPTURE)
+        .await?;
+    assert_eq!(status, "HTTP/1.1 409 Conflict", "{body}");
+    server.stop().await?;
     Ok(())
 }
 
