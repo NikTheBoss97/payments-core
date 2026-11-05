@@ -343,6 +343,8 @@ fn every_command() -> Vec<(&'static str, String)> {
         ("authorize", AUTHORIZE.to_owned()),
         ("capture", CAPTURE.to_owned()),
         ("refund", refund_of(1)),
+        ("void", String::new()),
+        ("cancel", String::new()),
     ]
 }
 
@@ -540,6 +542,92 @@ async fn a_verb_that_is_no_command_is_a_404(pool: PgPool) -> TestResult {
         read(&pools, &secret, payment).await?["status"],
         "authorized"
     );
+    pools.close().await;
+    Ok(())
+}
+
+#[sqlx::test]
+async fn a_payment_is_cancelled_before_its_authorization_and_voided_after(
+    pool: PgPool,
+) -> TestResult {
+    let pools = Pools::login(&pool).await?;
+    let (merchant, secret) = a_merchant(&pools, 1).await?;
+
+    let payment = created(&pools, &secret, "create").await?;
+    let reply = step(&pools, &secret, payment, "cancel", "c", "").await;
+    assert_reply(&reply, 1, "created", "voided", 0);
+    let again = step(&pools, &secret, payment, "cancel", "c", "").await;
+    assert_eq!(again.status, reply.status);
+    assert_eq!(again.body, reply.body);
+    assert_eq!(read(&pools, &secret, payment).await?["status"], "voided");
+
+    let payment = authorized(&pools, &secret, 2).await?;
+    let reply = step(&pools, &secret, payment, "void", "v", "").await;
+    assert_reply(&reply, 2, "authorized", "voided", 0);
+    let again = step(&pools, &secret, payment, "void", "v", "").await;
+    assert_eq!(again.body, reply.body);
+    assert_eq!(steps(&pool, payment).await?, 3);
+
+    // Neither moved any money: nothing had been captured.
+    assert_eq!(balances(&pools.system, merchant).await?, [0, 0, 0]);
+    pools.close().await;
+    Ok(())
+}
+
+#[sqlx::test]
+async fn cancel_and_void_are_final_refusals_where_the_status_forbids_them(
+    pool: PgPool,
+) -> TestResult {
+    let pools = Pools::login(&pool).await?;
+    let (_, secret) = a_merchant(&pools, 1).await?;
+    let fresh = created(&pools, &secret, "create").await?;
+    let held = authorized(&pools, &secret, 2).await?;
+    let taken = captured(&pools, &secret, 3).await?;
+    let before = records(&pool).await?;
+
+    let cases = [
+        ("void", fresh),
+        ("cancel", held),
+        ("void", taken),
+        ("cancel", taken),
+    ];
+    for (n, (verb, payment)) in cases.into_iter().enumerate() {
+        let reply = step(&pools, &secret, payment, verb, &format!("k-{n}"), "").await;
+        assert_eq!(reply.status, StatusCode::CONFLICT, "{verb}: {reply:?}");
+        assert_eq!(reply.body, Problem::IllegalMove.body(), "{verb}");
+    }
+    assert_eq!(records(&pool).await?, before + 4);
+    assert_eq!(read(&pools, &secret, taken).await?["status"], "captured");
+    pools.close().await;
+    Ok(())
+}
+
+#[sqlx::test]
+async fn a_body_on_a_route_that_takes_none_is_refused_and_leaves_the_key_free(
+    pool: PgPool,
+) -> TestResult {
+    // Not even an empty object: a route that ignored a body could hide a client's mistake,
+    // and two bodies that it ignored would still read as two requests under a key.
+    let pools = Pools::login(&pool).await?;
+    let (_, secret) = a_merchant(&pools, 1).await?;
+    let fresh = created(&pools, &secret, "create").await?;
+    let held = authorized(&pools, &secret, 2).await?;
+
+    for (verb, payment) in [("cancel", fresh), ("void", held)] {
+        for body in [
+            "{}", "null", " ", "
+", "anything",
+        ] {
+            let reply = step(&pools, &secret, payment, verb, "k", body).await;
+            assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{verb} {body:?}");
+            assert_eq!(reply.body, Problem::MalformedBody.body(), "{verb} {body:?}");
+        }
+        let key = format!("k-{verb}");
+        let refused = step(&pools, &secret, payment, verb, &key, "{}").await;
+        assert_eq!(refused.status, StatusCode::BAD_REQUEST, "{verb}");
+        let reply = step(&pools, &secret, payment, verb, &key, "").await;
+        assert_eq!(reply.status, StatusCode::OK, "{verb}: {reply:?}");
+    }
     pools.close().await;
     Ok(())
 }

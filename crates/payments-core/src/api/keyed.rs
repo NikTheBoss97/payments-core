@@ -113,6 +113,15 @@ impl KeyedRequest {
     pub(super) fn body_as<T: DeserializeOwned>(&self) -> Result<T, Problem> {
         serde_json::from_slice(&self.body).map_err(|_| Problem::MalformedBody)
     }
+
+    /// For a route that takes no body.
+    pub(super) fn no_body(&self) -> Result<(), Problem> {
+        if self.body.is_empty() {
+            Ok(())
+        } else {
+            Err(Problem::MalformedBody)
+        }
+    }
 }
 
 /// An answer as a response, the same whichever attempt made it. Only a final answer is

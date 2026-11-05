@@ -123,6 +123,19 @@ and at that amount it is final.
 { "amount": 3000, "refunded_at": "2026-12-02T00:00:00Z" }
 ```
 
+### `POST /payments/{id}/void`
+
+Records that an authorization was voided. It takes no body, not even `{}`.
+
+### `POST /payments/{id}/cancel`
+
+Cancels a payment before its authorization. It takes no body, not even `{}`.
+
+### What is not a route
+
+A declined authorization, an expired one and a settlement report what the provider decided, so
+a merchant cannot claim them. They arrive with the provider's webhooks.
+
 ### `GET /payments/{id}`
 
 The payment's terms, its status and what can still be refunded.

@@ -21,8 +21,8 @@ use crate::lifecycle::Refused;
 use crate::money::{Currency, PositiveAmount};
 use crate::payments::{
     self as commands, AccountCandidates, Authorize, AuthorizeError, Capture, CaptureError,
-    CreateError, CreatePayment, Outcome, Payment, Recorded, Refund, RefundError, create_payment,
-    find_payment, merchant_fee_rate,
+    CreateError, CreatePayment, Outcome, Payment, Recorded, Refund, RefundError, StepCommand,
+    StepError, create_payment, find_payment, merchant_fee_rate,
 };
 use crate::times::BusinessTime;
 
@@ -320,6 +320,56 @@ async fn attempt_refund(own: &OwnPayment, request: &KeyedRequest) -> Result<Atte
             | RefundError::Invariant { .. }),
         ) => Err(Problem::Internal.because(&err)),
     }
+}
+
+/// The command of a route that takes no body. Not even an empty object: two bodies that it
+/// ignored would still read as two requests under a key.
+fn step_command(own: &OwnPayment, request: &KeyedRequest) -> Result<StepCommand, Problem> {
+    request.no_body()?;
+    Ok(StepCommand {
+        step: TransitionId::now_v7(),
+        payment: own.id,
+    })
+}
+
+/// What a step with no amount came to.
+fn after_step(result: Result<Outcome, StepError>) -> Result<Attempt, Problem> {
+    match result {
+        Ok(outcome) => Ok(applied(outcome)),
+        Err(StepError::Illegal(illegal)) => Ok(refused(illegal.into())),
+        Err(StepError::KeyTaken) => Ok(Attempt::KeyTaken),
+        Err(StepError::NotFound { .. }) => Err(Problem::NotFound),
+        Err(err @ StepError::NotConfirmed { .. }) => Err(Problem::Unavailable.because(&err)),
+        Err(err @ (StepError::Mismatch { .. } | StepError::Invariant { .. })) => {
+            Err(Problem::Internal.because(&err))
+        }
+    }
+}
+
+/// `POST /payments/{id}/void`.
+pub(super) async fn void(own: OwnPayment, request: KeyedRequest) -> Response {
+    request
+        .answer(own.merchant.tenant(), || attempt_void(&own, &request))
+        .await
+}
+
+async fn attempt_void(own: &OwnPayment, request: &KeyedRequest) -> Result<Attempt, Problem> {
+    let command = step_command(own, request)?;
+    let seal = request.seal(&decided);
+    after_step(commands::void(own.merchant.tenant().sealed(&seal), &command).await)
+}
+
+/// `POST /payments/{id}/cancel`.
+pub(super) async fn cancel(own: OwnPayment, request: KeyedRequest) -> Response {
+    request
+        .answer(own.merchant.tenant(), || attempt_cancel(&own, &request))
+        .await
+}
+
+async fn attempt_cancel(own: &OwnPayment, request: &KeyedRequest) -> Result<Attempt, Problem> {
+    let command = step_command(own, request)?;
+    let seal = request.seal(&decided);
+    after_step(commands::cancel(own.merchant.tenant().sealed(&seal), &command).await)
 }
 
 /// A payment as `GET /payments/{id}` shows it: its terms, its status and what can still be
