@@ -1,0 +1,21 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT count(*) AS \"left!\" FROM pg_stat_activity\n                WHERE datname = current_database()\n                  AND usename IN ('payments_tenant', 'payments_app')",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "left!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "4b9c685d67836fd55c4a7ed5f95b30c3290a8f5558ba6a01a223d52174a28c0a"
+}
