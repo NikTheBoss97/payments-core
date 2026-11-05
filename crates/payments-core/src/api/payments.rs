@@ -3,15 +3,15 @@
 //! A merchant's routes (ADR-0023), and the one extractor that gives every
 //! `/payments/{id}` route its ID (ADR-0025).
 
-use axum::extract::{FromRequestParts, Path};
+use axum::extract::FromRequestParts;
 use axum::http::request::Parts;
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use serde::{Deserialize, Serialize};
 use sqlx::types::chrono::{DateTime, Utc};
-use uuid::Uuid;
 
 use super::keyed::{Attempt, KeyedRequest};
+use super::path_id::PathId;
 use super::problem::Problem;
 use super::{AppState, Merchant};
 use crate::accounts::Psp;
@@ -45,10 +45,7 @@ impl FromRequestParts<AppState> for OwnPayment {
     /// not leak. A payment's merchant never changes, so this cannot go stale.
     async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, Problem> {
         let merchant = Merchant::from_request_parts(parts, state).await?;
-        let Path(text) = Path::<String>::from_request_parts(parts, state)
-            .await
-            .map_err(|_| Problem::NotFound)?;
-        let id = parse_payment_id(&text).ok_or(Problem::NotFound)?;
+        let PathId(id) = PathId::<PaymentId>::from_request_parts(parts, state).await?;
         match find_payment(merchant.tenant(), id).await {
             Ok(Some(payment)) if payment.merchant == merchant.id() => Ok(Self {
                 merchant,
@@ -59,17 +56,6 @@ impl FromRequestParts<AppState> for OwnPayment {
             Err(err) => Err(Problem::Unavailable.because(&err)),
         }
     }
-}
-
-/// A payment's ID in the one spelling that the API uses. Any other spelling of a real ID
-/// is refused, because one payment has one path: a retry that spelled it differently
-/// would read as another request (ADR-0026).
-fn parse_payment_id(text: &str) -> Option<PaymentId> {
-    let id = Uuid::try_parse(text).ok()?;
-    if id.to_string() != text {
-        return None;
-    }
-    PaymentId::try_from(id).ok()
 }
 
 /// Where a command landed, as a client sees it: the `Recorded` of ADR-0019, with statuses

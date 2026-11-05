@@ -4,6 +4,7 @@
 
 mod credential;
 mod keyed;
+mod path_id;
 mod payments;
 pub mod problem;
 
