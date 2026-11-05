@@ -18,6 +18,10 @@ impl<S: Send + Sync, T: TryFrom<Uuid>> FromRequestParts<S> for PathId<T> {
     type Rejection = Problem;
 
     async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Problem> {
+        // `Path` decodes percent-encoding, which would give a real ID another spelling.
+        if parts.uri.path().contains('%') {
+            return Err(Problem::NotFound);
+        }
         let Path(text) = Path::<String>::from_request_parts(parts, state)
             .await
             .map_err(|_| Problem::NotFound)?;
