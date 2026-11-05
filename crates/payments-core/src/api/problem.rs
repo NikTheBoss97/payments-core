@@ -12,6 +12,8 @@ use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use serde::Serialize;
 
+use crate::idempotency::Answer;
+
 /// A problem's `type` is an absolute URI into the document that explains it.
 const TYPE_BASE: &str = "https://github.com/NikTheBoss97/payments-core/blob/main/docs/api.md#";
 
@@ -36,6 +38,12 @@ pub enum Problem {
     KeyReused,
     /// A currency that is well formed but not one that the service knows (ADR-0023).
     UnknownCurrency,
+    /// The payment's status does not allow this move. It is final, so it is stored under
+    /// the key (ADR-0026).
+    IllegalMove,
+    /// The amount is above what the payment allows. It is final, so it is stored under the
+    /// key (ADR-0026).
+    AmountAboveLimit,
     /// The database could not answer, or the outcome is unknown. Sending the request
     /// again is safe.
     Unavailable,
@@ -92,6 +100,16 @@ impl Problem {
                 "unknown-currency",
                 "The service does not know this currency",
             ),
+            Self::IllegalMove => (
+                StatusCode::CONFLICT,
+                "illegal-move",
+                "The payment's status does not allow this",
+            ),
+            Self::AmountAboveLimit => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "amount-above-limit",
+                "The amount is above what the payment allows",
+            ),
             Self::Unavailable => (
                 StatusCode::SERVICE_UNAVAILABLE,
                 "unavailable",
@@ -120,6 +138,15 @@ impl Problem {
             status: status.as_u16(),
         })
         .expect("strings and a number always serialize")
+    }
+
+    /// This problem as a final answer, for a key's record to hold (ADR-0026).
+    #[must_use]
+    pub(super) fn answer(self) -> Answer {
+        Answer {
+            status: i16::try_from(self.status().as_u16()).expect("an HTTP status fits"),
+            body: self.body(),
+        }
     }
 
     /// This problem, whose cause goes to the log, because its answer says nothing of it.
@@ -161,7 +188,7 @@ mod tests {
     use super::*;
 
     /// Every problem. The match stops a new one from compiling until it is added here.
-    const ALL: [Problem; 10] = [
+    const ALL: [Problem; 12] = [
         Problem::Unauthorized,
         Problem::NotFound,
         Problem::MethodNotAllowed,
@@ -170,6 +197,8 @@ mod tests {
         Problem::BodyTooLarge,
         Problem::KeyReused,
         Problem::UnknownCurrency,
+        Problem::IllegalMove,
+        Problem::AmountAboveLimit,
         Problem::Unavailable,
         Problem::Internal,
     ];
@@ -184,6 +213,8 @@ mod tests {
             | Problem::BodyTooLarge
             | Problem::KeyReused
             | Problem::UnknownCurrency
+            | Problem::IllegalMove
+            | Problem::AmountAboveLimit
             | Problem::Unavailable
             | Problem::Internal => {}
         }
