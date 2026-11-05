@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "ALTER TABLE payment_transitions ADD CONSTRAINT refuses_all CHECK (seq < 0) NOT VALID",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "67d82bfd01fec86df15ed74bfe43024abb5b9c0943f7417ef4b3a798c27a0f01"
+}

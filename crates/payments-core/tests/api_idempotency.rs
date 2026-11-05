@@ -11,7 +11,7 @@ mod common;
 
 use std::error::Error;
 
-use axum::body::Body;
+use axum::body::{Body, Bytes};
 use axum::http::{Method, Request, StatusCode};
 use common::api::{
     Pools, a_merchant, bearer, get_with_authorization, payments_stored, post, records, send,
@@ -20,6 +20,7 @@ use common::crashes::{install_crash_points, plan_death};
 use common::keys::issued_key;
 use common::{merchant_id, tenant_pool_of_one};
 use futures_util::future::join_all;
+use futures_util::stream;
 use payments_core::api::problem::Problem;
 use payments_core::api::{AppState, router};
 use payments_core::credentials::ApiKeySecret;
@@ -354,6 +355,42 @@ async fn a_key_that_cannot_be_looked_up_is_a_503(pool: PgPool) -> TestResult {
     let reply = send(router(pools.state()), create(&secret, "k", BODY)).await;
     assert_eq!(reply.status, StatusCode::SERVICE_UNAVAILABLE, "{reply:?}");
     assert_eq!(reply.body, Problem::Unavailable.body());
+    pools.close().await;
+    Ok(())
+}
+
+#[sqlx::test]
+async fn nothing_runs_when_a_key_cannot_be_looked_up(pool: PgPool) -> TestResult {
+    // The rest of the database works, so a request that went on regardless would get as
+    // far as storing its answer, and that would be another answer.
+    let pools = Pools::login(&pool).await?;
+    let (_, secret) = a_merchant(&pools, 1).await?;
+    sqlx::query!("ALTER TABLE idempotency_records RENAME TO idempotency_records_gone")
+        .execute(&pool)
+        .await?;
+    let reply = send(router(pools.state()), create(&secret, "k", BODY)).await;
+    assert_eq!(reply.status, StatusCode::SERVICE_UNAVAILABLE, "{reply:?}");
+    assert_eq!(reply.body, Problem::Unavailable.body());
+    assert_eq!(payments_stored(&pool).await?, 0);
+    pools.close().await;
+    Ok(())
+}
+
+#[sqlx::test]
+async fn a_body_that_fails_on_its_way_in_is_refused(pool: PgPool) -> TestResult {
+    let pools = Pools::login(&pool).await?;
+    let (_, secret) = a_merchant(&pools, 1).await?;
+    let failing = Body::from_stream(stream::iter([Err::<Bytes, _>(std::io::Error::other(
+        "the client went away",
+    ))]));
+    let reply = send(
+        router(pools.state()),
+        post("/payments", &secret, "k", failing),
+    )
+    .await;
+    assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{reply:?}");
+    assert_eq!(reply.body, Problem::MalformedBody.body());
+    assert_eq!(payments_stored(&pool).await?, 0);
     pools.close().await;
     Ok(())
 }
