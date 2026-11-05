@@ -138,6 +138,9 @@ Error bodies:
   a path that is no route is a 404, and a wrong method is a 405 with `Allow`. An ID in a
   path has one spelling, and any other is a 404, as no payment is. A retry that spelled
   the ID differently would otherwise read as another request.
+- 2026-11-05: A body above axum's default limit of 2 MB is a 413, also a problem that is
+  not stored. A body is held in memory for its fingerprint, so a limit has to exist, and
+  this one is far above any body that a route takes.
 
 ## References
 

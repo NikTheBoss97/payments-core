@@ -8,7 +8,7 @@ What a client of this service can rely on. The decisions behind it are in
 [ADR-0025](adr/0025-tenant-isolation.md) (isolation) and
 [ADR-0026](adr/0026-idempotency-keys.md) (idempotency keys).
 
-This is being built route by route: so far, a payment can be read.
+This is being built route by route: so far, a payment can be created and read.
 
 ## Running the server
 
@@ -31,16 +31,63 @@ shutdown.
 A merchant presents an API key as `Authorization: Bearer <secret>`. The merchant comes
 from the credential, never from the request.
 
+## Idempotency keys
+
+Every `POST` requires `Idempotency-Key: "..."`: a quoted string of 1 to 255 visible ASCII
+characters without `"` or `\`. Sending a request again under its key is always safe: it
+has one effect at most, and it gets the answer that the first attempt got.
+
+- **What a key holds.** A request's final answer, committed in the same transaction as its
+  effect. A retry gets the same status and the same bytes, and runs nothing.
+- **What is final.** A command that applied, and a refusal that depends on the state of the
+  payment. Everything else is stored nowhere and leaves the key free: a request that was
+  never decided, and an outcome that is not known. So after
+  [`unavailable`](#unavailable), send the request again under the same key.
+- **A key never expires.**
+- **A key belongs to its merchant,** so two merchants can use the same one.
+- **A key is for one request:** the method, the path and the exact bytes of the body. Reusing
+  it for anything else is a [`key-reused`](#key-reused), even if only the layout of the JSON
+  differs, and the first answer stands.
+- **A duplicate in flight waits** for the first attempt, and then gets its answer. The service
+  never answers that a request is in progress.
+- **Trying again after a refusal takes a new key,** because the key remembers the refusal.
+
 ## Connections
 
-A client that hangs up gets no answer, and what it asked for still finishes. A client
-that only half-closes its socket gets no answer either, because the server reads that
-as the client having gone.
+A client that hangs up gets no answer, and what it asked for still finishes. Sending it
+again under its key gets the answer. A client that only half-closes its socket gets no
+answer either, because the server reads that as the client having gone.
 
 No timeout wraps a request. Waits are bounded on the server, and one that waits too
 long answers [`unavailable`](#unavailable).
 
 ## Routes
+
+A body is JSON, whatever its `Content-Type` says, and at most 2 MB. Unknown fields are
+refused, so a misspelt or forbidden one is never silently ignored. Amounts are integers in
+minor units: a fraction or an exponent is refused, even `100.0`. A currency is an ISO 4217
+code in upper case.
+
+### `POST /payments`
+
+Creates a payment. The merchant comes from the credential, the fee rate is the one that the
+operator set, and the provider is the mock until there are others.
+
+```json
+{ "currency": "EUR", "amount": 10000 }
+```
+
+`201`, with the new payment's ID and where it stands:
+
+```json
+{
+  "payment_id": "019b76da-a800-7000-8000-000000000001",
+  "seq": 0,
+  "from": "created",
+  "to": "created",
+  "refundable": 0
+}
+```
 
 ### `GET /payments/{id}`
 
@@ -83,11 +130,35 @@ request again cannot change this, because IDs are made by the server.
 
 `405`, with `Allow` naming the methods that the route takes.
 
+### malformed-key
+
+`400`. The `Idempotency-Key` header is missing, there is more than one, or it is not a quoted
+string of 1 to 255 visible ASCII characters without `"` or `\`. A bare token is not a string.
+
+### malformed-body
+
+`400`. The body is not what the route takes. Nothing was decided, so the key is still free.
+
+### body-too-large
+
+`413`. The body is above 2 MB.
+
+### key-reused
+
+`422`. This key holds the answer to a different request. Sending that request again still
+gets its answer.
+
+### unknown-currency
+
+`422`. A well-formed code that the service does not know. Nothing is stored, because
+currencies change only by a migration.
+
 ### unavailable
 
 `503`. The service could not finish the request, for instance because the database could
-not answer. A good key can get this and never gets `unauthorized` for it. Sending the
-request again is safe.
+not answer, or it cannot tell whether the request took effect. A good key can get this and
+never gets `unauthorized` for it. Sending the request again is safe: under its key, a request
+that did take effect gets the answer and runs nothing.
 
 ### internal-error
 

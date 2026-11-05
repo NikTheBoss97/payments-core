@@ -3,6 +3,7 @@
 //! The HTTP API (ADR-0023).
 
 mod credential;
+mod keyed;
 mod payments;
 pub mod problem;
 
@@ -10,10 +11,11 @@ use axum::Router;
 use axum::extract::Request;
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
 use sqlx::PgPool;
 
 pub use credential::Merchant;
+pub use keyed::KeyedRequest;
 pub use payments::OwnPayment;
 use problem::Problem;
 
@@ -37,6 +39,7 @@ impl AppState {
 /// would run outside it.
 pub fn router(state: AppState) -> Router {
     Router::new()
+        .route("/payments", post(payments::create))
         .route("/payments/{id}", get(payments::read_payment))
         .fallback(no_such_route)
         .method_not_allowed_fallback(wrong_method)
