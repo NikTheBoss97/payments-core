@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT pg_terminate_backend(pid) AS \"sent!\" FROM pg_stat_activity\n            WHERE datname = current_database()\n              AND wait_event_type = 'Lock' AND wait_event = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "sent!",
+        "type_info": "Bool",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "73c971e3ec7e3956023b715370d448a5af4592b390fff97557219249d682dc25"
+}
