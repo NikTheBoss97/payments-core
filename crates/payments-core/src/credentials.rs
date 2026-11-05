@@ -11,6 +11,7 @@ use std::fmt;
 
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
+use subtle::ConstantTimeEq;
 
 use crate::ids::MerchantId;
 
@@ -74,9 +75,47 @@ impl SecretDigest {
         Self(Sha256::digest(secret).into())
     }
 
+    /// A digest written as 64 lowercase hex digits, the form that `sha256sum` prints and
+    /// the environment holds (ADR-0024).
+    ///
+    /// # Errors
+    ///
+    /// [`InvalidDigest`] for anything else.
+    pub fn from_hex(text: &str) -> Result<Self, InvalidDigest> {
+        let digits = text.as_bytes();
+        if digits.len() != 64 {
+            return Err(InvalidDigest);
+        }
+        let mut bytes = [0_u8; 32];
+        for (byte, [high, low]) in bytes.iter_mut().zip(digits.as_chunks::<2>().0) {
+            *byte = hex_value(*high)? * 16 + hex_value(*low)?;
+        }
+        Ok(Self(bytes))
+    }
+
+    /// Whether two digests are the same, in constant time, for the operator's key
+    /// (ADR-0024).
+    #[must_use]
+    pub fn matches(&self, other: &Self) -> bool {
+        self.as_bytes().ct_eq(other.as_bytes()).into()
+    }
+
     #[must_use]
     pub fn as_bytes(&self) -> &[u8] {
         &self.0
+    }
+}
+
+/// A written digest that is not 64 lowercase hex digits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("a digest is written as 64 lowercase hex digits")]
+pub struct InvalidDigest;
+
+fn hex_value(digit: u8) -> Result<u8, InvalidDigest> {
+    match digit {
+        b'0'..=b'9' => Ok(digit - b'0'),
+        b'a'..=b'f' => Ok(digit - b'a' + 10),
+        _ => Err(InvalidDigest),
     }
 }
 
@@ -180,5 +219,67 @@ mod tests {
         let generated = ApiKeySecret::generate();
         assert_eq!(generated.digest(), SecretDigest::of(generated.expose()));
         assert_ne!(generated.digest(), SecretDigest::of(""));
+    }
+
+    /// What Python's hashlib and PostgreSQL's sha256 gave for `pck_` and 64 zeros.
+    const WRITTEN: &str = "3ef3e417230060c87cead66b3ec5474b73177abd1127177474de6252466df16c";
+
+    #[test]
+    fn a_written_digest_reads_as_the_digest_it_names() {
+        let zeros = format!("pck_{}", "0".repeat(64));
+        assert_eq!(
+            SecretDigest::from_hex(WRITTEN),
+            Ok(SecretDigest::of(&zeros))
+        );
+    }
+
+    #[test]
+    fn every_digit_of_a_written_digest_has_its_value() {
+        let every_digit = "0123456789abcdef".repeat(4);
+        let read = SecretDigest::from_hex(&every_digit).expect("64 lowercase hex digits");
+        assert_eq!(read.as_bytes()[..8], [1, 35, 69, 103, 137, 171, 205, 239]);
+        assert_eq!(hex(read), every_digit);
+    }
+
+    #[test]
+    fn anything_else_is_not_a_written_digest() {
+        let long = format!("{WRITTEN}0");
+        let upper = WRITTEN.to_uppercase();
+        // Rust's own parser for a number takes a leading sign.
+        let signed = format!("+{}", &WRITTEN[1..]);
+        let spaced = format!(" {}", &WRITTEN[1..]);
+        let not_hex = format!("g{}", &WRITTEN[1..]);
+        // 64 bytes, but not 64 digits.
+        let not_ascii = "é".repeat(32);
+        let prefixed = format!("0x{}", &WRITTEN[2..]);
+        // What an operator might paste by mistake: the key itself.
+        let the_key_itself = format!("pck_{WRITTEN}");
+        for text in [
+            "",
+            &WRITTEN[..63],
+            long.as_str(),
+            upper.as_str(),
+            signed.as_str(),
+            spaced.as_str(),
+            not_hex.as_str(),
+            not_ascii.as_str(),
+            prefixed.as_str(),
+            the_key_itself.as_str(),
+        ] {
+            assert_eq!(SecretDigest::from_hex(text), Err(InvalidDigest), "{text:?}");
+        }
+    }
+
+    #[test]
+    fn a_digest_matches_only_itself() {
+        let one = SecretDigest::of("one");
+        assert!(one.matches(&SecretDigest::of("one")));
+        assert!(!one.matches(&SecretDigest::of("two")));
+        // One bit is enough, wherever it is.
+        for (byte, bit) in [(0, 1), (31, 0x80)] {
+            let mut other = one;
+            other.0[byte] ^= bit;
+            assert!(!one.matches(&other), "byte {byte}");
+        }
     }
 }
