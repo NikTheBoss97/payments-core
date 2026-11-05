@@ -14,7 +14,7 @@ use sqlx::PgPool;
 
 use super::AppState;
 use super::problem::Problem;
-use crate::credentials::authenticate;
+use crate::credentials::{SecretDigest, authenticate};
 use crate::ids::MerchantId;
 use crate::tenancy::Tenant;
 
@@ -52,6 +52,38 @@ impl FromRequestParts<AppState> for Merchant {
             }),
             Ok(None) => Err(Problem::Unauthorized),
             Err(err) => Err(Problem::Unavailable.because(&err)),
+        }
+    }
+}
+
+/// The operator, and its one way to the database: the system role's pool, because what it
+/// does belongs to no merchant (ADR-0025).
+#[derive(Debug, Clone)]
+pub(super) struct Operator {
+    pool: PgPool,
+}
+
+impl Operator {
+    pub(super) fn pool(&self) -> &PgPool {
+        &self.pool
+    }
+}
+
+impl FromRequestParts<AppState> for Operator {
+    type Rejection = Problem;
+
+    /// The digest of what was presented, compared in constant time with the one that the
+    /// server holds. It reads no database, so one that has gone cannot make a bad secret
+    /// look like anything else. A merchant's key has another digest, so it opens nothing
+    /// here (ADR-0024).
+    async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, Problem> {
+        let secret = bearer_secret(&parts.headers).ok_or(Problem::Unauthorized)?;
+        if SecretDigest::of(secret).matches(&state.operator) {
+            Ok(Self {
+                pool: state.system.clone(),
+            })
+        } else {
+            Err(Problem::Unauthorized)
         }
     }
 }

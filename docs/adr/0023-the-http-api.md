@@ -141,6 +141,12 @@ Error bodies:
 - 2026-11-05: A body above axum's default limit of 2 MB is a 413, also a problem that is
   not stored. A body is held in memory for its fingerprint, so a limit has to exist, and
   this one is far above any body that a route takes.
+- 2026-11-05: What the operator's routes leave open. `POST /api-keys/{id}/revoke` answers
+  `api_key_id`, because a stored answer has to be JSON (ADR-0026), and revoking a revoked key
+  is a 200 like the first, because what the request asks for already holds. A fee above 10,000
+  basis points is a malformed body, since it cannot be parsed into a rate. `OPERATOR_KEY_SHA256`
+  is 64 lowercase hex digits, and the binary stops at once on anything else, without repeating
+  what it read, because the likeliest mistake is pasting the secret itself.
 
 ## References
 

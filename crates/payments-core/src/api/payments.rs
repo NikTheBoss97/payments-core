@@ -398,6 +398,6 @@ fn json(status: StatusCode, value: &impl Serialize) -> Response {
         .into_response()
 }
 
-fn json_text(value: &impl Serialize) -> String {
+pub(super) fn json_text(value: &impl Serialize) -> String {
     serde_json::to_string(value).expect("strings and numbers always serialize")
 }

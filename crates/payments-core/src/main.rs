@@ -9,6 +9,7 @@ use std::error::Error;
 use std::process::ExitCode;
 
 use payments_core::api::{AppState, router};
+use payments_core::credentials::SecretDigest;
 use sqlx::PgPool;
 use tokio::net::TcpListener;
 
@@ -28,13 +29,16 @@ async fn run() -> Result<(), Box<dyn Error>> {
     // All of the configuration first, so that a missing value stops it at once.
     let tenant_url = required("TENANT_DATABASE_URL")?;
     let system_url = required("SYSTEM_DATABASE_URL")?;
+    // The message names the variable and not its value, which is often the wrong secret.
+    let operator = SecretDigest::from_hex(&required("OPERATOR_KEY_SHA256")?)
+        .map_err(|_| "OPERATOR_KEY_SHA256 is not 64 lowercase hex digits")?;
     let address = bind_address(env::var("BIND_ADDRESS").ok());
 
     let tenant = PgPool::connect(&tenant_url).await?;
     let system = PgPool::connect(&system_url).await?;
     let listener = TcpListener::bind(&address).await?;
     tracing::info!("listening on {}", listener.local_addr()?);
-    axum::serve(listener, router(AppState::new(tenant, system))).await?;
+    axum::serve(listener, router(AppState::new(tenant, system, operator))).await?;
     Ok(())
 }
 
