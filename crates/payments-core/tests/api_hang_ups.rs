@@ -206,3 +206,64 @@ async fn a_create_whose_client_hangs_up_still_lands_once_and_a_retry_gets_its_an
     pools.close().await;
     Ok(())
 }
+
+/// How many merchants are stored. Pass the test's own pool.
+async fn merchants(pool: &PgPool) -> sqlx::Result<i64> {
+    sqlx::query_scalar!(r#"SELECT count(*) AS "count!" FROM merchants"#)
+        .fetch_one(pool)
+        .await
+}
+
+#[sqlx::test]
+async fn a_registration_whose_client_hangs_up_still_lands_once_and_a_retry_gets_its_answer(
+    pool: PgPool,
+) -> TestResult {
+    // The operator's routes run under the one middleware too. Like a create, a registration
+    // has no lock, so it waits in its key's unique index, behind an attempt that then rolls
+    // back.
+    let pools = Pools::login(&pool).await?;
+    let body = r#"{"fee_bps":250}"#;
+    let fingerprint = Fingerprint::of("POST", "/merchants", body.as_bytes());
+
+    let hung_up = Arc::new(Notify::new());
+    let address = serve(router(pools.state()), &hung_up).await?;
+
+    let mut first = pool.begin().await?;
+    sqlx::query!(
+        "INSERT INTO operator_idempotency_records (key, fingerprint, status, body) \
+         VALUES ('k', $1, 201, '{}')",
+        fingerprint.as_bytes()
+    )
+    .execute(&mut *first)
+    .await?;
+
+    let mut client = TcpStream::connect(address).await?;
+    let request = format!(
+        "POST /merchants HTTP/1.1\r\nHost: test\r\nAuthorization: {}\r\n\
+         Idempotency-Key: \"k\"\r\nContent-Length: {}\r\n\r\n{body}",
+        bearer(&pools.operator),
+        body.len()
+    );
+    client.write_all(request.as_bytes()).await?;
+    wait_for_lock_wait(&pool, "transactionid").await?;
+
+    drop(client);
+    within("hyper noticing the hang-up", hung_up.notified()).await;
+    assert_eq!(merchants(&pool).await?, 0);
+
+    first.rollback().await?;
+    until("the registration landing", || async {
+        Ok(merchants(&pool).await? == 1)
+    })
+    .await?;
+
+    let reply = send(
+        router(pools.state()),
+        post("/merchants", &pools.operator, "k", body),
+    )
+    .await;
+    assert_eq!(reply.status, StatusCode::CREATED, "{reply:?}");
+    assert_eq!(merchants(&pool).await?, 1);
+    pools.close().await;
+    Ok(())
+}

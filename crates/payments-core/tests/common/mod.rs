@@ -210,6 +210,30 @@ pub async fn wait_for_lock_wait(pool: &PgPool, wait_event: &str) -> sqlx::Result
     }
 }
 
+/// Waits until this many sessions are blocked on this kind of lock at the same moment, so
+/// that a race test knows that its copies really overlap. See [`wait_for_lock_wait`].
+pub async fn wait_for_lock_waits(pool: &PgPool, wait_event: &str, count: i64) -> sqlx::Result<()> {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let waiting = sqlx::query_scalar!(
+            r#"SELECT count(*) AS "waiting!" FROM pg_stat_activity
+                WHERE datname = current_database()
+                  AND wait_event_type = 'Lock'
+                  AND wait_event = $1"#,
+            wait_event
+        )
+        .fetch_one(pool)
+        .await?;
+        if waiting >= count {
+            return Ok(());
+        }
+        assert!(
+            Instant::now() < deadline,
+            "only {waiting} of {count} sessions waited for a lock of type {wait_event}"
+        );
+    }
+}
+
 /// A fixed UUIDv7 for tests (ADR-0005): 2026-01-01T00:00:00Z, with `n` in its
 /// last four bytes, so a failing test names a readable ID such as
 /// `019b76da-a800-7000-8000-000000000001`.

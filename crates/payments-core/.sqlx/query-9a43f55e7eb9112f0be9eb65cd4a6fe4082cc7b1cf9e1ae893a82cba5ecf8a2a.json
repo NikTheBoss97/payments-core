@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO operator_idempotency_records (key, fingerprint, status, body) VALUES ('race', $1, 201, '{}')",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Bytea"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "9a43f55e7eb9112f0be9eb65cd4a6fe4082cc7b1cf9e1ae893a82cba5ecf8a2a"
+}

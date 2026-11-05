@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO operator_idempotency_records (key, fingerprint, status, body) VALUES ('k', $1, 201, '{}')",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Bytea"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "5fa9d594181554050a7c3e489a43ae6ea801b658f7ff931423ba213cfe34127a"
+}
