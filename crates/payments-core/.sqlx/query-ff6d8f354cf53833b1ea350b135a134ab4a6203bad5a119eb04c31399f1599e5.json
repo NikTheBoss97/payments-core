@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT count(*) AS \"waiting!\" FROM pg_stat_activity\n                WHERE datname = current_database()\n                  AND wait_event_type = 'Lock'\n                  AND wait_event = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "waiting!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "ff6d8f354cf53833b1ea350b135a134ab4a6203bad5a119eb04c31399f1599e5"
+}
