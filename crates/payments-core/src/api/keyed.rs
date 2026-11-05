@@ -114,6 +114,11 @@ impl KeyedRequest {
         serde_json::from_slice(&self.body).map_err(|_| Problem::MalformedBody)
     }
 
+    /// A plant's way to the raw body.
+    pub(super) fn plant_body(&self) -> &[u8] {
+        &self.body
+    }
+
     /// For a route that takes no body.
     pub(super) fn no_body(&self) -> Result<(), Problem> {
         if self.body.is_empty() {
