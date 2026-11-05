@@ -35,6 +35,51 @@ docker compose up -d --wait
 cargo test --workspace
 ```
 
+### Running the server
+
+The server never applies migrations ([ADR-0008](docs/adr/0008-database-role-provisioning.md)),
+so that takes `sqlx-cli`, built from the sqlx commit that this project pins
+([ADR-0006](docs/adr/0006-data-access-with-sqlx.md)):
+
+```sh
+cargo install sqlx-cli --git https://github.com/transact-rs/sqlx \
+  --rev f1e94ec34dd5f11ad6488a3a8ac7988439a3f757 \
+  --no-default-features --features postgres,rustls
+sqlx migrate run --source crates/payments-core/migrations
+```
+
+The operator is one secret, of which the server holds only the digest. Make one for this shell,
+and start the server there:
+
+```sh
+set -a; . ./.env; set +a
+operator="pck_$(openssl rand -hex 32)"
+export OPERATOR_KEY_SHA256="$(printf %s "$operator" | openssl dgst -sha256 -r | cut -d' ' -f1)"
+cargo run -p payments-core &
+```
+
+Once it logs `listening on 127.0.0.1:8080`, take a merchant on, and take a payment through its
+life. Every `POST` carries an idempotency key, so any of these can be sent again and has one
+effect. The full API is in [`docs/api.md`](docs/api.md).
+
+```sh
+post() { curl -s "localhost:8080$1" -H "Authorization: Bearer $2" -H "Idempotency-Key: \"$3\"" -d "$4"; }
+member() { sed -E "s/.*\"$1\":\"([^\"]+)\".*/\1/"; }
+
+merchant=$(post /merchants "$operator" merchant-1 '{"fee_bps":250}' | member merchant_id)
+secret=$(post "/merchants/$merchant/api-keys" "$operator" key-1 '' | member secret)
+
+payment=$(post /payments "$secret" create-1 '{"currency":"EUR","amount":10000}' | member payment_id)
+post "/payments/$payment/authorize" "$secret" authorize-1 '{"amount":10000,"expires_at":"2030-01-01T00:00:00Z"}'; echo
+post "/payments/$payment/capture" "$secret" capture-1 '{"amount":10000,"captured_at":"2027-01-01T00:00:00Z"}'; echo
+post "/payments/$payment/refund" "$secret" refund-1 '{"amount":2500,"refunded_at":"2027-01-02T00:00:00Z"}'; echo
+
+curl -s "localhost:8080/payments/$payment" -H "Authorization: Bearer $secret"; echo
+```
+
+This speaks plain HTTP on the local interface. In any real deployment TLS ends in front of the
+server, because a secret sent in the clear is a stolen key.
+
 ## Layout
 
 ```
