@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "ALTER TABLE api_key_revocations ADD CONSTRAINT refuses_all CHECK (recorded_at IS NULL) NOT VALID",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "1b2121135555319623326a3f6f375d7ee01352d194dc6586d13153c649d2da4a"
+}

@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "ALTER TABLE api_keys DROP CONSTRAINT refuses_all",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "4e4658c14fb9c826469e1d161bcb87e4b2e77c136e190b03652f4bcb3a757877"
+}

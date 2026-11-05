@@ -13,7 +13,7 @@ use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use common::api::Pools;
+use common::api::{Pools, written};
 use common::keys::issued_key;
 use common::merchant_id;
 use common::payments::{create_command, fee_rate};
@@ -47,11 +47,12 @@ fn url(pool: &PgPool, role: &str) -> String {
 
 /// The binary with the configuration that a test's database needs. The test's own
 /// environment could hold anything, so nothing comes from it.
-fn configured(pool: &PgPool) -> Command {
+fn configured(pool: &PgPool, operator: &ApiKeySecret) -> Command {
     let mut command = Command::new(BINARY);
     command
         .env("TENANT_DATABASE_URL", url(pool, "payments_tenant"))
         .env("SYSTEM_DATABASE_URL", url(pool, "payments_app"))
+        .env("OPERATOR_KEY_SHA256", written(operator.digest()))
         .env("BIND_ADDRESS", "127.0.0.1:0")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -87,7 +88,7 @@ impl Server {
     /// Starts the binary, and waits until it says where it is listening. The port is one
     /// that the system chose, so tests never collide.
     async fn start(pool: &PgPool) -> Result<Self, Box<dyn Error>> {
-        let mut child = configured(pool).spawn()?;
+        let mut child = configured(pool, &ApiKeySecret::generate()).spawn()?;
         let stdout = child.stdout.take().expect("a piped stdout");
         let stderr = child.stderr.take().expect("a piped stderr");
         let log = Arc::new(Mutex::new(String::new()));
@@ -233,6 +234,11 @@ async fn a_request_refused_for_its_own_sake_logs_nothing(pool: PgPool) -> TestRe
         format!("GET /payments/{payment} HTTP/1.1"),
         "GET /nothing HTTP/1.1".to_owned(),
         "DELETE /nothing HTTP/1.1".to_owned(),
+        // Someone trying the operator's routes with a key that opens none of them.
+        format!(
+            "POST /merchants HTTP/1.1\r\nAuthorization: Bearer {}",
+            unknown.expose()
+        ),
     ] {
         server.exchange(&head).await?;
     }
@@ -279,8 +285,12 @@ async fn refused(mut command: Command) -> Result<(bool, String), Box<dyn Error>>
 
 #[sqlx::test]
 async fn the_binary_stops_at_once_without_its_configuration(pool: PgPool) -> TestResult {
-    for name in ["TENANT_DATABASE_URL", "SYSTEM_DATABASE_URL"] {
-        let mut command = configured(&pool);
+    for name in [
+        "TENANT_DATABASE_URL",
+        "SYSTEM_DATABASE_URL",
+        "OPERATOR_KEY_SHA256",
+    ] {
+        let mut command = configured(&pool, &ApiKeySecret::generate());
         command.env_remove(name);
         let (succeeded, written) = refused(command).await?;
         assert!(!succeeded, "{name}: {written}");
@@ -290,8 +300,38 @@ async fn the_binary_stops_at_once_without_its_configuration(pool: PgPool) -> Tes
 }
 
 #[sqlx::test]
+async fn the_binary_stops_at_once_on_an_operator_key_that_is_no_digest_and_never_shows_it(
+    pool: PgPool,
+) -> TestResult {
+    // The likeliest mistake is pasting the secret itself, so what it read is never repeated.
+    let operator = ApiKeySecret::generate();
+    let digest = written(operator.digest());
+    for value in [
+        operator.expose(),
+        "not a digest",
+        &digest.to_uppercase(),
+        &digest[..63],
+    ] {
+        let mut command = configured(&pool, &operator);
+        command.env("OPERATOR_KEY_SHA256", value);
+        let (succeeded, said) = refused(command).await?;
+        assert!(!succeeded, "{said}");
+        assert!(said.contains("OPERATOR_KEY_SHA256"), "{said}");
+        assert!(!said.contains("listening on"), "{said}");
+        assert!(!said.contains(value), "{said}");
+    }
+    // Nothing is no digest either, which is what .env.example holds.
+    let mut command = configured(&pool, &operator);
+    command.env("OPERATOR_KEY_SHA256", "");
+    let (succeeded, said) = refused(command).await?;
+    assert!(!succeeded, "{said}");
+    assert!(said.contains("OPERATOR_KEY_SHA256"), "{said}");
+    Ok(())
+}
+
+#[sqlx::test]
 async fn the_binary_stops_at_once_on_an_address_it_cannot_use(pool: PgPool) -> TestResult {
-    let mut command = configured(&pool);
+    let mut command = configured(&pool, &ApiKeySecret::generate());
     command.env("BIND_ADDRESS", "not an address");
     let (succeeded, written) = refused(command).await?;
     assert!(!succeeded, "{written}");
@@ -308,7 +348,7 @@ async fn a_login_that_fails_stops_the_binary_and_shows_no_password(pool: PgPool)
         options.get_port(),
         options.get_database().expect("a test's own database")
     );
-    let mut command = configured(&pool);
+    let mut command = configured(&pool, &ApiKeySecret::generate());
     command.env("TENANT_DATABASE_URL", wrong);
     let (succeeded, written) = refused(command).await?;
     assert!(!succeeded, "{written}");

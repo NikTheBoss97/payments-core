@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "ALTER TABLE merchants DROP CONSTRAINT refuses_all",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "6c672f61d2076cee5b1fe89e37173dc7571e20d4968a2c54d1539ffbfb4a24c2"
+}

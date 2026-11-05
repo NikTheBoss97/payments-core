@@ -97,7 +97,11 @@ async fn the_comparison_in_rust_holds_with_no_row_level_security(pool: PgPool) -
     let (owner, mine) = a_merchant(&pools, 1).await?;
     let (_, stranger) = a_merchant(&pools, 2).await?;
     let payment = a_payment(&pools, owner, 1).await?;
-    let no_policy = AppState::new(pools.system.clone(), pools.system.clone());
+    let no_policy = AppState::new(
+        pools.system.clone(),
+        pools.system.clone(),
+        pools.operator.digest(),
+    );
     assert!(find_payment(&pools.system, payment).await?.is_some());
 
     let reply = send(router(no_policy.clone()), read(payment, &stranger)).await;

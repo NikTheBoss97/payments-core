@@ -4,6 +4,7 @@
 
 mod credential;
 mod keyed;
+mod operator;
 mod path_id;
 mod payments;
 pub mod problem;
@@ -15,24 +16,32 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use sqlx::PgPool;
 
+use crate::credentials::SecretDigest;
 pub use credential::Merchant;
 pub use keyed::KeyedRequest;
 pub use payments::OwnPayment;
 use problem::Problem;
 
-/// What a request can reach: the two login roles' pools (ADR-0025).
+/// What a request can reach: the two login roles' pools (ADR-0025), and what the operator's
+/// secret hashes to, which is all that the server holds of it (ADR-0024).
 #[derive(Debug, Clone)]
 pub struct AppState {
     tenant: PgPool,
     system: PgPool,
+    operator: SecretDigest,
 }
 
 impl AppState {
     /// The pool that merchant routes hold, whose role sees nothing until a transaction
-    /// names its merchant, and the system role's, for looking a key up.
+    /// names its merchant, the system role's, for looking a key up and for the operator's
+    /// commands, and the digest of the operator's secret.
     #[must_use]
-    pub fn new(tenant: PgPool, system: PgPool) -> Self {
-        Self { tenant, system }
+    pub fn new(tenant: PgPool, system: PgPool, operator: SecretDigest) -> Self {
+        Self {
+            tenant,
+            system,
+            operator,
+        }
     }
 }
 
@@ -40,6 +49,9 @@ impl AppState {
 /// would run outside it.
 pub fn router(state: AppState) -> Router {
     Router::new()
+        .route("/merchants", post(operator::register))
+        .route("/merchants/{id}/api-keys", post(operator::issue_key))
+        .route("/api-keys/{id}/revoke", post(operator::revoke_key))
         .route("/payments", post(payments::create))
         .route("/payments/{id}", get(payments::read_payment))
         .route("/payments/{id}/authorize", post(payments::authorize))

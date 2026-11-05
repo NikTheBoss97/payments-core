@@ -1,0 +1,21 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT query_to_xml(format('SELECT * FROM %I', c.relname), true, false, '')::text\n                  AS \"rows!\"\n           FROM pg_class c\n           JOIN pg_namespace n ON n.oid = c.relnamespace\n           WHERE n.nspname = 'public' AND c.relkind = 'r'",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "rows!",
+        "type_info": "Text",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "1aa5e601a7b0dc99576958a5a190b32dd95f24ba9035fc6a09a8dd2566521b40"
+}

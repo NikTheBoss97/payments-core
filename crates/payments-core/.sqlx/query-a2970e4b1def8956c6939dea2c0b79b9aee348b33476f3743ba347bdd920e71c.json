@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "ALTER TABLE merchants ADD CONSTRAINT refuses_all CHECK (fee_bps < 0) NOT VALID",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "a2970e4b1def8956c6939dea2c0b79b9aee348b33476f3743ba347bdd920e71c"
+}

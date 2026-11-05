@@ -405,7 +405,11 @@ async fn a_command_that_cannot_be_confirmed_is_a_503_and_the_retry_settles_it(
     let (_, secret) = a_merchant(&pools, 1).await?;
     install_crash_points(&pool).await?;
     let tenant = tenant_pool_of_one(&pool).await?;
-    let state = AppState::new(tenant.clone(), pools.system.clone());
+    let state = AppState::new(
+        tenant.clone(),
+        pools.system.clone(),
+        pools.operator.digest(),
+    );
     plan_death(&tenant, "die_before idempotency_records").await?;
 
     let reply = send(router(state.clone()), create(&secret, "k", BODY)).await;

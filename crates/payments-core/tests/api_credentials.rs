@@ -223,12 +223,14 @@ async fn a_key_that_cannot_be_looked_up_is_a_503_and_never_a_401(pool: PgPool) -
     let value = format!("Bearer {}", secret.expose());
 
     // A role with no privilege on the table, and a pool that has gone.
-    let broken_grant = AppState::new(pools.tenant.clone(), pools.tenant.clone());
-    let gone = AppState::new(pools.tenant.clone(), {
-        let closed = pools.system.clone();
-        closed.close().await;
-        closed
-    });
+    let broken_grant = AppState::new(
+        pools.tenant.clone(),
+        pools.tenant.clone(),
+        pools.operator.digest(),
+    );
+    let closed = pools.system.clone();
+    closed.close().await;
+    let gone = AppState::new(pools.tenant.clone(), closed, pools.operator.digest());
     for (what, state) in [("broken grant", broken_grant), ("pool gone", gone)] {
         let reply = send(who_route(state), get_with_authorization("/who", &value)).await;
         assert_eq!(reply.status, StatusCode::SERVICE_UNAVAILABLE, "{what}");

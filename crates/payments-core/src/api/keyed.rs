@@ -12,9 +12,13 @@ use axum::extract::{FromRequest, Request};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use serde::de::DeserializeOwned;
+use sqlx::PgPool;
 
 use super::problem::Problem;
-use crate::idempotency::{Answer, Fingerprint, IdempotencyKey, Recall, Seal, recall};
+use crate::idempotency::{
+    Answer, Fingerprint, IdempotencyKey, OperatorSeal, Recall, RecallError, Seal, recall,
+    recall_operator,
+};
 use crate::lifecycle::Refused;
 use crate::payments::Recorded;
 use crate::tenancy::Tenant;
@@ -77,16 +81,42 @@ pub(super) enum Attempt {
 }
 
 impl KeyedRequest {
-    /// Runs the flow, where `attempt` builds the command with fresh IDs and runs it
-    /// sealed. A lost race looks the key up again: the row that it met is committed and
-    /// is never removed, so that look finds it, and this loops at most once.
+    /// Runs the flow for a merchant, where `attempt` builds the command with fresh IDs and
+    /// runs it sealed.
     pub(super) async fn answer<F, Fut>(&self, tenant: Tenant<'_>, attempt: F) -> Response
     where
         F: Fn() -> Fut,
         Fut: Future<Output = Result<Attempt, Problem>>,
     {
+        self.run(|| recall(tenant, &self.key, self.fingerprint), attempt)
+            .await
+    }
+
+    /// The same flow for the operator, whose keys are apart from every merchant's
+    /// (ADR-0026).
+    pub(super) async fn answer_operator<F, Fut>(&self, pool: &PgPool, attempt: F) -> Response
+    where
+        F: Fn() -> Fut,
+        Fut: Future<Output = Result<Attempt, Problem>>,
+    {
+        self.run(
+            || recall_operator(pool, &self.key, self.fingerprint),
+            attempt,
+        )
+        .await
+    }
+
+    /// A lost race looks the key up again: the row that it met is committed and is never
+    /// removed, so that look finds it, and this loops at most once.
+    async fn run<L, Look, F, Fut>(&self, look_up: L, attempt: F) -> Response
+    where
+        L: Fn() -> Look,
+        Look: Future<Output = Result<Recall, RecallError>>,
+        F: Fn() -> Fut,
+        Fut: Future<Output = Result<Attempt, Problem>>,
+    {
         loop {
-            match recall(tenant, &self.key, self.fingerprint).await {
+            match look_up().await {
                 Ok(Recall::Unused) => {}
                 Ok(Recall::Answered(answer)) => return respond(&answer),
                 Ok(Recall::Reused) => return Problem::KeyReused.into_response(),
@@ -103,6 +133,15 @@ impl KeyedRequest {
     /// What a command stores with its effect.
     pub(super) fn seal<'a>(&'a self, answer: &'a Render) -> Seal<'a> {
         Seal {
+            key: &self.key,
+            fingerprint: self.fingerprint,
+            answer,
+        }
+    }
+
+    /// What an operator's command stores with its effect.
+    pub(super) fn operator_seal<'a>(&'a self, answer: &'a Answer) -> OperatorSeal<'a> {
+        OperatorSeal {
             key: &self.key,
             fingerprint: self.fingerprint,
             answer,
@@ -130,7 +169,7 @@ fn respond(answer: &Answer) -> Response {
     let status = u16::try_from(answer.status)
         .ok()
         .and_then(|status| StatusCode::from_u16(status).ok())
-        .expect("idempotency_records_status_check keeps it between 200 and 499");
+        .expect("the CHECK on status in both tables of answers keeps it between 200 and 499");
     let content_type = if status.is_success() {
         "application/json"
     } else {

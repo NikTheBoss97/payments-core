@@ -9,7 +9,7 @@ use axum::body::Body;
 use axum::http::{HeaderMap, Method, Request, StatusCode};
 use http_body_util::BodyExt;
 use payments_core::api::AppState;
-use payments_core::credentials::ApiKeySecret;
+use payments_core::credentials::{ApiKeySecret, SecretDigest};
 use payments_core::ids::{MerchantId, PaymentId};
 use payments_core::payments::{create_payment, register_merchant};
 use payments_core::tenancy::Tenant;
@@ -81,13 +81,32 @@ pub fn get_with_authorization(path: &str, value: &str) -> Request<Body> {
 
 /// A `POST` with this credential, idempotency key and body.
 pub fn post(path: &str, secret: &ApiKeySecret, key: &str, body: impl Into<Body>) -> Request<Body> {
+    post_with_authorization(path, &bearer(secret), key, body)
+}
+
+/// A `POST` that presents this `Authorization` value, with this idempotency key and body.
+pub fn post_with_authorization(
+    path: &str,
+    value: &str,
+    key: &str,
+    body: impl Into<Body>,
+) -> Request<Body> {
     Request::builder()
         .method(Method::POST)
         .uri(path)
-        .header("authorization", bearer(secret))
+        .header("authorization", value)
         .header("idempotency-key", format!("\"{key}\""))
         .body(body.into())
         .expect("a valid request")
+}
+
+/// A digest as the environment holds it: 64 lowercase hex digits.
+pub fn written(digest: SecretDigest) -> String {
+    digest
+        .as_bytes()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 /// A registered merchant with an API key. `n` tells them apart.
@@ -126,11 +145,13 @@ pub async fn payments_stored(pool: &PgPool) -> sqlx::Result<i64> {
         .await
 }
 
-/// The two login roles' pools, as the server holds them (ADR-0025). The system role's
-/// connections act through `SET ROLE`, so close both before the test returns.
+/// The two login roles' pools, as the server holds them (ADR-0025), and the operator's
+/// secret, of which the server holds the digest (ADR-0024). The system role's connections
+/// act through `SET ROLE`, so close both before the test returns.
 pub struct Pools {
     pub tenant: PgPool,
     pub system: PgPool,
+    pub operator: ApiKeySecret,
 }
 
 impl Pools {
@@ -138,11 +159,16 @@ impl Pools {
         Ok(Self {
             tenant: tenant_pool(pool).await?,
             system: runtime_pool(pool).await?,
+            operator: ApiKeySecret::generate(),
         })
     }
 
     pub fn state(&self) -> AppState {
-        AppState::new(self.tenant.clone(), self.system.clone())
+        AppState::new(
+            self.tenant.clone(),
+            self.system.clone(),
+            self.operator.digest(),
+        )
     }
 
     pub async fn close(self) {

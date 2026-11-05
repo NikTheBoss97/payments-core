@@ -1,0 +1,21 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT body AS \"body!\" FROM operator_idempotency_records\n           UNION ALL SELECT body FROM idempotency_records",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "body!",
+        "type_info": "Text",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "e7c5696c1bc131a0ad60d83b70c42052408730cf76d0b94087a97939ec914f7c"
+}

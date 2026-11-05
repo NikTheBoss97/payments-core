@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "ALTER TABLE api_keys ADD CONSTRAINT refuses_all CHECK (octet_length(digest) < 0) NOT VALID",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "c25845021f461b1afeeb592b5dede6a74abab96bd0d2cab4cf8140d2fbe43035"
+}

@@ -8,8 +8,6 @@ What a client of this service can rely on. The decisions behind it are in
 [ADR-0025](adr/0025-tenant-isolation.md) (isolation) and
 [ADR-0026](adr/0026-idempotency-keys.md) (idempotency keys).
 
-This is being built route by route: so far, a merchant can take a payment through its life.
-
 ## Running the server
 
 The binary takes its configuration from the environment, and stops at once if it
@@ -18,7 +16,8 @@ cannot use it.
 | Variable | Meaning | Default |
 |---|---|---|
 | `TENANT_DATABASE_URL` | The login that merchant routes hold. It sees nothing until a transaction names its merchant. | required |
-| `SYSTEM_DATABASE_URL` | The login that looks an API key up. | required |
+| `SYSTEM_DATABASE_URL` | The login that looks an API key up and runs the operator's routes. | required |
+| `OPERATOR_KEY_SHA256` | The SHA-256 of the operator's secret, as 64 lowercase hex digits. The server never holds the secret itself. | required |
 | `BIND_ADDRESS` | Where to listen. | `127.0.0.1:8080` |
 
 It never runs migrations. It speaks plain HTTP/1.1, so TLS ends in front of it, and
@@ -29,7 +28,14 @@ shutdown.
 ## Credentials
 
 A merchant presents an API key as `Authorization: Bearer <secret>`. The merchant comes
-from the credential, never from the request.
+from the credential, never from the request. A secret is `pck_` and 64 hex digits, and it is
+shown once, because the server stores only its digest. A merchant can hold several keys, all
+equivalent, so rotating one means issuing another and revoking the old.
+
+The operator presents its own secret in the same way. It opens the
+[operator's routes](#the-operators-routes) and nothing else, and a merchant's key opens none of
+them. The [quickstart](../README.md#quickstart) shows how to make one. Changing it means
+restarting the server with a new digest.
 
 ## Idempotency keys
 
@@ -38,13 +44,16 @@ characters without `"` or `\`. Sending a request again under its key is always s
 has one effect at most, and it gets the answer that the first attempt got.
 
 - **What a key holds.** A request's final answer, committed in the same transaction as its
-  effect. A retry gets the same status and the same bytes, and runs nothing.
+  effect. A retry gets the same status and the same bytes, and runs nothing. The one exception
+  is a new API key's secret, which is in the first answer alone, because no stored answer holds
+  a secret.
 - **What is final.** A command that applied, and a refusal that depends on the state of the
   payment. Everything else is stored nowhere and leaves the key free: a request that was
   never decided, and an outcome that is not known. So after
   [`unavailable`](#unavailable), send the request again under the same key.
 - **A key never expires.**
-- **A key belongs to its merchant,** so two merchants can use the same one.
+- **A key belongs to its merchant,** so two merchants can use the same one. The operator's keys
+  are apart from every merchant's.
 - **A key is for one request:** the method, the path and the exact bytes of the body. Reusing
   it for anything else is a [`key-reused`](#key-reused), even if only the layout of the JSON
   differs, and the first answer stands.
@@ -157,6 +166,53 @@ and any other is a [`not-found`](#not-found). So are another merchant's payment 
 payment at all, which read exactly alike, so an ID's existence does not leak. The
 credential is checked first, so someone with no key learns nothing about an ID.
 
+## The operator's routes
+
+These take the operator's secret, and an idempotency key like any other `POST`. An ID in their
+paths follows the same rule as a payment's: one spelling, and any other is a
+[`not-found`](#not-found).
+
+### `POST /merchants`
+
+Registers a merchant at the fee rate that the operator sets, in basis points from 0 to 10000. A
+payment copies the rate when it is created, and keeps it.
+
+```json
+{ "fee_bps": 250 }
+```
+
+`201`:
+
+```json
+{ "merchant_id": "019b76da-a800-7000-8000-000000000001" }
+```
+
+### `POST /merchants/{id}/api-keys`
+
+Issues an API key to a merchant. It takes no body, not even `{}`.
+
+`201`, with the secret, which is shown here and never again:
+
+```json
+{
+  "api_key_id": "019b76da-a800-7000-8000-000000000002",
+  "secret": "pck_0000000000000000000000000000000000000000000000000000000000000000"
+}
+```
+
+A retry under the same key gets the key's ID alone. If the first answer was lost, issue
+another key, and revoke the one that nobody holds.
+
+### `POST /api-keys/{id}/revoke`
+
+Revokes an API key, which stops working on its next request. It takes no body, not even `{}`.
+
+`200`, also if the key was already revoked, because what the request asks for already holds:
+
+```json
+{ "api_key_id": "019b76da-a800-7000-8000-000000000002" }
+```
+
 ## Problems
 
 Every error is `application/problem+json` ([RFC 9457](https://www.rfc-editor.org/rfc/rfc9457.html)),
@@ -166,12 +222,13 @@ text never reveals SQL, a constraint or another merchant's data.
 ### unauthorized
 
 `401`, with `WWW-Authenticate: Bearer`. The credential is missing, malformed, unknown or
-revoked. All of these get the same answer.
+revoked, or it is a merchant's key on an operator's route or the other way round. All of these
+get the same answer.
 
 ### not-found
 
-`404`. No such route, or no such payment, or another merchant's payment. Sending the
-request again cannot change this, because IDs are made by the server.
+`404`. No such route, or no such payment, merchant or API key, or another merchant's payment.
+Sending the request again cannot change this, because IDs are made by the server.
 
 ### method-not-allowed
 

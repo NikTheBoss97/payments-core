@@ -707,7 +707,11 @@ async fn a_command_that_cannot_be_confirmed_is_a_503_and_the_retry_settles_it(
     let commands = one_of_each(&pools, &secret).await?;
     install_crash_points(&pool).await?;
     let tenant = tenant_pool_of_one(&pool).await?;
-    let state = AppState::new(tenant.clone(), pools.system.clone());
+    let state = AppState::new(
+        tenant.clone(),
+        pools.system.clone(),
+        pools.operator.digest(),
+    );
 
     for (verb, payment, body, steps_before) in commands {
         let path = format!("/payments/{payment}/{verb}");
