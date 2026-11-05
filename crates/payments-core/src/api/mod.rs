@@ -44,6 +44,8 @@ pub fn router(state: AppState) -> Router {
         .route("/payments/{id}/authorize", post(payments::authorize))
         .route("/payments/{id}/capture", post(payments::capture))
         .route("/payments/{id}/refund", post(payments::refund))
+        .route("/payments/{id}/void", post(payments::void))
+        .route("/payments/{id}/cancel", post(payments::cancel))
         .fallback(no_such_route)
         .method_not_allowed_fallback(wrong_method)
         .layer(middleware::from_fn(in_its_own_task))
