@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DO $$ DECLARE target text; BEGIN FOR target IN SELECT c.relname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'public' AND c.relrowsecurity LOOP EXECUTE format('ALTER TABLE %I DISABLE ROW LEVEL SECURITY', target); END LOOP; END $$",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "ff81f02a5ae60201752e64cfcfab25c5c4c9bbdc052f19dba5db78d9ef785941"
+}
