@@ -11,12 +11,12 @@ use std::error::Error;
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
 use common::api::{Pools, Reply, a_merchant, bearer, get_with_authorization, post, records, send};
-use common::crashes::balances;
-use common::payment_id;
+use common::crashes::{balances, install_crash_points, plan_death};
 use common::payments::{AUTHORIZED, FEE, steps, unbalanced_currencies, uncaused_postings};
+use common::{payment_id, tenant_pool_of_one};
 use futures_util::future::join_all;
 use payments_core::api::problem::Problem;
-use payments_core::api::router;
+use payments_core::api::{AppState, router};
 use payments_core::credentials::ApiKeySecret;
 use payments_core::ids::PaymentId;
 use sqlx::PgPool;
@@ -208,6 +208,36 @@ async fn copies_of_a_refund_racing_apply_once_and_give_one_answer(pool: PgPool) 
         read(&pools, &secret, payment).await?["refundable"],
         AUTHORIZED - 1
     );
+    pools.close().await;
+    Ok(())
+}
+
+#[sqlx::test]
+async fn copies_of_each_command_racing_give_one_answer(pool: PgPool) -> TestResult {
+    // Copies wait on the payment's lock. By the time one gets it, the first has moved the
+    // payment on, so it would be refused, and only the key can give it the real answer.
+    let pools = Pools::login(&pool).await?;
+    let (_, secret) = a_merchant(&pools, 1).await?;
+    let to_authorize = created(&pools, &secret, "create-1").await?;
+    let to_capture = authorized(&pools, &secret, 2).await?;
+    let to_cancel = created(&pools, &secret, "create-3").await?;
+    let to_void = authorized(&pools, &secret, 4).await?;
+
+    for (verb, payment, body, steps_before) in [
+        ("authorize", to_authorize, AUTHORIZE, 1),
+        ("capture", to_capture, CAPTURE, 2),
+        ("cancel", to_cancel, "", 1),
+        ("void", to_void, "", 2),
+    ] {
+        let key = format!("race-{verb}");
+        let replies =
+            join_all((0..8).map(|_| step(&pools, &secret, payment, verb, &key, body))).await;
+        for reply in &replies {
+            assert_eq!(reply.status, StatusCode::OK, "{verb}: {reply:?}");
+            assert_eq!(reply.body, replies[0].body, "{verb}");
+        }
+        assert_eq!(steps(&pool, payment).await?, steps_before + 1, "{verb}");
+    }
     pools.close().await;
     Ok(())
 }
@@ -626,6 +656,116 @@ async fn a_body_on_a_route_that_takes_none_is_refused_and_leaves_the_key_free(
         let refused = step(&pools, &secret, payment, verb, &key, "{}").await;
         assert_eq!(refused.status, StatusCode::BAD_REQUEST, "{verb}");
         let reply = step(&pools, &secret, payment, verb, &key, "").await;
+        assert_eq!(reply.status, StatusCode::OK, "{verb}: {reply:?}");
+    }
+    pools.close().await;
+    Ok(())
+}
+
+/// A payment for each command, in the state where it would apply, with its body.
+async fn one_of_each(
+    pools: &Pools,
+    secret: &ApiKeySecret,
+) -> Result<Vec<(&'static str, PaymentId, String, i64)>, Box<dyn Error>> {
+    Ok(vec![
+        (
+            "authorize",
+            created(pools, secret, "create-1").await?,
+            AUTHORIZE.to_owned(),
+            1,
+        ),
+        (
+            "capture",
+            authorized(pools, secret, 2).await?,
+            CAPTURE.to_owned(),
+            2,
+        ),
+        ("refund", captured(pools, secret, 3).await?, refund_of(1), 3),
+        (
+            "void",
+            authorized(pools, secret, 4).await?,
+            String::new(),
+            2,
+        ),
+        (
+            "cancel",
+            created(pools, secret, "create-5").await?,
+            String::new(),
+            1,
+        ),
+    ])
+}
+
+#[sqlx::test]
+async fn a_command_that_cannot_be_confirmed_is_a_503_and_the_retry_settles_it(
+    pool: PgPool,
+) -> TestResult {
+    // The backend dies just before the key's row, so nothing commits. The client is told to
+    // send the request again, and that time it applies, once.
+    let pools = Pools::login(&pool).await?;
+    let (_, secret) = a_merchant(&pools, 1).await?;
+    let commands = one_of_each(&pools, &secret).await?;
+    install_crash_points(&pool).await?;
+    let tenant = tenant_pool_of_one(&pool).await?;
+    let state = AppState::new(tenant.clone(), pools.system.clone());
+
+    for (verb, payment, body, steps_before) in commands {
+        let path = format!("/payments/{payment}/{verb}");
+        plan_death(&tenant, "die_before idempotency_records").await?;
+        let reply = send(
+            router(state.clone()),
+            post(&path, &secret, verb, body.clone()),
+        )
+        .await;
+        assert_eq!(
+            reply.status,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "{verb}: {reply:?}"
+        );
+        assert_eq!(reply.body, Problem::Unavailable.body(), "{verb}");
+        assert_eq!(steps(&pool, payment).await?, steps_before, "{verb}");
+
+        let reply = send(router(state.clone()), post(&path, &secret, verb, body)).await;
+        assert_eq!(reply.status, StatusCode::OK, "{verb}: {reply:?}");
+        assert_eq!(steps(&pool, payment).await?, steps_before + 1, "{verb}");
+    }
+    tenant.close().await;
+    pools.close().await;
+    Ok(())
+}
+
+#[sqlx::test]
+async fn a_statement_the_database_refuses_is_a_500_and_leaves_the_key_free(
+    pool: PgPool,
+) -> TestResult {
+    // A rule that the types do not know about stands for a bug. Its answer says nothing of
+    // the cause, and it is no final answer to store.
+    let pools = Pools::login(&pool).await?;
+    let (_, secret) = a_merchant(&pools, 1).await?;
+    let commands = one_of_each(&pools, &secret).await?;
+    let before = records(&pool).await?;
+    sqlx::query!(
+        "ALTER TABLE payment_transitions ADD CONSTRAINT refuses_all CHECK (seq < 0) NOT VALID"
+    )
+    .execute(&pool)
+    .await?;
+
+    for (verb, payment, body, _) in &commands {
+        let reply = step(&pools, &secret, *payment, verb, verb, body).await;
+        assert_eq!(
+            reply.status,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "{verb}: {reply:?}"
+        );
+        assert_eq!(reply.body, Problem::Internal.body(), "{verb}");
+    }
+    assert_eq!(records(&pool).await?, before);
+
+    sqlx::query!("ALTER TABLE payment_transitions DROP CONSTRAINT refuses_all")
+        .execute(&pool)
+        .await?;
+    for (verb, payment, body, _) in &commands {
+        let reply = step(&pools, &secret, *payment, verb, verb, body).await;
         assert_eq!(reply.status, StatusCode::OK, "{verb}: {reply:?}");
     }
     pools.close().await;
