@@ -2,16 +2,23 @@
 
 //! What the tests of the HTTP API share (ADR-0023).
 
+use std::error::Error;
+
 use axum::Router;
 use axum::body::Body;
-use axum::http::{HeaderMap, Request, StatusCode};
+use axum::http::{HeaderMap, Method, Request, StatusCode};
 use http_body_util::BodyExt;
 use payments_core::api::AppState;
 use payments_core::credentials::ApiKeySecret;
+use payments_core::ids::{MerchantId, PaymentId};
+use payments_core::payments::{create_payment, register_merchant};
+use payments_core::tenancy::Tenant;
 use sqlx::PgPool;
 use tower::ServiceExt;
 
-use super::{runtime_pool, tenant_pool};
+use super::keys::issued_key;
+use super::payments::{create_command, fee_rate};
+use super::{merchant_id, runtime_pool, tenant_pool};
 
 /// A response, with its body read.
 #[derive(Debug)]
@@ -70,6 +77,53 @@ pub fn get_with_authorization(path: &str, value: &str) -> Request<Body> {
         .header("authorization", value)
         .body(Body::empty())
         .expect("a valid request")
+}
+
+/// A `POST` with this credential, idempotency key and body.
+pub fn post(path: &str, secret: &ApiKeySecret, key: &str, body: impl Into<Body>) -> Request<Body> {
+    Request::builder()
+        .method(Method::POST)
+        .uri(path)
+        .header("authorization", bearer(secret))
+        .header("idempotency-key", format!("\"{key}\""))
+        .body(body.into())
+        .expect("a valid request")
+}
+
+/// A registered merchant with an API key. `n` tells them apart.
+pub async fn a_merchant(
+    pools: &Pools,
+    n: u32,
+) -> Result<(MerchantId, ApiKeySecret), Box<dyn Error>> {
+    let merchant = merchant_id(n);
+    register_merchant(&pools.system, merchant, fee_rate()).await?;
+    Ok((merchant, issued_key(&pools.system, merchant, n).await?))
+}
+
+/// Payment `n` of this merchant, just created.
+pub async fn a_payment(
+    pools: &Pools,
+    merchant: MerchantId,
+    n: u32,
+) -> Result<PaymentId, Box<dyn Error>> {
+    let command = create_command(n, merchant);
+    create_payment(Tenant::new(&pools.tenant, merchant), &command).await?;
+    Ok(command.id)
+}
+
+/// How many final answers are stored under merchants' keys. Pass the test's own pool,
+/// which row-level security does not limit.
+pub async fn records(pool: &PgPool) -> sqlx::Result<i64> {
+    sqlx::query_scalar!(r#"SELECT count(*) AS "count!" FROM idempotency_records"#)
+        .fetch_one(pool)
+        .await
+}
+
+/// How many payments are stored, whoever owns them. Pass the test's own pool.
+pub async fn payments_stored(pool: &PgPool) -> sqlx::Result<i64> {
+    sqlx::query_scalar!(r#"SELECT count(*) AS "count!" FROM payments"#)
+        .fetch_one(pool)
+        .await
 }
 
 /// The two login roles' pools, as the server holds them (ADR-0025). The system role's

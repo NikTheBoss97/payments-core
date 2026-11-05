@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "ALTER TABLE payments ADD CONSTRAINT refuses_all CHECK (amount < 0) NOT VALID",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "1fc7efe95c6fbce8713923deb382cb6a48c8db951fcdee4e7925da78bb747c1b"
+}

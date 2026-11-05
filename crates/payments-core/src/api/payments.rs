@@ -7,13 +7,21 @@ use axum::extract::{FromRequestParts, Path};
 use axum::http::request::Parts;
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use super::keyed::{Attempt, KeyedRequest};
 use super::problem::Problem;
 use super::{AppState, Merchant};
-use crate::ids::PaymentId;
-use crate::payments::{Payment, find_payment};
+use crate::accounts::Psp;
+use crate::idempotency::Answer;
+use crate::ids::{AccountId, PaymentId, TransitionId};
+use crate::lifecycle::Refused;
+use crate::money::{Currency, PositiveAmount};
+use crate::payments::{
+    AccountCandidates, CreateError, CreatePayment, Outcome, Payment, Recorded, create_payment,
+    find_payment, merchant_fee_rate,
+};
 
 /// A payment of the merchant that asked. A route that takes one cannot reach another
 /// merchant's payment: holding this proves that its merchant is the credential's.
@@ -61,6 +69,102 @@ fn parse_payment_id(text: &str) -> Option<PaymentId> {
     PaymentId::try_from(id).ok()
 }
 
+/// Where a command landed, as a client sees it: the `Recorded` of ADR-0019, with statuses
+/// as their labels (ADR-0023).
+#[derive(Serialize)]
+struct Reply {
+    seq: i32,
+    from: &'static str,
+    to: &'static str,
+    refundable: i64,
+}
+
+impl From<&Recorded> for Reply {
+    fn from(recorded: &Recorded) -> Self {
+        Self {
+            seq: recorded.seq,
+            from: recorded.from.as_str(),
+            to: recorded.to.as_str(),
+            refundable: recorded.refundable,
+        }
+    }
+}
+
+/// What `POST /payments` answers: the new payment's ID and the reply.
+#[derive(Serialize)]
+struct Created {
+    payment_id: String,
+    #[serde(flatten)]
+    reply: Reply,
+}
+
+/// The body of `POST /payments`. It names no merchant, which comes from the credential,
+/// and no fee, which the operator sets, and an unknown field is refused (ADR-0024).
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CreateBody {
+    currency: String,
+    amount: i64,
+}
+
+/// `POST /payments`.
+pub(super) async fn create(merchant: Merchant, request: KeyedRequest) -> Response {
+    request
+        .answer(merchant.tenant(), || attempt_create(&merchant, &request))
+        .await
+}
+
+async fn attempt_create(merchant: &Merchant, request: &KeyedRequest) -> Result<Attempt, Problem> {
+    let body: CreateBody = request.body_as()?;
+    let currency = Currency::parse(&body.currency).map_err(|_| Problem::MalformedBody)?;
+    let amount = PositiveAmount::new(body.amount).map_err(|_| Problem::MalformedBody)?;
+    let fee_rate = merchant_fee_rate(merchant.tenant())
+        .await
+        .map_err(|err| Problem::Unavailable.because(&err))?
+        .expect("api_keys_merchant_fkey: the merchant that a credential names exists");
+    let id = PaymentId::now_v7();
+    let command = CreatePayment {
+        id,
+        step: TransitionId::now_v7(),
+        merchant: merchant.id(),
+        // The only provider until phase 4 (ADR-0023).
+        psp: Psp::Mock,
+        currency,
+        amount,
+        fee_rate,
+        accounts: AccountCandidates {
+            fee_revenue: AccountId::now_v7(),
+            merchant_payable: AccountId::now_v7(),
+            psp_receivable: AccountId::now_v7(),
+        },
+    };
+    let render = move |decided: Result<&Recorded, &Refused>| match decided {
+        Ok(recorded) => Answer {
+            status: 201,
+            body: json_text(&Created {
+                payment_id: id.to_string(),
+                reply: recorded.into(),
+            }),
+        },
+        Err(refused) => unreachable!("the table of moves has no refusal of a create: {refused}"),
+    };
+    let seal = request.seal(&render);
+    match create_payment(merchant.tenant().sealed(&seal), &command).await {
+        Ok(Outcome::Applied(recorded) | Outcome::AlreadyApplied(recorded)) => {
+            Ok(Attempt::Answered(render(Ok(&recorded))))
+        }
+        Err(CreateError::KeyTaken) => Ok(Attempt::KeyTaken),
+        Err(CreateError::UnknownCurrency { .. }) => Err(Problem::UnknownCurrency),
+        Err(err @ CreateError::NotConfirmed { .. }) => Err(Problem::Unavailable.because(&err)),
+        Err(
+            err @ (CreateError::UnknownMerchant { .. }
+            | CreateError::Account { .. }
+            | CreateError::Mismatch { .. }
+            | CreateError::Invariant { .. }),
+        ) => Err(Problem::Internal.because(&err)),
+    }
+}
+
 /// A payment as `GET /payments/{id}` shows it: its terms, its status and what can still be
 /// refunded (ADR-0023).
 #[derive(Serialize)]
@@ -96,7 +200,11 @@ fn json(status: StatusCode, value: &impl Serialize) -> Response {
     (
         status,
         [(header::CONTENT_TYPE, "application/json")],
-        serde_json::to_string(value).expect("strings and numbers always serialize"),
+        json_text(value),
     )
         .into_response()
+}
+
+fn json_text(value: &impl Serialize) -> String {
+    serde_json::to_string(value).expect("strings and numbers always serialize")
 }

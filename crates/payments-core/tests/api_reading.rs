@@ -13,40 +13,18 @@ use std::error::Error;
 
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
-use common::api::{Pools, bearer, get, get_with_authorization, send};
-use common::keys::issued_key;
-use common::payments::{authorize_command, capture_command, create_command, fee_rate};
-use common::{merchant_id, payment_id};
+use common::api::{Pools, a_merchant, a_payment, bearer, get, get_with_authorization, send};
+use common::payment_id;
+use common::payments::{authorize_command, capture_command};
 use payments_core::api::problem::Problem;
 use payments_core::api::{AppState, router};
 use payments_core::credentials::ApiKeySecret;
-use payments_core::ids::{MerchantId, PaymentId};
-use payments_core::payments::{
-    authorize, capture, create_payment, find_payment, register_merchant,
-};
+use payments_core::payments::{authorize, capture, find_payment};
 use payments_core::tenancy::Tenant;
 use sqlx::PgPool;
 use uuid::Uuid;
 
 type TestResult = Result<(), Box<dyn Error>>;
-
-/// A registered merchant with an API key. `n` tells them apart.
-async fn a_merchant(pools: &Pools, n: u32) -> Result<(MerchantId, ApiKeySecret), Box<dyn Error>> {
-    let merchant = merchant_id(n);
-    register_merchant(&pools.system, merchant, fee_rate()).await?;
-    Ok((merchant, issued_key(&pools.system, merchant, n).await?))
-}
-
-/// Payment `n` of this merchant, just created.
-async fn a_payment(
-    pools: &Pools,
-    merchant: MerchantId,
-    n: u32,
-) -> Result<PaymentId, Box<dyn Error>> {
-    let command = create_command(n, merchant);
-    create_payment(Tenant::new(&pools.tenant, merchant), &command).await?;
-    Ok(command.id)
-}
 
 /// `GET /payments/{id}`, with this secret.
 fn read(id: impl std::fmt::Display, secret: &ApiKeySecret) -> Request<Body> {

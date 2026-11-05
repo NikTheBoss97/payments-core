@@ -25,6 +25,17 @@ pub enum Problem {
     NotFound,
     /// A route that does not take this method.
     MethodNotAllowed,
+    /// No `Idempotency-Key` header, or one that is not a Structured Field string of 1 to
+    /// 255 visible ASCII characters.
+    MalformedKey,
+    /// A body that is not what its route takes, including a field that it does not know.
+    MalformedBody,
+    /// A body above the limit, which is axum's default of 2 MB.
+    BodyTooLarge,
+    /// The key holds the answer to a different request (ADR-0026).
+    KeyReused,
+    /// A currency that is well formed but not one that the service knows (ADR-0023).
+    UnknownCurrency,
     /// The database could not answer, or the outcome is unknown. Sending the request
     /// again is safe.
     Unavailable,
@@ -55,6 +66,31 @@ impl Problem {
                 StatusCode::METHOD_NOT_ALLOWED,
                 "method-not-allowed",
                 "This route does not take that method",
+            ),
+            Self::MalformedKey => (
+                StatusCode::BAD_REQUEST,
+                "malformed-key",
+                "The Idempotency-Key header is missing or malformed",
+            ),
+            Self::MalformedBody => (
+                StatusCode::BAD_REQUEST,
+                "malformed-body",
+                "The body is not what this route takes",
+            ),
+            Self::BodyTooLarge => (
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "body-too-large",
+                "The body is too large",
+            ),
+            Self::KeyReused => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "key-reused",
+                "This idempotency key was used for a different request",
+            ),
+            Self::UnknownCurrency => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "unknown-currency",
+                "The service does not know this currency",
             ),
             Self::Unavailable => (
                 StatusCode::SERVICE_UNAVAILABLE,
@@ -125,10 +161,15 @@ mod tests {
     use super::*;
 
     /// Every problem. The match stops a new one from compiling until it is added here.
-    const ALL: [Problem; 5] = [
+    const ALL: [Problem; 10] = [
         Problem::Unauthorized,
         Problem::NotFound,
         Problem::MethodNotAllowed,
+        Problem::MalformedKey,
+        Problem::MalformedBody,
+        Problem::BodyTooLarge,
+        Problem::KeyReused,
+        Problem::UnknownCurrency,
         Problem::Unavailable,
         Problem::Internal,
     ];
@@ -138,6 +179,11 @@ mod tests {
             Problem::Unauthorized
             | Problem::NotFound
             | Problem::MethodNotAllowed
+            | Problem::MalformedKey
+            | Problem::MalformedBody
+            | Problem::BodyTooLarge
+            | Problem::KeyReused
+            | Problem::UnknownCurrency
             | Problem::Unavailable
             | Problem::Internal => {}
         }
