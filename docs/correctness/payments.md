@@ -64,8 +64,8 @@ a broken rule is `Invariant`, and anything else, a lost connection above all, is
 
 The crash tests end one session, as a lost connection would. A dead Rust process
 ends its session too, and [PostgreSQL rolls back any open transaction](https://www.postgresql.org/docs/18/protocol-flow.html#PROTOCOL-FLOW-TERMINATION)
-however a session ends, but no test kills the process itself: that waits for
-phase 7's failure injection. The server's own recovery is outside the
+however a session ends. No test here kills the process itself, and the
+[API's tests](api.md) do, with commands in flight. PostgreSQL's own recovery is outside the
 [failure model](../DESIGN.md#failure-model), which assumes that committed data is
 not lost.
 
