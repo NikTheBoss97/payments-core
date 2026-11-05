@@ -212,6 +212,30 @@ Catching SQL built at run time, which CodeQL misses:
   prints the same UUID, so they were removed, and a new ID type raises no alert. The
   rest of that consequence stands: values named like `uuid` still read as sensitive,
   so the server's logs will raise alerts to read.
+- 2026-11-05: Planted through axum handlers, as the Consequences asked, on a draft pull
+  request closed unmerged, [#42](https://github.com/NikTheBoss97/payments-core/pull/42), with
+  CodeQL 2.27.4. Its model of axum marks a handler's parameters as remote sources, and that
+  holds: it does see axum. What it follows from there is narrower.
+
+  | Planted in a handler | Reported |
+  |---|---|
+  | SQL from a path, as `query(sql.as_str())`, which sqlx 0.9 no longer compiles | `rust/sql-injection` |
+  | SQL from a path, through `query(AssertSqlSafe(..))` | Nothing |
+  | A file path from a path, or a `String` body | `rust/path-injection` |
+  | A file path from a field or a method of an extractor of this project's own | `rust/path-injection` |
+  | A file path from `Bytes`, through `String::from_utf8_lossy`, with axum's extractor or `KeyedRequest` | Nothing |
+  | A file path from JSON parsed with `serde_json` | Nothing |
+  | A credential from a header, or a new `ApiKeySecret`, with `println!` | `rust/cleartext-logging` |
+  | The same two, with `tracing::error!` | Nothing |
+
+  So a clean scan says little about this server. Every route reads its body raw and parses it
+  with `serde_json`, where the taint stops, and the model list at that release has no
+  `tracing`, the logger that the server uses, so the alerts on its logs that the entries above
+  expected do not arise. What stands behind this is not CodeQL: SQL goes through checked macros
+  and `clippy` refuses the wrapper, a secret has no `Display` and a `Debug` that hides it, a log
+  line holds an error's chain and nothing of the request, and tests on the real binary assert
+  that its log holds no credential. CodeQL still sees an ID from a path, and SQL or a secret
+  written in the forms it models.
 
 ## References
 
@@ -220,7 +244,7 @@ Catching SQL built at run time, which CodeQL misses:
 - The Cargo Book, [Publishing on crates.io](https://doc.rust-lang.org/cargo/reference/publishing.html) ("The version can never be overwritten") and [`cargo install`](https://doc.rust-lang.org/cargo/commands/cargo-install.html) (`--locked`).
 - GitHub Docs, [About Dependabot alerts](https://docs.github.com/en/code-security/dependabot/dependabot-alerts/about-dependabot-alerts), [About the GitHub Advisory Database](https://docs.github.com/en/code-security/security-advisories/working-with-global-security-advisories-from-the-github-advisory-database/about-the-github-advisory-database), [Dependabot options reference](https://docs.github.com/en/code-security/reference/supply-chain-security/dependabot-options-reference) (`cooldown`, `ignore`, `allow`), [About code scanning with CodeQL](https://docs.github.com/en/code-security/code-scanning/introduction-to-code-scanning/about-code-scanning-with-codeql), [Customizing your advanced setup](https://docs.github.com/en/code-security/code-scanning/creating-an-advanced-setup-for-code-scanning/customizing-your-advanced-setup-for-code-scanning) (`paths-ignore`) and [Events that trigger workflows](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows) (`schedule`).
 - dependabot-core `6a43f5c`: [cargo/lib/dependabot/cargo/file_parser.rb](https://github.com/dependabot/dependabot-core/blob/6a43f5c18a7120386064c4afabb6a3e803d63d90/cargo/lib/dependabot/cargo/file_parser.rb#L39-L40) (`# TODO: Handle patched dependencies`).
-- CodeQL, [Supported languages and frameworks](https://codeql.github.com/docs/codeql-overview/supported-languages-and-frameworks/), and its [model of sqlx at CLI 2.27.4](https://github.com/github/codeql/blob/codeql-cli/v2.27.4/rust/ql/lib/codeql/rust/frameworks/sqlx.model.yml).
+- CodeQL, [Supported languages and frameworks](https://codeql.github.com/docs/codeql-overview/supported-languages-and-frameworks/), and at CLI 2.27.4 its [model of sqlx](https://github.com/github/codeql/blob/codeql-cli/v2.27.4/rust/ql/lib/codeql/rust/frameworks/sqlx.model.yml), its [model of axum](https://github.com/github/codeql/blob/codeql-cli/v2.27.4/rust/ql/lib/codeql/rust/frameworks/axum.model.yml) and its [list of models](https://github.com/github/codeql/tree/codeql-cli/v2.27.4/rust/ql/lib/codeql/rust/frameworks).
 - sqlx `f1e94ec`: [sqlx-core/src/sql_str.rs](https://github.com/transact-rs/sqlx/blob/f1e94ec34dd5f11ad6488a3a8ac7988439a3f757/sqlx-core/src/sql_str.rs) (`SqlSafeStr` and `AssertSqlSafe`).
 - Clippy, [Lint configuration](https://doc.rust-lang.org/clippy/lint_configuration.html) (`disallowed-methods`, `disallowed-types`).
 - Piergiorgio Ladisa et al., [SoK: Taxonomy of Attacks on Open-Source Software Supply Chains](https://doi.org/10.1109/SP46215.2023.10179304) (IEEE S&P, 2023).
