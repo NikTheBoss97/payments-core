@@ -2,7 +2,7 @@
 
 # ADR-0023: The HTTP API
 
-- Status: accepted; partly superseded by ADR-0028
+- Status: accepted; partly superseded by ADR-0028 and ADR-0030
 - Date: 2026-11-03
 
 ## Context
@@ -152,6 +152,9 @@ Error bodies:
   records a request to the PSP and answers 202, and its body loses the business time,
   which the PSP reports. `decline`, `expire` and `settle` reach a payment only from the
   PSP's history (ADR-0031), so `authorize` no longer stands in for the PSP.
+- 2026-11-07: ADR-0030 supersedes "Every `POST` requires an idempotency key (ADR-0026)"
+  for `POST /webhooks/{psp}`, which takes the PSP's notifications. Its signature
+  authenticates it, and its event ID tells its copies apart (ADR-0031).
 
 ## References
 
