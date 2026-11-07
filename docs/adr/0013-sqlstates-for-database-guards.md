@@ -89,6 +89,10 @@ constraints use one code per kind of constraint, such as `23514` for every
 
   The checks are separate triggers, so when several rules fail at once, the
   first trigger to run is the one reported; tests break one rule at a time.
+- 2026-11-07: the registry gains `LG007` (ADR-0034), raised at `COMMIT` by
+  `payment_transitions_fact_check`: a payment step of kind `authorize`,
+  `decline`, `capture`, `void`, `expire`, `settle` or `refund` that no fact
+  of the PSP's is tied to.
 
 ## References
 
