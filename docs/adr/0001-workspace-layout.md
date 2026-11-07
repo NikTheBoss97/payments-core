@@ -2,7 +2,7 @@
 
 # ADR-0001: Workspace layout
 
-- Status: accepted
+- Status: accepted; partly superseded by ADR-0029
 - Date: 2026-10-13
 
 ## Context
@@ -33,3 +33,11 @@ not before.
 - The core cannot accidentally depend on PSP internals, and vice versa.
 - Areas inside `payments-core` are separated only by module privacy, which
   takes discipline in review.
+
+## Amendments
+
+- 2026-11-07: ADR-0029 supersedes "`mock-psp` (a separate binary)" in Option 3.
+  `mock-psp` is a library with a thin binary, and `payments-core` takes it only as
+  a dev-dependency, so its tests can start and script the fake. The server's code
+  still reaches the PSP only over HTTP and signed webhooks, and `mock-psp` still
+  depends on nothing of `payments-core`.
