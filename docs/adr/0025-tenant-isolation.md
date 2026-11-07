@@ -2,7 +2,7 @@
 
 # ADR-0025: Tenant isolation
 
-- Status: accepted
+- Status: accepted; partly superseded by ADR-0034
 - Date: 2026-11-03
 
 ## Context
@@ -130,6 +130,16 @@ How a table without a merchant column is filtered:
   break each guard alone to show that the other still holds. Catalog tests pin each
   table's `relrowsecurity`, every policy's text and each role's `rolbypassrls`.
 - `roles.sql` changes, so a local volume needs `docker compose down -v` (ADR-0008).
+
+## Amendments
+
+- 2026-11-07: ADR-0034 supersedes "`payments_tenant` has the privileges of ADR-0012 and
+  ADR-0017". In phase 4 a merchant's command records a request to the PSP instead of a
+  step (ADR-0028), so the role loses `INSERT` on `ledger_transactions`,
+  `ledger_entries`, `payment_authorizations`, `payment_captures` and `payment_refunds`,
+  and a restrictive policy, `payment_transitions_tenant_steps`, lets it insert only
+  `create` and `cancel` steps. The webhooks and the sweep run on `payments_app`, as this
+  record planned.
 
 ## References
 
