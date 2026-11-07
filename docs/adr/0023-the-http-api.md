@@ -2,7 +2,7 @@
 
 # ADR-0023: The HTTP API
 
-- Status: accepted; partly superseded by ADR-0028 and ADR-0030
+- Status: accepted; partly superseded by ADR-0028, ADR-0030 and ADR-0033
 - Date: 2026-11-03
 
 ## Context
@@ -155,6 +155,10 @@ Error bodies:
 - 2026-11-07: ADR-0030 supersedes "Every `POST` requires an idempotency key (ADR-0026)"
   for `POST /webhooks/{psp}`, which takes the PSP's notifications. Its signature
   authenticates it, and its event ID tells its copies apart (ADR-0031).
+- 2026-11-07: ADR-0033 supersedes the answer of `GET /payments/{id}`, "the payment's
+  terms, status and refundable amount", which gains the authorization: the amount
+  authorized and `expires_at`. It also adds `GET /payments/{id}/requests/{request_id}`,
+  where a merchant follows a request that was answered 202.
 
 ## References
 
