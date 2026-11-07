@@ -2,7 +2,7 @@
 
 # ADR-0026: Idempotency keys
 
-- Status: accepted
+- Status: accepted; partly superseded by ADR-0028
 - Date: 2026-11-03
 
 ## Context
@@ -128,6 +128,15 @@ How a reused key is noticed:
   after the payment has moved on; each reuse caught; two merchants holding one key; a test
   that every `POST` route refuses a missing key; and a scan showing that no stored answer
   holds a secret.
+
+## Amendments
+
+- 2026-11-07: ADR-0028 supersedes the list in "Final answers are the ones the table of
+  moves gives under the lock: applied, an illegal move, an amount above its limit". A
+  request recorded for the PSP is final too: its 202 is stored under the key, and the
+  PSP's later decision does not change it. The consequence "Phase 4's calls to the PSP
+  must come after a commit and carry a stable ID of their own, and phase 4 decides how"
+  is decided there.
 
 ## References
 

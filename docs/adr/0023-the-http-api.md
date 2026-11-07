@@ -2,7 +2,7 @@
 
 # ADR-0023: The HTTP API
 
-- Status: accepted
+- Status: accepted; partly superseded by ADR-0028
 - Date: 2026-11-03
 
 ## Context
@@ -147,6 +147,11 @@ Error bodies:
   basis points is a malformed body, since it cannot be parsed into a rate. `OPERATOR_KEY_SHA256`
   is 64 lowercase hex digits, and the binary stops at once on anything else, without repeating
   what it read, because the likeliest mistake is pasting the secret itself.
+- 2026-11-07: ADR-0028 supersedes the rows of `authorize`, `capture`, `refund` and `void`
+  in the table of routes, and the bullet "What stays off HTTP". Each of those routes now
+  records a request to the PSP and answers 202, and its body loses the business time,
+  which the PSP reports. `decline`, `expire` and `settle` reach a payment only from the
+  PSP's history (ADR-0031), so `authorize` no longer stands in for the PSP.
 
 ## References
 
