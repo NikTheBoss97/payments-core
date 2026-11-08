@@ -17,6 +17,7 @@ use std::collections::HashMap;
 use chrono::{DateTime, TimeDelta, Utc};
 use uuid::Uuid;
 
+use crate::deliveries::{Attempt, next_attempt};
 use crate::wire::{Detail, Fact, History, Notification, Request, RequestKind};
 
 /// How long the idempotency cache keeps a request, as Stripe may prune its keys after a
@@ -97,6 +98,23 @@ pub struct Message {
     /// Its `webhook-id`, which stays the same on every attempt (ADR-0030).
     pub id: String,
     pub notification: Notification,
+    /// How many attempts were made to deliver it.
+    pub attempts: u32,
+    pub state: MessageState,
+}
+
+/// Where a notification stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MessageState {
+    /// Owed, with its next attempt due at this time.
+    Due(DateTime<Utc>),
+    /// The receiver took it, with a `2xx`.
+    Delivered,
+    /// Every attempt of the schedule failed. The sweep finds what it announced
+    /// (ADR-0031).
+    GaveUp,
+    /// The test dropped it: it is never delivered unless the test delivers it.
+    Dropped,
 }
 
 /// Everything that the fake remembers.
@@ -287,6 +305,8 @@ impl Model {
         self.messages.push(Message {
             id: id.clone(),
             notification: Notification::payment_updated(payment_id, now),
+            attempts: 0,
+            state: MessageState::Due(now),
         });
         id
     }
@@ -294,6 +314,65 @@ impl Model {
     /// The notifications, in the order of the facts that they announce.
     pub(crate) fn messages(&self) -> &[Message] {
         &self.messages
+    }
+
+    /// The notification with this ID.
+    pub(crate) fn message(&self, message_id: &str) -> Option<&Message> {
+        self.messages
+            .iter()
+            .find(|message| message.id == message_id)
+    }
+
+    /// The notifications due by `now`, in order.
+    pub(crate) fn due(&self, now: DateTime<Utc>) -> Vec<String> {
+        self.messages
+            .iter()
+            .filter(|message| matches!(message.state, MessageState::Due(due) if due <= now))
+            .map(|message| message.id.clone())
+            .collect()
+    }
+
+    /// Records an attempt made at `at`. A delivered notification stays delivered, and a
+    /// failure moves only one that is still due to its next attempt, or ends it.
+    pub(crate) fn record(
+        &mut self,
+        message_id: &str,
+        attempt: Attempt,
+        at: DateTime<Utc>,
+        jitter: u16,
+    ) {
+        let Some(message) = self
+            .messages
+            .iter_mut()
+            .find(|message| message.id == message_id)
+        else {
+            return;
+        };
+        message.attempts += 1;
+        if attempt.delivered() {
+            message.state = MessageState::Delivered;
+        } else if let MessageState::Due(_) = message.state {
+            let retry_after = match attempt {
+                Attempt::Answered { retry_after, .. } => retry_after,
+                Attempt::NoAnswer => None,
+            };
+            message.state = match next_attempt(message.attempts, at, retry_after, jitter) {
+                Some(due) => MessageState::Due(due),
+                None => MessageState::GaveUp,
+            };
+        }
+    }
+
+    /// Drops a notification that was not delivered.
+    pub(crate) fn drop_message(&mut self, message_id: &str) {
+        if let Some(message) = self
+            .messages
+            .iter_mut()
+            .find(|message| message.id == message_id)
+            && message.state != MessageState::Delivered
+        {
+            message.state = MessageState::Dropped;
+        }
     }
 
     /// A payment's history, if the PSP holds anything for it.
