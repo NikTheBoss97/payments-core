@@ -9,8 +9,11 @@
 //!
 //! A test starts one fake of its own, on a free local port, and scripts every decision
 //! and fault through [`MockPsp`]. By default the fake holds each request until the test
-//! decides it, so that every fact appears at a moment that the test chose.
+//! decides it, so that every fact appears at a moment that the test chose. Each fact is
+//! announced by a thin, signed notification, which the test delivers when it chooses,
+//! and as often, while the binary delivers on the schedule of Standard Webhooks.
 
+mod deliveries;
 mod model;
 mod server;
 pub mod signing;
@@ -20,14 +23,19 @@ use std::collections::VecDeque;
 use std::io;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::Duration;
 
+use axum::http::Uri;
 use chrono::{DateTime, TimeDelta, Utc};
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
+pub use deliveries::Attempt;
+use deliveries::Courier;
 use model::Model;
-pub use model::{Decision, Impossible, Message, Policy};
+pub use model::{Decision, Impossible, Message, MessageState, Policy};
+use signing::{SigningKey, signature_header};
 use wire::{Detail, History, Request};
 
 /// What a fake starts with.
@@ -40,11 +48,17 @@ pub struct Config {
     pub api_key: String,
     /// How long an authorization lasts before it may lapse.
     pub authorization_lifetime: TimeDelta,
+    /// The keys that sign each notification, the current one first. During a rotation
+    /// there are two (ADR-0030).
+    pub signing_keys: Vec<SigningKey>,
+    /// How long a delivery waits for the receiver's answer: the specification asks for
+    /// 15 to 30 seconds.
+    pub delivery_timeout: Duration,
 }
 
 impl Config {
-    /// A fake for one test: on a free local port, holding every request, with a new
-    /// API key.
+    /// A fake for one test: on a free local port, holding every request, with a new API
+    /// key and a new signing key.
     #[must_use]
     pub fn for_tests() -> Self {
         Self {
@@ -52,8 +66,21 @@ impl Config {
             policy: Policy::Hold,
             api_key: new_api_key(),
             authorization_lifetime: TimeDelta::days(7),
+            signing_keys: vec![SigningKey::generate()],
+            delivery_timeout: Duration::from_secs(15),
         }
     }
+}
+
+/// How a test spoils a delivery, to watch the server refuse it (ADR-0030).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tamper {
+    /// Signed with a key that the server does not hold.
+    WrongKey,
+    /// A `webhook-timestamp` of the test's choosing, in Unix seconds, signed as if true.
+    Timestamp(i64),
+    /// One byte added to the body after it was signed, which keeps it valid JSON.
+    ChangedBody,
 }
 
 /// A new key for the service's calls: `mock_sk_` and 64 hex digits from the operating
@@ -97,6 +124,10 @@ pub(crate) struct Shared {
     model: Mutex<Model>,
     faults: Mutex<Faults>,
     api_key: String,
+    keys: Vec<SigningKey>,
+    /// Where notifications go: the server's `POST /webhooks/mock`.
+    endpoint: Mutex<Option<String>>,
+    courier: Courier,
 }
 
 impl Shared {
@@ -172,6 +203,9 @@ impl MockPsp {
             model: Mutex::new(Model::new(config.policy, config.authorization_lifetime)),
             faults: Mutex::new(Faults::default()),
             api_key: config.api_key,
+            keys: config.signing_keys,
+            endpoint: Mutex::new(None),
+            courier: Courier::new(config.delivery_timeout),
         });
         let router = server::router(Arc::clone(&shared));
         let server = tokio::spawn(async move {
@@ -330,6 +364,130 @@ impl MockPsp {
     pub fn notifications(&self) -> Vec<Message> {
         self.shared.model().messages().to_vec()
     }
+
+    /// Sends notifications to this endpoint: the server's `POST /webhooks/mock`.
+    ///
+    /// # Panics
+    ///
+    /// On an endpoint that is not a URI.
+    pub fn deliver_to(&self, endpoint: &str) {
+        endpoint
+            .parse::<Uri>()
+            .unwrap_or_else(|_| panic!("{endpoint} is not a URI"));
+        *self.endpoint() = Some(endpoint.to_owned());
+    }
+
+    /// The keys that sign each notification, as the server reads them from its
+    /// environment: `whsec_` and base64.
+    #[must_use]
+    pub fn signing_keys(&self) -> Vec<String> {
+        self.shared.keys.iter().map(SigningKey::written).collect()
+    }
+
+    /// Makes one attempt to deliver this notification, now, whatever its state: one that
+    /// was delivered goes again, as a duplicate, with the same ID and body.
+    ///
+    /// # Panics
+    ///
+    /// Before [`MockPsp::deliver_to`], or on a notification that the fake does not owe.
+    pub async fn deliver(&self, message_id: &str) -> Attempt {
+        self.attempt(message_id, None, now()).await
+    }
+
+    /// Makes one attempt, spoiled in this way.
+    ///
+    /// # Panics
+    ///
+    /// As [`MockPsp::deliver`].
+    pub async fn deliver_tampered(&self, message_id: &str, tamper: Tamper) -> Attempt {
+        self.attempt(message_id, Some(tamper), now()).await
+    }
+
+    /// Makes one attempt at each notification due by `now`, in order, and records any
+    /// failure at `now`: the binary takes this step on a timer, and a test takes it with
+    /// any time it likes. The `webhook-timestamp` of each attempt is still the true time,
+    /// which the server checks against its own clock.
+    ///
+    /// # Panics
+    ///
+    /// Before [`MockPsp::deliver_to`].
+    pub async fn deliver_due(&self, now: DateTime<Utc>) -> Vec<(String, Attempt)> {
+        let due = self.shared.model().due(now);
+        let mut attempts = Vec::with_capacity(due.len());
+        for message_id in due {
+            let attempt = self.attempt(&message_id, None, now).await;
+            attempts.push((message_id, attempt));
+        }
+        attempts
+    }
+
+    /// Drops a notification, which is then never delivered unless a test delivers it:
+    /// the sweep must find its fact (ADR-0031).
+    pub fn drop_notification(&self, message_id: &str) {
+        self.shared.model().drop_message(message_id);
+    }
+
+    /// Announces again that this payment changed, in a new event: the same fact in two
+    /// events, as Stripe may send it. Returns the new notification's ID.
+    pub fn notify_again(&self, payment_id: Uuid) -> String {
+        self.shared.model().notify(payment_id, now())
+    }
+
+    /// One attempt, recorded as made at `at`.
+    async fn attempt(
+        &self,
+        message_id: &str,
+        tamper: Option<Tamper>,
+        at: DateTime<Utc>,
+    ) -> Attempt {
+        let endpoint = self
+            .endpoint()
+            .clone()
+            .expect("deliver_to names the server's endpoint first");
+        let message = self
+            .shared
+            .model()
+            .message(message_id)
+            .cloned()
+            .unwrap_or_else(|| panic!("the fake owes no notification {message_id}"));
+        // Each attempt is signed with the time it is made (Standard Webhooks).
+        let timestamp = match tamper {
+            Some(Tamper::Timestamp(chosen)) => chosen,
+            _ => Utc::now().timestamp(),
+        };
+        let keys = match tamper {
+            Some(Tamper::WrongKey) => vec![SigningKey::generate()],
+            _ => self.shared.keys.clone(),
+        };
+        let mut payload = message.notification.payload();
+        let signature = signature_header(&keys, message_id, timestamp, &payload);
+        if tamper == Some(Tamper::ChangedBody) {
+            payload.push(b' ');
+        }
+        let attempt = self
+            .shared
+            .courier
+            .post(&endpoint, message_id, timestamp, &signature, payload)
+            .await;
+        self.shared
+            .model()
+            .record(message_id, attempt, at, jitter());
+        attempt
+    }
+
+    fn endpoint(&self) -> MutexGuard<'_, Option<String>> {
+        self.shared
+            .endpoint
+            .lock()
+            .expect("no test panicked while it held the endpoint")
+    }
+}
+
+/// A jitter from 0 to 999, from the operating system.
+fn jitter() -> u16 {
+    let mut bytes = [0_u8; 2];
+    getrandom::fill(&mut bytes).expect("the operating system's random bytes");
+    u16::from_le_bytes(bytes) % 1_000
 }
 
 impl Drop for MockPsp {

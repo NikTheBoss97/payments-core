@@ -20,25 +20,26 @@ sha2 = { version = "0.11", default-features = false }
 # The business times that facts report, in RFC 3339 (ADR-0022), and the time now.
 # sqlx builds this crate already, with its clock.
 chrono = { version = "0.4.45", default-features = false, features = ["now", "serde", "std"] }
-# Keys from the operating system (ADR-0030). uuid builds this crate already.
+# Keys from the operating system (ADR-0030), and the jitter of the schedule. uuid
+# builds this crate already.
 getrandom = "0.4"
+# Delivering notifications (ADR-0036): the legacy client, with the one retry that it
+# makes by itself switched off, and the body that it sends.
+http-body-util = "0.1"
+hyper-util = { version = "0.1.21", features = ["client-legacy", "http1", "tokio"] }
 # The wire format (ADR-0029). sqlx builds these crates already.
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # Derives Display and Error for the error types. sqlx depends on it too.
 thiserror = "2.0.21"
-# Serves the routes.
-tokio = { version = "1.54.1", features = ["net", "rt"] }
+# Serves the routes, and bounds each delivery with a timeout.
+tokio = { version = "1.54.1", features = ["net", "rt", "time"] }
 # The service's IDs on the wire, and the fake's own, from a UUIDv7.
 uuid = { version = "1.28", features = ["serde", "v7"] }
 
 [dev-dependencies]
-# A client for the fake's own tests over HTTP: the legacy client of ADR-0036, and the
-# body that it sends.
-http-body-util = "0.1"
-hyper-util = { version = "0.1.21", features = ["client-legacy", "http1", "tokio"] }
-# #[tokio::test], and the timeout of a test that waits for a reply that never comes.
-tokio = { version = "1.54.1", features = ["macros", "time"] }
+# #[tokio::test]. Cargo adds this feature to the one above.
+tokio = { version = "1.54.1", features = ["macros"] }
 
 [lints]
 workspace = true
