@@ -138,7 +138,9 @@ Records that an authorization was voided. It takes no body, not even `{}`.
 
 ### `POST /payments/{id}/cancel`
 
-Cancels a payment before its authorization. It takes no body, not even `{}`.
+Cancels a payment before its authorization. It takes no body, not even `{}`. Once an
+authorization has been requested, the provider may hold one, so a cancel gets
+[`authorization-requested`](#authorization-requested).
 
 ### What is not a route
 
@@ -273,7 +275,8 @@ or what can still be refunded. It is final and stored under the key, as for an
 ### authorization-requested
 
 `409`. The payment has a request to authorize it already, whether or not the provider has
-decided it: a payment has one authorization. It is final and stored under the key, as for an
+decided it. A payment has one authorization, and once one is requested, the provider may hold
+it, so the payment can no longer be cancelled. It is final and stored under the key, as for an
 [`illegal-move`](#illegal-move).
 
 ### capture-or-void-pending

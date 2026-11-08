@@ -18,7 +18,7 @@ use common::payments::{
 };
 use common::{
     INSUFFICIENT_PRIVILEGE, UNIQUE_VIOLATION, assert_violation, merchant_id, request_id,
-    runtime_pool, runtime_transaction, sqlstate, tenant_pool, tenant_transaction,
+    runtime_pool, runtime_transaction, sqlstate, tenant_pool, tenant_transaction, transition_id,
     wait_for_lock_wait,
 };
 use futures_util::future::{join, join_all};
@@ -27,7 +27,9 @@ use payments_core::idempotency::{Seal, recall};
 use payments_core::ids::{MerchantId, PaymentId};
 use payments_core::lifecycle::{Event, IllegalTransition, PaymentStatus, Refused};
 use payments_core::money::PositiveAmount;
-use payments_core::payments::{authorize, capture, create_payment, lock_key, register_merchant};
+use payments_core::payments::{
+    StepCommand, StepError, authorize, cancel, capture, create_payment, lock_key, register_merchant,
+};
 use payments_core::requests::{
     Ask, Conflict, RecordRequest, Refusal, RequestError, RequestKind, RequestOutcome,
     RequestRecorded, record_request,
@@ -635,6 +637,61 @@ async fn a_request_waits_for_the_payments_lock_and_reads_what_its_holder_committ
         "{result:?}"
     );
     assert_eq!(requests_stored(&pool).await?.len(), 1);
+    tenant.close().await;
+    Ok(())
+}
+
+#[sqlx::test]
+async fn a_cancel_is_refused_once_an_authorization_is_requested(pool: PgPool) -> TestResult {
+    // A cancellation is a step of our own, which the PSP never hears of: once it may hold
+    // an authorization, only a void releases it (ADR-0039).
+    let (tenant, merchant, _) = two_merchants(&pool).await?;
+    let me = Tenant::new(&tenant, merchant);
+    let asked = created(me, merchant, 1).await?;
+    let unasked = created(me, merchant, 2).await?;
+    record_request(me, &request(1, asked, Ask::Authorize(amount(REQUESTED)))).await?;
+    let cancel_of = |n, payment| StepCommand {
+        step: transition_id(n),
+        payment,
+    };
+
+    let err = cancel(me, &cancel_of(101, asked)).await.unwrap_err();
+    assert!(matches!(err, StepError::AuthorizationRequested), "{err:?}");
+    assert_eq!(steps(&pool, asked).await?, 1);
+    // Under a key, the conflict is final, so it is stored (ADR-0026).
+    let k = key("cancel");
+    let seal = Seal {
+        key: &k,
+        fingerprint: print(1),
+        answer: &render,
+    };
+    let err = cancel(me.sealed(&seal), &cancel_of(102, asked))
+        .await
+        .unwrap_err();
+    assert!(matches!(err, StepError::AuthorizationRequested), "{err:?}");
+    assert_eq!(
+        recall(me, &k, print(1)).await?,
+        answered(
+            409,
+            r#"{"type":"conflict","conflict":"an authorization of this payment was requested already"}"#
+        )
+    );
+    // Once the payment is authorized, the status refuses the cancel first, as before.
+    authorize(me, &authorize_command(1, asked)).await?;
+    let err = cancel(me, &cancel_of(103, asked)).await.unwrap_err();
+    assert!(
+        matches!(
+            err,
+            StepError::Illegal(IllegalTransition {
+                status: PaymentStatus::Authorized,
+                event: Event::Cancel
+            })
+        ),
+        "{err:?}"
+    );
+    // A payment with no request is still cancelled.
+    cancel(me, &cancel_of(104, unasked)).await?;
+    assert_eq!(steps(&pool, unasked).await?, 2);
     tenant.close().await;
     Ok(())
 }
