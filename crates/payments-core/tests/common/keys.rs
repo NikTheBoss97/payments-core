@@ -5,11 +5,12 @@
 use std::error::Error;
 
 use payments_core::credentials::ApiKeySecret;
-use payments_core::idempotency::{Answer, Fingerprint, IdempotencyKey, OperatorSeal, Recall};
+use payments_core::idempotency::{
+    Answer, Decided, Fingerprint, IdempotencyKey, OperatorSeal, Recall,
+};
 use payments_core::ids::MerchantId;
 use payments_core::lifecycle::Refused;
 use payments_core::operator::issue_api_key;
-use payments_core::payments::Recorded;
 use sqlx::PgPool;
 
 use super::api_key_id;
@@ -46,20 +47,20 @@ pub fn print(n: u32) -> Fingerprint {
 
 /// What these tests answer: the status a route would give, and a body that shows
 /// which answer this was.
-pub fn render(answer: Result<&Recorded, &Refused>) -> Answer {
+pub fn render(answer: Decided<'_>) -> Answer {
     match answer {
-        Ok(recorded) => Answer {
+        Decided::Applied(recorded) => Answer {
             status: 200,
             body: format!(
                 r#"{{"seq":{},"refundable":{}}}"#,
                 recorded.seq, recorded.refundable
             ),
         },
-        Err(Refused::Illegal(_)) => Answer {
+        Decided::Refused(Refused::Illegal(_)) => Answer {
             status: 409,
             body: r#"{"type":"illegal"}"#.to_owned(),
         },
-        Err(Refused::AboveLimit { limit, .. }) => Answer {
+        Decided::Refused(Refused::AboveLimit { limit, .. }) => Answer {
             status: 422,
             body: format!(r#"{{"type":"limit","limit":{limit}}}"#),
         },

@@ -16,15 +16,13 @@ use sqlx::PgPool;
 
 use super::problem::Problem;
 use crate::idempotency::{
-    Answer, Fingerprint, IdempotencyKey, OperatorSeal, Recall, RecallError, Seal, recall,
+    Answer, Decided, Fingerprint, IdempotencyKey, OperatorSeal, Recall, RecallError, Seal, recall,
     recall_operator,
 };
-use crate::lifecycle::Refused;
-use crate::payments::Recorded;
 use crate::tenancy::Tenant;
 
 /// How a command's final answer is rendered, for its seal and for this response.
-pub(super) type Render = dyn Fn(Result<&Recorded, &Refused>) -> Answer + Sync;
+pub(super) type Render = dyn Fn(Decided<'_>) -> Answer + Sync;
 
 /// A request's key, what the key would be used for, and its raw body, which the
 /// fingerprint needs as exact bytes. The body is parsed only once the key is free.
