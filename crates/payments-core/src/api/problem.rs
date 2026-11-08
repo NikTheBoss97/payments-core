@@ -44,6 +44,12 @@ pub enum Problem {
     /// The amount is above what the payment allows. It is final, so it is stored under the
     /// key (ADR-0026).
     AmountAboveLimit,
+    /// The payment has a request to authorize it already, decided or not. It is final, so it
+    /// is stored under the key (ADR-0039).
+    AuthorizationRequested,
+    /// A capture or a void of the payment waits for the provider's decision. It is final, so
+    /// it is stored under the key (ADR-0039).
+    CaptureOrVoidPending,
     /// The database could not answer, or the outcome is unknown. Sending the request
     /// again is safe.
     Unavailable,
@@ -109,6 +115,16 @@ impl Problem {
                 StatusCode::UNPROCESSABLE_ENTITY,
                 "amount-above-limit",
                 "The amount is above what the payment allows",
+            ),
+            Self::AuthorizationRequested => (
+                StatusCode::CONFLICT,
+                "authorization-requested",
+                "An authorization of this payment was requested already",
+            ),
+            Self::CaptureOrVoidPending => (
+                StatusCode::CONFLICT,
+                "capture-or-void-pending",
+                "A capture or a void of this payment waits for the provider",
             ),
             Self::Unavailable => (
                 StatusCode::SERVICE_UNAVAILABLE,
@@ -188,7 +204,7 @@ mod tests {
     use super::*;
 
     /// Every problem. The match stops a new one from compiling until it is added here.
-    const ALL: [Problem; 12] = [
+    const ALL: [Problem; 14] = [
         Problem::Unauthorized,
         Problem::NotFound,
         Problem::MethodNotAllowed,
@@ -199,6 +215,8 @@ mod tests {
         Problem::UnknownCurrency,
         Problem::IllegalMove,
         Problem::AmountAboveLimit,
+        Problem::AuthorizationRequested,
+        Problem::CaptureOrVoidPending,
         Problem::Unavailable,
         Problem::Internal,
     ];
@@ -215,6 +233,8 @@ mod tests {
             | Problem::UnknownCurrency
             | Problem::IllegalMove
             | Problem::AmountAboveLimit
+            | Problem::AuthorizationRequested
+            | Problem::CaptureOrVoidPending
             | Problem::Unavailable
             | Problem::Internal => {}
         }

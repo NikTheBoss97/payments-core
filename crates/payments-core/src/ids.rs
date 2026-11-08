@@ -265,6 +265,56 @@ impl fmt::Display for TransitionId {
     }
 }
 
+/// The ID of a request to the PSP, which identifies the command that records it, and
+/// the request at the PSP: its idempotency key and its reference on every send
+/// (ADR-0028). Neither `Copy` nor `Clone`, for the reason of [`TransitionId`]: a reused
+/// ID with the same content reads as the same request, so reusing one must be written
+/// out, through `TryFrom<Uuid>`.
+///
+/// ```
+/// use payments_core::ids::RequestId;
+///
+/// let id = RequestId::now_v7();
+/// let same = RequestId::try_from(id.get()).expect("a UUIDv7");
+/// assert_eq!(same, id);
+/// ```
+///
+/// ```compile_fail
+/// use payments_core::ids::RequestId;
+///
+/// let id = RequestId::now_v7();
+/// let copy = id.clone(); // no Clone
+/// ```
+#[derive(Debug, PartialEq, Eq, Hash)]
+pub struct RequestId(Uuid);
+
+impl RequestId {
+    /// A new ID from the system clock, through [`Uuid::now_v7`].
+    #[must_use]
+    pub fn now_v7() -> Self {
+        Self(Uuid::now_v7())
+    }
+
+    /// The inner UUID, to bind in SQL and to send.
+    pub fn get(&self) -> Uuid {
+        self.0
+    }
+}
+
+impl TryFrom<Uuid> for RequestId {
+    type Error = InvalidId;
+
+    fn try_from(id: Uuid) -> Result<Self, Self::Error> {
+        check(id).map(Self)
+    }
+}
+
+impl fmt::Display for RequestId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(&self.0, f)
+    }
+}
+
 /// The database's rule, `uuid_extract_version(id) IS NOT DISTINCT FROM 7`:
 /// `uuid_extract_version` returns NULL for any variant other than RFC 9562's.
 /// `get_version_num` alone reads the version nibble whatever the variant.
@@ -294,6 +344,7 @@ mod tests {
         assert_eq!(MerchantId::try_from(V7).map(MerchantId::get), Ok(V7));
         assert_eq!(ApiKeyId::try_from(V7).map(ApiKeyId::get), Ok(V7));
         assert_eq!(TransitionId::try_from(V7).map(|id| id.get()), Ok(V7));
+        assert_eq!(RequestId::try_from(V7).map(|id| id.get()), Ok(V7));
     }
 
     #[test]
@@ -318,6 +369,7 @@ mod tests {
             assert_eq!(MerchantId::try_from(uuid), Err(InvalidId(uuid)));
             assert_eq!(ApiKeyId::try_from(uuid), Err(InvalidId(uuid)));
             assert_eq!(TransitionId::try_from(uuid), Err(InvalidId(uuid)));
+            assert_eq!(RequestId::try_from(uuid), Err(InvalidId(uuid)));
         }
     }
 
@@ -329,6 +381,7 @@ mod tests {
         let merchants: Vec<Uuid> = (0..1000).map(|_| MerchantId::now_v7().get()).collect();
         let api_keys: Vec<Uuid> = (0..1000).map(|_| ApiKeyId::now_v7().get()).collect();
         let transitions: Vec<Uuid> = (0..1000).map(|_| TransitionId::now_v7().get()).collect();
+        let requests: Vec<Uuid> = (0..1000).map(|_| RequestId::now_v7().get()).collect();
         let all = [
             accounts,
             transactions,
@@ -336,6 +389,7 @@ mod tests {
             merchants,
             api_keys,
             transitions,
+            requests,
         ]
         .concat();
         for id in &all {
@@ -345,11 +399,12 @@ mod tests {
             assert_eq!(MerchantId::try_from(*id).map(MerchantId::get), Ok(*id));
             assert_eq!(ApiKeyId::try_from(*id).map(ApiKeyId::get), Ok(*id));
             assert_eq!(TransitionId::try_from(*id).map(|t| t.get()), Ok(*id));
+            assert_eq!(RequestId::try_from(*id).map(|r| r.get()), Ok(*id));
         }
         // One process-wide generator serves every type (ADR-0005), so no ID
         // repeats across them either.
         let distinct: HashSet<&Uuid> = all.iter().collect();
-        assert_eq!(distinct.len(), 6000);
+        assert_eq!(distinct.len(), 7000);
     }
 
     #[test]
@@ -361,12 +416,14 @@ mod tests {
         let merchant = MerchantId::try_from(V7).expect("valid ID");
         let api_key = ApiKeyId::try_from(V7).expect("valid ID");
         let transition = TransitionId::try_from(V7).expect("valid ID");
+        let request = RequestId::try_from(V7).expect("valid ID");
         assert_eq!(account.to_string(), text);
         assert_eq!(transaction.to_string(), text);
         assert_eq!(payment.to_string(), text);
         assert_eq!(merchant.to_string(), text);
         assert_eq!(api_key.to_string(), text);
         assert_eq!(transition.to_string(), text);
+        assert_eq!(request.to_string(), text);
         assert_eq!(
             InvalidId(Uuid::nil()).to_string(),
             "00000000-0000-0000-0000-000000000000 is not a UUIDv7 of the RFC 9562 variant"
@@ -398,6 +455,7 @@ mod tests {
             prop_assert_eq!(MerchantId::try_from(uuid).is_ok(), valid);
             prop_assert_eq!(ApiKeyId::try_from(uuid).is_ok(), valid);
             prop_assert_eq!(TransitionId::try_from(uuid).is_ok(), valid);
+            prop_assert_eq!(RequestId::try_from(uuid).is_ok(), valid);
         }
     }
 }

@@ -14,8 +14,8 @@ use sha2::{Digest, Sha256};
 use sqlx::{PgPool, Postgres, Transaction};
 
 use crate::ids::MerchantId;
-use crate::lifecycle::Refused;
 use crate::payments::Recorded;
+use crate::requests::{Refusal, RequestRecorded};
 use crate::tenancy::{Scope, Tenant};
 
 /// Why a key was refused.
@@ -101,8 +101,10 @@ pub struct Answer {
 pub enum Decided<'a> {
     /// The command wrote its step.
     Applied(&'a Recorded),
-    /// The table of moves, or an amount's limit, refused it.
-    Refused(Refused),
+    /// The command recorded a request to the PSP.
+    Requested(&'a RequestRecorded),
+    /// The table of moves, an amount's limit, or a request already recorded refused it.
+    Refused(Refusal),
 }
 
 /// What a command under a key stores with its effect: which key, what it was used

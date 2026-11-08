@@ -24,6 +24,7 @@ use crate::payments::{
     CreateError, CreatePayment, Outcome, Payment, Recorded, Refund, RefundError, StepCommand,
     StepError, create_payment, find_payment, merchant_fee_rate,
 };
+use crate::requests::{Conflict, Refusal};
 use crate::times::BusinessTime;
 
 /// A payment of the merchant that asked. A route that takes one cannot reach another
@@ -135,6 +136,9 @@ async fn attempt_create(merchant: &Merchant, request: &KeyedRequest) -> Result<A
                 reply: recorded.into(),
             }),
         },
+        Decided::Requested(requested) => {
+            unreachable!("a create records no request: {requested:?}")
+        }
         Decided::Refused(refused) => {
             unreachable!("the table of moves has no refusal of a create: {refused}")
         }
@@ -156,7 +160,7 @@ async fn attempt_create(merchant: &Merchant, request: &KeyedRequest) -> Result<A
     }
 }
 
-/// The final answer of a command on a payment: what the table of moves gave. Its seal stores
+/// The final answer of a command on a payment: its step, or what refused it. Its seal stores
 /// this and the response shows it, so a replay returns the same bytes (ADR-0026).
 fn decided(outcome: Decided<'_>) -> Answer {
     match outcome {
@@ -164,8 +168,19 @@ fn decided(outcome: Decided<'_>) -> Answer {
             status: 200,
             body: json_text(&Reply::from(recorded)),
         },
-        Decided::Refused(Refused::Illegal(_)) => Problem::IllegalMove.answer(),
-        Decided::Refused(Refused::AboveLimit { .. }) => Problem::AmountAboveLimit.answer(),
+        Decided::Requested(requested) => {
+            unreachable!("a step's route records no request: {requested:?}")
+        }
+        Decided::Refused(Refusal::Refused(Refused::Illegal(_))) => Problem::IllegalMove.answer(),
+        Decided::Refused(Refusal::Refused(Refused::AboveLimit { .. })) => {
+            Problem::AmountAboveLimit.answer()
+        }
+        Decided::Refused(Refusal::Conflict(Conflict::AuthorizationRequested)) => {
+            Problem::AuthorizationRequested.answer()
+        }
+        Decided::Refused(Refusal::Conflict(Conflict::Pending(_))) => {
+            Problem::CaptureOrVoidPending.answer()
+        }
     }
 }
 
@@ -178,7 +193,7 @@ fn applied(outcome: Outcome) -> Attempt {
 
 /// A command that the table of moves refused, whose refusal is stored under the key.
 fn refused(refused: Refused) -> Attempt {
-    Attempt::Answered(decided(Decided::Refused(refused)))
+    Attempt::Answered(decided(Decided::Refused(refused.into())))
 }
 
 fn amount_of(minor: i64) -> Result<PositiveAmount, Problem> {
@@ -402,4 +417,34 @@ fn json(status: StatusCode, value: &impl Serialize) -> Response {
 
 pub(super) fn json_text(value: &impl Serialize) -> String {
     serde_json::to_string(value).expect("strings and numbers always serialize")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::requests::RequestKind;
+
+    #[test]
+    fn each_conflict_is_answered_with_its_own_problem() {
+        for (conflict, problem) in [
+            (
+                Conflict::AuthorizationRequested,
+                Problem::AuthorizationRequested,
+            ),
+            (
+                Conflict::Pending(RequestKind::Capture),
+                Problem::CaptureOrVoidPending,
+            ),
+            (
+                Conflict::Pending(RequestKind::Void),
+                Problem::CaptureOrVoidPending,
+            ),
+        ] {
+            assert_eq!(
+                decided(Decided::Refused(conflict.into())),
+                problem.answer(),
+                "{conflict:?}"
+            );
+        }
+    }
 }

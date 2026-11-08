@@ -11,6 +11,7 @@ use payments_core::idempotency::{
 use payments_core::ids::MerchantId;
 use payments_core::lifecycle::Refused;
 use payments_core::operator::issue_api_key;
+use payments_core::requests::Refusal;
 use sqlx::PgPool;
 
 use super::api_key_id;
@@ -56,13 +57,21 @@ pub fn render(answer: Decided<'_>) -> Answer {
                 recorded.seq, recorded.refundable
             ),
         },
-        Decided::Refused(Refused::Illegal(_)) => Answer {
+        Decided::Requested(recorded) => Answer {
+            status: 202,
+            body: format!(r#"{{"request":"{}"}}"#, recorded.request),
+        },
+        Decided::Refused(Refusal::Refused(Refused::Illegal(_))) => Answer {
             status: 409,
             body: r#"{"type":"illegal"}"#.to_owned(),
         },
-        Decided::Refused(Refused::AboveLimit { limit, .. }) => Answer {
+        Decided::Refused(Refusal::Refused(Refused::AboveLimit { limit, .. })) => Answer {
             status: 422,
             body: format!(r#"{{"type":"limit","limit":{limit}}}"#),
+        },
+        Decided::Refused(Refusal::Conflict(conflict)) => Answer {
+            status: 409,
+            body: format!(r#"{{"type":"conflict","conflict":"{conflict}"}}"#),
         },
     }
 }
