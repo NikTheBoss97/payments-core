@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "TRUNCATE payment_request_answers",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "2d890c068a85aa1a876be528a338d5046b2fd503b29a82f7f5eea894b9a1ffe0"
+}

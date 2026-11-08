@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE payment_request_answers SET answer = 'malformed'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "3e7d923185a5d9fcd65c879138db109103c09e58a81b48edefd962a738bafe86"
+}

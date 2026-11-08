@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO payment_requests (id, payment_id, kind, amount, recorded_at) VALUES ($1, $2, 'refund', 1, now())",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "013cce13a7e47fc42e9fd625da066539643a22b0ddd071c1d70572dacead0562"
+}

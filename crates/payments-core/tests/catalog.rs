@@ -125,6 +125,11 @@ async fn the_runtime_role_has_exactly_the_expected_privileges(pool: PgPool) -> s
             "payment_refunds.payment_id INSERT",
             "payment_refunds.refunded_at INSERT",
             "payment_refunds.transition_id INSERT",
+            "payment_request_answers SELECT",
+            "payment_request_answers.answer INSERT",
+            "payment_request_answers.payment_id INSERT",
+            "payment_request_answers.request_id INSERT",
+            "payment_requests SELECT",
             "payment_transitions SELECT",
             "payment_transitions.amount INSERT",
             "payment_transitions.from_status INSERT",
@@ -196,6 +201,12 @@ async fn the_tenant_role_has_exactly_the_expected_privileges(pool: PgPool) -> sq
             "payment_refunds.payment_id INSERT",
             "payment_refunds.refunded_at INSERT",
             "payment_refunds.transition_id INSERT",
+            "payment_request_answers SELECT",
+            "payment_requests SELECT",
+            "payment_requests.amount INSERT",
+            "payment_requests.id INSERT",
+            "payment_requests.kind INSERT",
+            "payment_requests.payment_id INSERT",
             "payment_transitions SELECT",
             "payment_transitions.amount INSERT",
             "payment_transitions.from_status INSERT",
@@ -480,6 +491,26 @@ async fn every_guard_trigger_fires_always(pool: PgPool) -> sqlx::Result<()> {
             "reject_change",
         ),
         (
+            "payment_request_answers",
+            "payment_request_answers_append_only",
+            "reject_change",
+        ),
+        (
+            "payment_request_answers",
+            "payment_request_answers_no_truncate",
+            "reject_change",
+        ),
+        (
+            "payment_requests",
+            "payment_requests_append_only",
+            "reject_change",
+        ),
+        (
+            "payment_requests",
+            "payment_requests_no_truncate",
+            "reject_change",
+        ),
+        (
             "payment_transitions",
             "payment_transitions_append_only",
             "reject_change",
@@ -656,6 +687,15 @@ async fn every_column_has_its_type_and_is_not_null(pool: PgPool) -> sqlx::Result
             "payment_refunds.payment_id uuid not null",
             "payment_refunds.refunded_at timestamp with time zone not null",
             "payment_refunds.transition_id uuid not null",
+            "payment_request_answers.answer text not null",
+            "payment_request_answers.payment_id uuid not null",
+            "payment_request_answers.recorded_at timestamp with time zone not null",
+            "payment_request_answers.request_id uuid not null",
+            "payment_requests.amount bigint not null",
+            "payment_requests.id uuid not null",
+            "payment_requests.kind text not null",
+            "payment_requests.payment_id uuid not null",
+            "payment_requests.recorded_at timestamp with time zone not null",
             "payment_transitions.amount bigint not null",
             "payment_transitions.from_status text not null",
             "payment_transitions.id uuid not null",
@@ -769,6 +809,16 @@ async fn every_constraint_keeps_its_name(pool: PgPool) -> sqlx::Result<()> {
             "payment_refunds_pkey",
             "payment_refunds_refunded_at_check",
             "payment_refunds_step_fkey",
+            "payment_request_answers_answer_check",
+            "payment_request_answers_pkey",
+            "payment_request_answers_request_fkey",
+            "payment_requests_amount_check",
+            "payment_requests_id_check",
+            "payment_requests_id_payment_id_key",
+            "payment_requests_id_payment_id_kind_key",
+            "payment_requests_kind_check",
+            "payment_requests_payment_fkey",
+            "payment_requests_pkey",
             "payment_transitions_commit_check",
             "payment_transitions_edge_check",
             "payment_transitions_id_check",
@@ -819,6 +869,8 @@ async fn row_level_security_covers_exactly_what_a_merchant_owns(pool: PgPool) ->
             "payment_authorizations",
             "payment_captures",
             "payment_refunds",
+            "payment_request_answers",
+            "payment_requests",
             "payment_transitions",
             "payments",
         ]
@@ -844,9 +896,9 @@ async fn every_policy_keeps_its_text(pool: PgPool) -> sqlx::Result<()> {
     .fetch_all(&pool)
     .await?;
     policies.sort();
-    let of_a_child = |table: &str, name: &str| {
+    let of_a_child = |table: &str, name: &str, command: &str| {
         format!(
-            "{name} PERMISSIVE ALL {{payments_tenant}}: \
+            "{name} PERMISSIVE {command} {{payments_tenant}}: \
              (EXISTS ( SELECT 1 FROM payments p WHERE (p.id = {table}.payment_id))); check: none"
         )
     };
@@ -864,13 +916,30 @@ async fn every_policy_keeps_its_text(pool: PgPool) -> sqlx::Result<()> {
             ),
             of_a_child(
                 "payment_authorizations",
-                "payment_authorizations_tenant_isolation"
+                "payment_authorizations_tenant_isolation",
+                "ALL"
             ),
-            of_a_child("payment_captures", "payment_captures_tenant_isolation"),
-            of_a_child("payment_refunds", "payment_refunds_tenant_isolation"),
+            of_a_child(
+                "payment_captures",
+                "payment_captures_tenant_isolation",
+                "ALL"
+            ),
+            of_a_child("payment_refunds", "payment_refunds_tenant_isolation", "ALL"),
+            // A merchant only reads the PSP's answers to its requests.
+            of_a_child(
+                "payment_request_answers",
+                "payment_request_answers_tenant_isolation",
+                "SELECT"
+            ),
+            of_a_child(
+                "payment_requests",
+                "payment_requests_tenant_isolation",
+                "ALL"
+            ),
             of_a_child(
                 "payment_transitions",
-                "payment_transitions_tenant_isolation"
+                "payment_transitions_tenant_isolation",
+                "ALL"
             ),
             format!(
                 "payments_tenant_isolation PERMISSIVE ALL {{payments_tenant}}: \
