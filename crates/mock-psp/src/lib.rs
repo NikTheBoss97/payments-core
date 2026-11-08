@@ -8,3 +8,4 @@
 //! of hiding in code that both sides share.
 
 pub mod signing;
+pub mod wire;
