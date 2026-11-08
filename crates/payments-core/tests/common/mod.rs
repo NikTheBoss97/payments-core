@@ -19,7 +19,9 @@ pub mod payments;
 
 use std::time::{Duration, Instant};
 
-use payments_core::ids::{AccountId, ApiKeyId, MerchantId, PaymentId, TransactionId, TransitionId};
+use payments_core::ids::{
+    AccountId, ApiKeyId, MerchantId, PaymentId, RequestId, TransactionId, TransitionId,
+};
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{Connection, PgConnection, PgPool, Postgres, Transaction};
 use uuid::Uuid;
@@ -271,6 +273,11 @@ pub fn api_key_id(n: u32) -> ApiKeyId {
 /// A fixed step ID, from [`test_uuid`].
 pub fn transition_id(n: u32) -> TransitionId {
     TransitionId::try_from(test_uuid(n)).expect("test_uuid builds UUIDv7 values")
+}
+
+/// A fixed request ID, from [`test_uuid`].
+pub fn request_id(n: u32) -> RequestId {
+    RequestId::try_from(test_uuid(n)).expect("test_uuid builds UUIDv7 values")
 }
 
 /// The SQLSTATE of a database error, or a panic if the error is not one.

@@ -1218,7 +1218,7 @@ pub(crate) enum Failed<R> {
 }
 
 impl<R> Failed<R> {
-    fn database(source: sqlx::Error) -> Self {
+    pub(crate) fn database(source: sqlx::Error) -> Self {
         match failure_of(&source) {
             Failure::Duplicate => Self::Duplicate(source),
             Failure::Invariant => Self::Invariant(source),
@@ -1248,7 +1248,7 @@ async fn apply<R: FinalRefusal>(
             if scope.seal().is_some()
                 && let Some(refused) = refusal.final_refusal()
             {
-                store_sealed(&mut tx, scope, Decided::Refused(refused)).await?;
+                store_sealed(&mut tx, scope, Decided::Refused(refused.into())).await?;
                 commit_unit(tx).await?;
             }
             Err(Failed::Refused(refusal))
@@ -1268,7 +1268,7 @@ async fn apply<R: FinalRefusal>(
 }
 
 /// Commits a command's unit of work, through the one function of ADR-0014.
-async fn commit_unit<R>(tx: Transaction<'_, Postgres>) -> Result<(), Failed<R>> {
+pub(crate) async fn commit_unit<R>(tx: Transaction<'_, Postgres>) -> Result<(), Failed<R>> {
     commit(tx).await.map_err(|err| match err {
         CommitError::Rejected(source) => Failed::Invariant(source),
         CommitError::Unknown(source) => Failed::NotConfirmed(source),
@@ -1277,7 +1277,7 @@ async fn commit_unit<R>(tx: Transaction<'_, Postgres>) -> Result<(), Failed<R>> 
 
 /// Why a sealed command's answer could not be stored. The transaction is aborted:
 /// drop it, which takes the effect with it.
-enum SealFailure {
+pub(crate) enum SealFailure {
     /// The key has an answer: another attempt committed first (ADR-0026).
     KeyTaken,
     Invariant(sqlx::Error),
@@ -1297,7 +1297,7 @@ impl<R> From<SealFailure> for Failed<R> {
 /// Stores a sealed command's final answer in its unit of work, and does nothing for
 /// a command without a seal. A duplicate here can only be the key, whichever attempt
 /// got there first, because this is its own statement (ADR-0026).
-async fn store_sealed(
+pub(crate) async fn store_sealed(
     tx: &mut Transaction<'_, Postgres>,
     scope: Scope<'_>,
     decided: Decided<'_>,
@@ -1345,7 +1345,7 @@ impl FinalRefusal for PostingRefusal {
 /// (ADR-0018). A session-level lock would outlive the transaction, so this is
 /// the only lock function that the library calls. `lock_timeout` bounds the
 /// wait, on the server. Its second statement names the merchant (ADR-0025).
-async fn begin_locked<R>(
+pub(crate) async fn begin_locked<R>(
     scope: Scope<'_>,
     payment: PaymentId,
 ) -> Result<Transaction<'static, Postgres>, Failed<R>> {

@@ -270,6 +270,18 @@ on. Trying again takes a new key.
 or what can still be refunded. It is final and stored under the key, as for an
 [`illegal-move`](#illegal-move).
 
+### authorization-requested
+
+`409`. The payment has a request to authorize it already, whether or not the provider has
+decided it: a payment has one authorization. It is final and stored under the key, as for an
+[`illegal-move`](#illegal-move).
+
+### capture-or-void-pending
+
+`409`. A capture or a void of the payment still waits for the provider's decision, and another
+would race it. It is final and stored under the key, as for an [`illegal-move`](#illegal-move):
+once the provider has decided, trying again takes a new key.
+
 ### unavailable
 
 `503`. The service could not finish the request, for instance because the database could
