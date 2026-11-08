@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO payment_stops (payment_id, position, reason, recorded_at) VALUES ($1, 1, 'no_place', now())",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "53fc8f5f539e212a16d460da0c3fccc5954c50e1c7d610fe09ee493117329d63"
+}
