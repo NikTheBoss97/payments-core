@@ -1,0 +1,23 @@
+# Author: Nicola Antonello
+
+[package]
+name = "mock-psp"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+# A notification's signature (ADR-0030): the key's base64, the MAC and its hash. sqlx
+# builds these crates already.
+base64 = "0.22"
+hmac = "0.13"
+sha2 = { version = "0.11", default-features = false }
+# Signing keys from the operating system (ADR-0030). uuid builds this crate already.
+getrandom = "0.4"
+# Derives Display and Error for the error types. sqlx depends on it too.
+thiserror = "2.0.21"
+
+[lints]
+workspace = true

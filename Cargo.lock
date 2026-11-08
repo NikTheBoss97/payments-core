@@ -828,6 +828,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "mock-psp"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "getrandom",
+ "hmac",
+ "sha2",
+ "thiserror",
+]
+
+[[package]]
 name = "num-traits"
 version = "0.2.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
