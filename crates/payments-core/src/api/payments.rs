@@ -15,7 +15,7 @@ use super::path_id::PathId;
 use super::problem::Problem;
 use super::{AppState, Merchant};
 use crate::accounts::Psp;
-use crate::idempotency::Answer;
+use crate::idempotency::{Answer, Decided};
 use crate::ids::{AccountId, PaymentId, TransactionId, TransitionId};
 use crate::lifecycle::Refused;
 use crate::money::{Currency, PositiveAmount};
@@ -127,20 +127,22 @@ async fn attempt_create(merchant: &Merchant, request: &KeyedRequest) -> Result<A
             psp_receivable: AccountId::now_v7(),
         },
     };
-    let render = move |decided: Result<&Recorded, &Refused>| match decided {
-        Ok(recorded) => Answer {
+    let render = move |decided: Decided<'_>| match decided {
+        Decided::Applied(recorded) => Answer {
             status: 201,
             body: json_text(&Created {
                 payment_id: id.to_string(),
                 reply: recorded.into(),
             }),
         },
-        Err(refused) => unreachable!("the table of moves has no refusal of a create: {refused}"),
+        Decided::Refused(refused) => {
+            unreachable!("the table of moves has no refusal of a create: {refused}")
+        }
     };
     let seal = request.seal(&render);
     match create_payment(merchant.tenant().sealed(&seal), &command).await {
         Ok(Outcome::Applied(recorded) | Outcome::AlreadyApplied(recorded)) => {
-            Ok(Attempt::Answered(render(Ok(&recorded))))
+            Ok(Attempt::Answered(render(Decided::Applied(&recorded))))
         }
         Err(CreateError::KeyTaken) => Ok(Attempt::KeyTaken),
         Err(CreateError::UnknownCurrency { .. }) => Err(Problem::UnknownCurrency),
@@ -156,14 +158,14 @@ async fn attempt_create(merchant: &Merchant, request: &KeyedRequest) -> Result<A
 
 /// The final answer of a command on a payment: what the table of moves gave. Its seal stores
 /// this and the response shows it, so a replay returns the same bytes (ADR-0026).
-fn decided(outcome: Result<&Recorded, &Refused>) -> Answer {
+fn decided(outcome: Decided<'_>) -> Answer {
     match outcome {
-        Ok(recorded) => Answer {
+        Decided::Applied(recorded) => Answer {
             status: 200,
             body: json_text(&Reply::from(recorded)),
         },
-        Err(Refused::Illegal(_)) => Problem::IllegalMove.answer(),
-        Err(Refused::AboveLimit { .. }) => Problem::AmountAboveLimit.answer(),
+        Decided::Refused(Refused::Illegal(_)) => Problem::IllegalMove.answer(),
+        Decided::Refused(Refused::AboveLimit { .. }) => Problem::AmountAboveLimit.answer(),
     }
 }
 
@@ -171,12 +173,12 @@ fn decided(outcome: Result<&Recorded, &Refused>) -> Answer {
 /// is never reached through HTTP (ADR-0026), and it would hold the same reply.
 fn applied(outcome: Outcome) -> Attempt {
     let (Outcome::Applied(recorded) | Outcome::AlreadyApplied(recorded)) = outcome;
-    Attempt::Answered(decided(Ok(&recorded)))
+    Attempt::Answered(decided(Decided::Applied(&recorded)))
 }
 
 /// A command that the table of moves refused, whose refusal is stored under the key.
 fn refused(refused: Refused) -> Attempt {
-    Attempt::Answered(decided(Err(&refused)))
+    Attempt::Answered(decided(Decided::Refused(refused)))
 }
 
 fn amount_of(minor: i64) -> Result<PositiveAmount, Problem> {

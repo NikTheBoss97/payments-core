@@ -19,14 +19,14 @@ use common::payments::{
 use common::{account_id, merchant_id, payment_id, runtime_pool, tenant_pool, transition_id};
 use futures_util::future::{join, join_all};
 use payments_core::accounts::{AccountRef, Psp};
-use payments_core::idempotency::{Answer, IdempotencyKey, Recall, Seal, recall};
+use payments_core::idempotency::{Answer, Decided, IdempotencyKey, Recall, Seal, recall};
 use payments_core::ids::{MerchantId, PaymentId};
 use payments_core::lifecycle::Refused;
 use payments_core::money::{Currency, PositiveAmount};
 use payments_core::payments::{
     AccountCandidates, Authorize, AuthorizeError, Capture, CaptureError, CreateError,
-    CreatePayment, Outcome, Recorded, Refund, RefundError, StepCommand, StepError, authorize,
-    capture, create_payment, find_payment, refund, register_merchant, void,
+    CreatePayment, Outcome, Refund, RefundError, StepCommand, StepError, authorize, capture,
+    create_payment, find_payment, refund, register_merchant, void,
 };
 use payments_core::tenancy::Tenant;
 use sqlx::PgPool;
@@ -340,7 +340,7 @@ async fn an_answer_that_is_not_final_takes_the_effect_down_with_it(pool: PgPool)
     let (tenant, merchant, _) = two_merchants(&pool).await?;
     let me = Tenant::new(&tenant, merchant);
     let payment = authorized(me, merchant, 1).await?;
-    let unfinished = |_: Result<&Recorded, &Refused>| Answer {
+    let unfinished = |_: Decided<'_>| Answer {
         status: 503,
         body: "{}".to_owned(),
     };
@@ -447,7 +447,7 @@ async fn create_under_key(
     command: &CreatePayment,
 ) -> Result<Outcome, CreateError> {
     let payment = command.id;
-    let render_created = move |_: Result<&Recorded, &Refused>| Answer {
+    let render_created = move |_: Decided<'_>| Answer {
         status: 201,
         body: format!(r#"{{"payment":"{payment}"}}"#),
     };

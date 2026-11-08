@@ -95,12 +95,22 @@ pub struct Answer {
     pub body: String,
 }
 
+/// What a command under a key decided, which its seal renders as the final answer
+/// (ADR-0026, ADR-0039).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Decided<'a> {
+    /// The command wrote its step.
+    Applied(&'a Recorded),
+    /// The table of moves, or an amount's limit, refused it.
+    Refused(Refused),
+}
+
 /// What a command under a key stores with its effect: which key, what it was used
-/// for, and how to render the answer that the table of moves gives (ADR-0026).
+/// for, and how to render the answer that it decided (ADR-0026).
 pub struct Seal<'a> {
     pub key: &'a IdempotencyKey,
     pub fingerprint: Fingerprint,
-    pub answer: &'a (dyn Fn(Result<&Recorded, &Refused>) -> Answer + Sync),
+    pub answer: &'a (dyn Fn(Decided<'_>) -> Answer + Sync),
 }
 
 impl fmt::Debug for Seal<'_> {
@@ -118,7 +128,7 @@ impl Seal<'_> {
         &self,
         tx: &mut Transaction<'_, Postgres>,
         merchant: MerchantId,
-        decided: Result<&Recorded, &Refused>,
+        decided: Decided<'_>,
     ) -> sqlx::Result<()> {
         let answer = (self.answer)(decided);
         sqlx::query!(

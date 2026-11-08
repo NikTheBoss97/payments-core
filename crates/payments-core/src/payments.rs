@@ -24,6 +24,7 @@ use uuid::Uuid;
 
 use crate::accounts::{AccountError, AccountKey, AccountRef, Psp, find_account, open_account};
 use crate::db::{CommitError, code_and_constraint, commit};
+use crate::idempotency::Decided;
 use crate::ids::{AccountId, MerchantId, PaymentId, TransactionId, TransitionId};
 use crate::ledger::{Entry, LedgerTransaction};
 use crate::lifecycle::{
@@ -375,7 +376,7 @@ pub async fn create_payment<'a>(
         to: first.to(),
         refundable: 0,
     };
-    if let Err(failure) = store_sealed(&mut tx, scope, Ok(&recorded)).await {
+    if let Err(failure) = store_sealed(&mut tx, scope, Decided::Applied(&recorded)).await {
         return Err(match failure {
             SealFailure::KeyTaken => CreateError::KeyTaken,
             SealFailure::Invariant(source) => CreateError::Invariant { payment, source },
@@ -1235,7 +1236,7 @@ async fn apply<R: FinalRefusal>(
     let mut tx = begin_locked(scope, plan.asked.payment).await?;
     match apply_in(&mut tx, plan, decide).await {
         Ok(Outcome::Applied(recorded)) => {
-            store_sealed(&mut tx, scope, Ok(&recorded)).await?;
+            store_sealed(&mut tx, scope, Decided::Applied(&recorded)).await?;
             commit_unit(tx).await?;
             Ok(Outcome::Applied(recorded))
         }
@@ -1247,7 +1248,7 @@ async fn apply<R: FinalRefusal>(
             if scope.seal().is_some()
                 && let Some(refused) = refusal.final_refusal()
             {
-                store_sealed(&mut tx, scope, Err(&refused)).await?;
+                store_sealed(&mut tx, scope, Decided::Refused(refused)).await?;
                 commit_unit(tx).await?;
             }
             Err(Failed::Refused(refusal))
@@ -1299,7 +1300,7 @@ impl<R> From<SealFailure> for Failed<R> {
 async fn store_sealed(
     tx: &mut Transaction<'_, Postgres>,
     scope: Scope<'_>,
-    decided: Result<&Recorded, &Refused>,
+    decided: Decided<'_>,
 ) -> Result<(), SealFailure> {
     let Some((merchant, seal)) = scope.seal() else {
         return Ok(());
