@@ -161,6 +161,7 @@ checksum = "1aa79e62e7697b8e29b513a68abacf485adcd1fe8284a4316c5ae868e6633327"
 dependencies = [
  "iana-time-zone",
  "num-traits",
+ "serde",
  "windows-link",
 ]
 
@@ -832,10 +833,14 @@ name = "mock-psp"
 version = "0.1.0"
 dependencies = [
  "base64",
+ "chrono",
  "getrandom",
  "hmac",
+ "serde",
+ "serde_json",
  "sha2",
  "thiserror",
+ "uuid",
 ]
 
 [[package]]
@@ -1618,6 +1623,7 @@ checksum = "4a0e2d11620c50695fe12bbbfde96b3477fe606e7284c22d505c12ce51214514"
 dependencies = [
  "getrandom",
  "js-sys",
+ "serde_core",
  "wasm-bindgen",
 ]
 

@@ -14,10 +14,18 @@ publish.workspace = true
 base64 = "0.22"
 hmac = "0.13"
 sha2 = { version = "0.11", default-features = false }
+# The business times that facts report, in RFC 3339 (ADR-0022). sqlx builds this
+# crate already.
+chrono = { version = "0.4.45", default-features = false, features = ["serde", "std"] }
 # Signing keys from the operating system (ADR-0030). uuid builds this crate already.
 getrandom = "0.4"
+# The wire format (ADR-0029). sqlx builds these crates already.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 # Derives Display and Error for the error types. sqlx depends on it too.
 thiserror = "2.0.21"
+# The service's IDs on the wire.
+uuid = { version = "1.28", features = ["serde"] }
 
 [lints]
 workspace = true
