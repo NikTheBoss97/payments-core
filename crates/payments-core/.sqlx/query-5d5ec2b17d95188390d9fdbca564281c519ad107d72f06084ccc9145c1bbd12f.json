@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "TRUNCATE psp_notifications",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "5d5ec2b17d95188390d9fdbca564281c519ad107d72f06084ccc9145c1bbd12f"
+}

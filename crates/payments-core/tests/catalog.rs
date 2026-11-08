@@ -148,6 +148,10 @@ async fn the_runtime_role_has_exactly_the_expected_privileges(pool: PgPool) -> s
             "payments.id INSERT",
             "payments.merchant_id INSERT",
             "payments.psp INSERT",
+            "psp_notifications SELECT",
+            "psp_notifications.event_id INSERT",
+            "psp_notifications.payment_id INSERT",
+            "psp_notifications.psp INSERT",
         ]
     );
     Ok(())
@@ -528,6 +532,16 @@ async fn every_guard_trigger_fires_always(pool: PgPool) -> sqlx::Result<()> {
         ("payments", "payments_append_only", "reject_change"),
         ("payments", "payments_commit_check", "check_payment_genesis"),
         ("payments", "payments_no_truncate", "reject_change"),
+        (
+            "psp_notifications",
+            "psp_notifications_append_only",
+            "reject_change",
+        ),
+        (
+            "psp_notifications",
+            "psp_notifications_no_truncate",
+            "reject_change",
+        ),
     ]
     .into_iter()
     .map(|(table, trigger, function)| [table.into(), trigger.into(), "A".into(), function.into()])
@@ -714,6 +728,10 @@ async fn every_column_has_its_type_and_is_not_null(pool: PgPool) -> sqlx::Result
             "payments.merchant_id uuid not null",
             "payments.psp text not null",
             "payments.recorded_at timestamp with time zone not null",
+            "psp_notifications.event_id text not null",
+            "psp_notifications.payment_id uuid not null",
+            "psp_notifications.psp text not null",
+            "psp_notifications.recorded_at timestamp with time zone not null",
         ]
     );
     Ok(())
@@ -838,6 +856,9 @@ async fn every_constraint_keeps_its_name(pool: PgPool) -> sqlx::Result<()> {
             "payments_merchant_fkey",
             "payments_pkey",
             "payments_psp_check",
+            "psp_notifications_event_id_check",
+            "psp_notifications_pkey",
+            "psp_notifications_psp_check",
         ]
     );
     Ok(())
