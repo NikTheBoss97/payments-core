@@ -318,6 +318,18 @@ impl MockPsp {
         }
     }
 
+    /// Settles every capture made at or before `cutoff` that is not settled yet. The
+    /// binary takes this step on a timer, and a test with any time it likes.
+    pub fn settle_captured_by(&self, cutoff: DateTime<Utc>) {
+        self.shared.model().settle_captured_by(cutoff, now());
+    }
+
+    /// Lets lapse every authorization that expires at or before `now`. The binary takes
+    /// this step on a timer, and a test with any time it likes.
+    pub fn expire_lapsed(&self, now: DateTime<Utc>) {
+        self.shared.model().expire_lapsed(now);
+    }
+
     /// Appends any fact, unchecked, for the tests of a history that the service cannot
     /// place, such as a capture that fails after it succeeded (ADR-0031).
     pub fn append(&self, payment_id: Uuid, detail: Detail) {
