@@ -191,9 +191,9 @@ fn applied(outcome: Outcome) -> Attempt {
     Attempt::Answered(decided(Decided::Applied(&recorded)))
 }
 
-/// A command that the table of moves refused, whose refusal is stored under the key.
-fn refused(refused: Refused) -> Attempt {
-    Attempt::Answered(decided(Decided::Refused(refused.into())))
+/// A command that was refused, whose refusal is stored under the key.
+fn refused(refusal: impl Into<Refusal>) -> Attempt {
+    Attempt::Answered(decided(Decided::Refused(refusal.into())))
 }
 
 fn amount_of(minor: i64) -> Result<PositiveAmount, Problem> {
@@ -339,7 +339,8 @@ fn step_command(own: &OwnPayment, request: &KeyedRequest) -> Result<StepCommand,
 fn after_step(result: Result<Outcome, StepError>) -> Result<Attempt, Problem> {
     match result {
         Ok(outcome) => Ok(applied(outcome)),
-        Err(StepError::Illegal(illegal)) => Ok(refused(illegal.into())),
+        Err(StepError::Illegal(illegal)) => Ok(refused(illegal)),
+        Err(StepError::AuthorizationRequested) => Ok(refused(Conflict::AuthorizationRequested)),
         Err(StepError::KeyTaken) => Ok(Attempt::KeyTaken),
         Err(StepError::NotFound { .. }) => Err(Problem::NotFound),
         Err(err @ StepError::NotConfirmed { .. }) => Err(Problem::Unavailable.because(&err)),

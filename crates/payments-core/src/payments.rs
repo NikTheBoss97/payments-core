@@ -32,6 +32,7 @@ use crate::lifecycle::{
 };
 use crate::money::{self, BasisPoints, Currency, PositiveAmount};
 use crate::posting::{self, PostInError, post_in};
+use crate::requests::{Conflict, Refusal, RequestKind};
 use crate::tenancy::{Scope, Tenant};
 use crate::times::BusinessTime;
 
@@ -1005,6 +1006,11 @@ pub enum StepError {
     /// retry is decided again (ADR-0019).
     #[error(transparent)]
     Illegal(IllegalTransition),
+    /// Only a cancellation: an authorization of the payment was requested, so the
+    /// PSP may hold one, which only a void releases (ADR-0039). Nothing is stored,
+    /// and a retry is decided again (ADR-0019).
+    #[error("an authorization of this payment was requested already")]
+    AuthorizationRequested,
     /// The command's step ID is stored with other content: a bug, never
     /// retried.
     #[error("step {step} is stored with other content")]
@@ -1033,13 +1039,14 @@ pub enum StepError {
 }
 
 impl StepError {
-    fn new(command: &StepCommand, failed: Failed<IllegalTransition>) -> Self {
+    fn new(command: &StepCommand, failed: Failed<PlainRefusal>) -> Self {
         let step = command.step.get();
         match failed {
             Failed::NotFound => Self::NotFound {
                 payment: command.payment,
             },
-            Failed::Refused(illegal) => Self::Illegal(illegal),
+            Failed::Refused(PlainRefusal::Illegal(illegal)) => Self::Illegal(illegal),
+            Failed::Refused(PlainRefusal::AuthorizationRequested) => Self::AuthorizationRequested,
             Failed::Mismatch => Self::Mismatch { step },
             Failed::KeyTaken => Self::KeyTaken,
             Failed::Duplicate(source) | Failed::Invariant(source) => {
@@ -1062,7 +1069,8 @@ pub async fn decline<'a>(
     plain_step(scope.into(), command, Event::Decline, StepKind::Decline).await
 }
 
-/// Cancels a payment before its authorization (ADR-0016).
+/// Cancels a payment before its authorization (ADR-0016), and before any request
+/// to authorize it, since the PSP may then hold one (ADR-0039).
 ///
 /// # Errors
 ///
@@ -1127,9 +1135,36 @@ async fn plain_step(
         },
         posting: None,
     };
-    apply(scope, &plan, |state| next(state.status, event))
+    apply(scope, &plan, |state| plain_move(state, event))
         .await
         .map_err(|failed| StepError::new(command, failed))
+}
+
+/// Why a step that carries nothing is refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PlainRefusal {
+    /// The table of moves.
+    Illegal(IllegalTransition),
+    /// A request to authorize the payment, which only a cancellation meets.
+    AuthorizationRequested,
+}
+
+impl From<IllegalTransition> for PlainRefusal {
+    fn from(illegal: IllegalTransition) -> Self {
+        Self::Illegal(illegal)
+    }
+}
+
+/// The move of a step that carries nothing: the table of moves first, as for every
+/// step. A cancellation is a step of our own, which the PSP never hears of, so once an
+/// authorization is requested it is refused: the PSP may hold one, which only a void
+/// releases (ADR-0039).
+fn plain_move(state: &State, event: Event) -> Result<Transition, PlainRefusal> {
+    let step = next(state.status, event)?;
+    if event == Event::Cancel && state.authorization_requested {
+        return Err(PlainRefusal::AuthorizationRequested);
+    }
+    Ok(step)
 }
 
 /// The key of a payment's advisory lock (ADR-0018): the low 64 bits of its ID,
@@ -1198,6 +1233,8 @@ pub(crate) struct State {
     requested: PositiveAmount,
     /// The payment's authorized amount, once it has one.
     authorized: Option<PositiveAmount>,
+    /// Whether the payment has a request to authorize it, decided or not (ADR-0039).
+    authorization_requested: bool,
     /// The step with the command's ID, on any payment.
     stored: Option<Stored>,
 }
@@ -1248,7 +1285,7 @@ async fn apply<R: FinalRefusal>(
             if scope.seal().is_some()
                 && let Some(refused) = refusal.final_refusal()
             {
-                store_sealed(&mut tx, scope, Decided::Refused(refused.into())).await?;
+                store_sealed(&mut tx, scope, Decided::Refused(refused)).await?;
                 commit_unit(tx).await?;
             }
             Err(Failed::Refused(refusal))
@@ -1315,27 +1352,31 @@ pub(crate) async fn store_sealed(
 }
 
 /// What of a command's refusal is final, and so stored under its key: what the table
-/// of moves says. A missing account says something about the books instead.
+/// of moves says, or a request already recorded. A missing account says something
+/// about the books instead.
 trait FinalRefusal {
-    fn final_refusal(&self) -> Option<Refused>;
+    fn final_refusal(&self) -> Option<Refusal>;
 }
 
 impl FinalRefusal for Refused {
-    fn final_refusal(&self) -> Option<Refused> {
-        Some(*self)
+    fn final_refusal(&self) -> Option<Refusal> {
+        Some((*self).into())
     }
 }
 
-impl FinalRefusal for IllegalTransition {
-    fn final_refusal(&self) -> Option<Refused> {
-        Some(Refused::Illegal(*self))
+impl FinalRefusal for PlainRefusal {
+    fn final_refusal(&self) -> Option<Refusal> {
+        Some(match self {
+            Self::Illegal(illegal) => (*illegal).into(),
+            Self::AuthorizationRequested => Conflict::AuthorizationRequested.into(),
+        })
     }
 }
 
 impl FinalRefusal for PostingRefusal {
-    fn final_refusal(&self) -> Option<Refused> {
+    fn final_refusal(&self) -> Option<Refusal> {
         match self {
-            Self::Refused(refused) => Some(*refused),
+            Self::Refused(refused) => Some((*refused).into()),
             Self::MissingAccount(_) => None,
         }
     }
@@ -1465,7 +1506,8 @@ async fn answer<R>(
 
 /// The one read under the lock (ADR-0019). It must come in a later statement
 /// than the lock: at READ COMMITTED each statement takes a new snapshot, so this
-/// one sees every step that the lock's previous holder committed (ADR-0018).
+/// one sees every step and request that the lock's previous holder committed
+/// (ADR-0018).
 async fn read_state<R>(
     tx: &mut Transaction<'_, Postgres>,
     plan: &Plan<'_>,
@@ -1474,6 +1516,9 @@ async fn read_state<R>(
         r#"SELECT newest.seq, newest.to_status, newest.refundable,
                   p.amount AS requested,
                   authorized.amount AS "authorized?",
+                  EXISTS (SELECT 1 FROM payment_requests r
+                           WHERE r.payment_id = p.id AND r.kind = $3)
+                      AS "authorization_requested!",
                   stored.payment_id AS "stored_payment?",
                   stored.seq AS "stored_seq?",
                   stored.kind AS "stored_kind?",
@@ -1505,7 +1550,8 @@ async fn read_state<R>(
                     ON stored_refund.transition_id = stored.id
             WHERE p.id = $1"#,
         plan.asked.payment.get(),
-        plan.id.get()
+        plan.id.get(),
+        RequestKind::Authorize.as_str()
     )
     .fetch_optional(&mut **tx)
     .await
@@ -1579,6 +1625,7 @@ async fn read_state<R>(
             PositiveAmount::new(amount)
                 .expect("an authorization is at least 1 and at most the request")
         }),
+        authorization_requested: row.authorization_requested,
         stored,
     })
 }
@@ -1740,6 +1787,46 @@ mod tests {
     use super::*;
     use proptest::prelude::*;
     use uuid::uuid;
+
+    #[test]
+    fn only_a_cancellation_meets_a_requested_authorization() {
+        let amount = |minor| PositiveAmount::new(minor).expect("a positive amount");
+        for &status in PaymentStatus::ALL {
+            for event in [
+                Event::Decline,
+                Event::Cancel,
+                Event::Void,
+                Event::Expire,
+                Event::Settle,
+            ] {
+                let state = |authorization_requested| State {
+                    seq: 1,
+                    status,
+                    refundable: 0,
+                    requested: amount(100),
+                    authorized: None,
+                    authorization_requested,
+                    stored: None,
+                };
+                let table = next(status, event).map_err(PlainRefusal::from);
+                assert_eq!(
+                    plain_move(&state(false), event),
+                    table,
+                    "{status} {event:?}"
+                );
+                // A decline in particular is the PSP's answer to that request.
+                let expected = match table {
+                    Ok(_) if event == Event::Cancel => Err(PlainRefusal::AuthorizationRequested),
+                    other => other,
+                };
+                assert_eq!(
+                    plain_move(&state(true), event),
+                    expected,
+                    "{status} {event:?}, once an authorization is requested"
+                );
+            }
+        }
+    }
 
     #[test]
     fn a_failed_statement_is_classified_by_its_code() {

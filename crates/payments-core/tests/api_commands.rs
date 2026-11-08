@@ -13,12 +13,15 @@ use axum::http::{Method, Request, StatusCode};
 use common::api::{Pools, Reply, a_merchant, bearer, get_with_authorization, post, records, send};
 use common::crashes::{balances, install_crash_points, plan_death};
 use common::payments::{AUTHORIZED, FEE, steps, unbalanced_currencies, uncaused_postings};
-use common::{payment_id, tenant_pool_of_one};
+use common::{payment_id, request_id, tenant_pool_of_one};
 use futures_util::future::join_all;
 use payments_core::api::problem::Problem;
 use payments_core::api::{AppState, router};
 use payments_core::credentials::ApiKeySecret;
 use payments_core::ids::PaymentId;
+use payments_core::money::PositiveAmount;
+use payments_core::requests::{Ask, RecordRequest, record_request};
+use payments_core::tenancy::Tenant;
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -628,6 +631,35 @@ async fn cancel_and_void_are_final_refusals_where_the_status_forbids_them(
     }
     assert_eq!(records(&pool).await?, before + 4);
     assert_eq!(read(&pools, &secret, taken).await?["status"], "captured");
+    pools.close().await;
+    Ok(())
+}
+
+#[sqlx::test]
+async fn a_cancel_once_an_authorization_is_requested_is_a_final_conflict(
+    pool: PgPool,
+) -> TestResult {
+    // No route records a request yet, so the library records the one that the authorize
+    // route will (ADR-0028).
+    let pools = Pools::login(&pool).await?;
+    let (merchant, secret) = a_merchant(&pools, 1).await?;
+    let payment = created(&pools, &secret, "create").await?;
+    let authorization = RecordRequest {
+        request: request_id(1),
+        payment,
+        ask: Ask::Authorize(PositiveAmount::new(10_000)?),
+    };
+    record_request(Tenant::new(&pools.tenant, merchant), &authorization).await?;
+    let before = records(&pool).await?;
+
+    let reply = step(&pools, &secret, payment, "cancel", "c", "").await;
+    assert_eq!(reply.status, StatusCode::CONFLICT, "{reply:?}");
+    assert_eq!(reply.header("content-type"), "application/problem+json");
+    assert_eq!(reply.body, Problem::AuthorizationRequested.body());
+    let again = step(&pools, &secret, payment, "cancel", "c", "").await;
+    assert_eq!(again.body, reply.body);
+    assert_eq!(records(&pool).await?, before + 1);
+    assert_eq!(read(&pools, &secret, payment).await?["status"], "created");
     pools.close().await;
     Ok(())
 }
