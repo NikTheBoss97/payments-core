@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM psp_notifications",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "c60a76ae41e2f8a4fa3a1c479518f62bf69adf33266468589d5d2ef53f77a30a"
+}

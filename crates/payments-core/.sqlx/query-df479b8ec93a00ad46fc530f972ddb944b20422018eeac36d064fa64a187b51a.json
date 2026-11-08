@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE psp_notifications SET event_id = 'evt_2'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "df479b8ec93a00ad46fc530f972ddb944b20422018eeac36d064fa64a187b51a"
+}
