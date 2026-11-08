@@ -69,6 +69,7 @@ enum Stage {
     Created,
     Authorized {
         amount: i64,
+        expires_at: DateTime<Utc>,
     },
     Declined,
     Voided,
@@ -77,6 +78,7 @@ enum Stage {
         amount: i64,
         refunded: i64,
         settled: bool,
+        captured_at: DateTime<Utc>,
     },
 }
 
@@ -247,6 +249,7 @@ impl Model {
             amount,
             refunded,
             settled: false,
+            captured_at,
         } = payment.stage
         else {
             return Err(Impossible(format!(
@@ -258,9 +261,47 @@ impl Model {
             amount,
             refunded,
             settled: true,
+            captured_at,
         };
         self.append(payment_id, Detail::Settled, now);
         Ok(())
+    }
+
+    /// Settles every capture made at or before `cutoff` and not settled yet, in the order
+    /// of the payments' IDs: the binary's timer.
+    pub(crate) fn settle_captured_by(&mut self, cutoff: DateTime<Utc>, now: DateTime<Utc>) {
+        let mut due: Vec<Uuid> = self
+            .payments
+            .iter()
+            .filter(|(_, payment)| {
+                matches!(payment.stage, Stage::Captured { settled: false, captured_at, .. }
+                    if captured_at <= cutoff)
+            })
+            .map(|(id, _)| *id)
+            .collect();
+        due.sort_unstable();
+        for payment_id in due {
+            self.settle(payment_id, now)
+                .expect("a capture that is not settled yet");
+        }
+    }
+
+    /// Lets lapse every authorization that expires at or before `now`, in the order of
+    /// the payments' IDs: the binary's timer.
+    pub(crate) fn expire_lapsed(&mut self, now: DateTime<Utc>) {
+        let mut due: Vec<Uuid> = self
+            .payments
+            .iter()
+            .filter(|(_, payment)| {
+                matches!(payment.stage, Stage::Authorized { expires_at, .. } if expires_at <= now)
+            })
+            .map(|(id, _)| *id)
+            .collect();
+        due.sort_unstable();
+        for payment_id in due {
+            self.expire(payment_id, now)
+                .expect("an authorization that has not ended");
+        }
     }
 
     /// Lets an authorization lapse, which only the PSP decides.
@@ -418,7 +459,7 @@ fn outcome(
             }
             let expires_at = now + lifetime;
             Ok((
-                Stage::Authorized { amount },
+                Stage::Authorized { amount, expires_at },
                 Detail::Authorized {
                     request_id,
                     amount,
@@ -430,11 +471,12 @@ fn outcome(
             Ok((Stage::Declined, Detail::Declined { request_id }))
         }
         (RequestKind::Capture, Decision::Approve) => match stage {
-            Stage::Authorized { amount } if request.amount <= amount => Ok((
+            Stage::Authorized { amount, .. } if request.amount <= amount => Ok((
                 Stage::Captured {
                     amount: request.amount,
                     refunded: 0,
                     settled: false,
+                    captured_at: now,
                 },
                 Detail::Captured {
                     request_id,
@@ -453,11 +495,13 @@ fn outcome(
                 amount,
                 refunded,
                 settled,
+                captured_at,
             } if request.amount <= amount - refunded => Ok((
                 Stage::Captured {
                     amount,
                     refunded: refunded + request.amount,
                     settled,
+                    captured_at,
                 },
                 Detail::Refunded {
                     request_id,
@@ -757,5 +801,40 @@ mod tests {
         let again = model.notify(PAYMENT, now());
         assert_eq!(model.messages().len(), 2);
         assert_ne!(model.messages()[0].id, again);
+    }
+
+    #[test]
+    fn the_timers_settle_old_captures_and_expire_lapsed_authorizations_only() {
+        let mut model = holding();
+        decided(&mut model, RequestKind::Authorize, 100, Decision::Approve);
+        decided(&mut model, RequestKind::Capture, 100, Decision::Approve);
+        let authorized_only = Uuid::from_u128(2);
+        let authorize = Request {
+            payment_id: authorized_only,
+            ..request(RequestKind::Authorize, 100)
+        };
+        model.take(authorize.clone(), now());
+        model
+            .decide(authorize.id, Decision::Approve, now())
+            .expect("possible");
+
+        // Before their times, nothing moves.
+        let a_second = TimeDelta::seconds(1);
+        model.settle_captured_by(now() - a_second, now());
+        model.expire_lapsed(now() + TimeDelta::days(7) - a_second);
+        assert_eq!(model.messages().len(), 3);
+
+        // At their times, the capture settles and the other authorization lapses, once.
+        model.settle_captured_by(now(), now());
+        model.expire_lapsed(now() + TimeDelta::days(7));
+        model.settle_captured_by(now() + TimeDelta::days(30), now());
+        model.expire_lapsed(now() + TimeDelta::days(30));
+        assert_eq!(details(&model).last(), Some(&Detail::Settled));
+        let other = model.history(authorized_only).expect("held").facts;
+        assert_eq!(
+            other.last().map(|fact| &fact.detail),
+            Some(&Detail::Expired)
+        );
+        assert_eq!(model.messages().len(), 5);
     }
 }

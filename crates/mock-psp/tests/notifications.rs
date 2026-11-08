@@ -8,82 +8,16 @@
 
 mod common;
 
-use std::collections::VecDeque;
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use axum::Router;
-use axum::body::Bytes;
-use axum::extract::State;
-use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
-use axum::response::{IntoResponse, Response};
-use axum::routing::post;
-use base64::Engine;
-use base64::engine::general_purpose::STANDARD;
+use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use chrono::{DateTime, TimeDelta, Utc};
-use common::{id_of, request, send};
-use hmac::{Hmac, KeyInit, Mac};
+use common::{Receiver, header_of, id_of, receiver, request, send, verifies};
 use mock_psp::signing::SigningKey;
 use mock_psp::{Attempt, Config, MessageState, MockPsp, Tamper};
 use serde_json::json;
-use sha2::Sha256;
 use tokio::net::TcpListener;
 use uuid::Uuid;
-
-/// A status, and a `Retry-After` in seconds if any.
-type Answer = (StatusCode, Option<u32>);
-
-/// What the receiver got, and what it answers next.
-#[derive(Clone, Default)]
-struct Receiver {
-    received: Arc<Mutex<Vec<(HeaderMap, Bytes)>>>,
-    answers: Arc<Mutex<VecDeque<Answer>>>,
-}
-
-impl Receiver {
-    /// Answers the next deliveries with these, then with 202s.
-    fn answer(&self, answers: impl IntoIterator<Item = Answer>) {
-        self.answers.lock().expect("unpoisoned").extend(answers);
-    }
-
-    fn received(&self) -> Vec<(HeaderMap, Bytes)> {
-        self.received.lock().expect("unpoisoned").clone()
-    }
-}
-
-async fn receive(State(receiver): State<Receiver>, headers: HeaderMap, body: Bytes) -> Response {
-    receiver
-        .received
-        .lock()
-        .expect("unpoisoned")
-        .push((headers, body));
-    let next = receiver.answers.lock().expect("unpoisoned").pop_front();
-    let (status, retry_after) = next.unwrap_or((StatusCode::ACCEPTED, None));
-    let mut response = status.into_response();
-    if let Some(seconds) = retry_after {
-        response
-            .headers_mut()
-            .insert(header::RETRY_AFTER, HeaderValue::from(seconds));
-    }
-    response
-}
-
-/// A receiver on a free local port, and its endpoint.
-async fn receiver() -> (Receiver, String) {
-    let receiver = Receiver::default();
-    let listener = TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("a free local port");
-    let endpoint = format!(
-        "http://{}/webhooks/mock",
-        listener.local_addr().expect("bound")
-    );
-    let router = Router::new()
-        .route("/webhooks/mock", post(receive))
-        .with_state(receiver.clone());
-    tokio::spawn(async move { axum::serve(listener, router).await });
-    (receiver, endpoint)
-}
 
 /// A fake that delivers to a new receiver, and one fact about a payment of its, which
 /// owes one notification.
@@ -99,32 +33,6 @@ async fn one_fact(config: Config) -> (MockPsp, Receiver, Uuid, String) {
     psp.approve(id_of(&authorize));
     let message = psp.notifications().pop().expect("one notification");
     (psp, receiver, payment, message.id)
-}
-
-fn header_of<'a>(headers: &'a HeaderMap, name: &str) -> &'a str {
-    headers
-        .get(name)
-        .unwrap_or_else(|| panic!("no {name}"))
-        .to_str()
-        .expect("ASCII")
-}
-
-/// Whether one of the listed signatures verifies under this written key: HMAC-SHA256
-/// over `msg_id.timestamp.payload`, computed here and not by the fake.
-fn verifies(written_key: &str, headers: &HeaderMap, body: &[u8]) -> bool {
-    let secret = STANDARD
-        .decode(written_key.strip_prefix("whsec_").expect("a written key"))
-        .expect("base64");
-    let mut mac = Hmac::<Sha256>::new_from_slice(&secret).expect("any key length");
-    mac.update(header_of(headers, "webhook-id").as_bytes());
-    mac.update(b".");
-    mac.update(header_of(headers, "webhook-timestamp").as_bytes());
-    mac.update(b".");
-    mac.update(body);
-    let expected = format!("v1,{}", STANDARD.encode(mac.finalize().into_bytes()));
-    header_of(headers, "webhook-signature")
-        .split(' ')
-        .any(|signature| signature == expected)
 }
 
 #[test]

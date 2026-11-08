@@ -32,14 +32,16 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # Derives Display and Error for the error types. sqlx depends on it too.
 thiserror = "2.0.21"
-# Serves the routes, and bounds each delivery with a timeout.
-tokio = { version = "1.54.1", features = ["net", "rt", "time"] }
+# Serves the routes, bounds each delivery with a timeout, and runs the binary and its
+# timer.
+tokio = { version = "1.54.1", features = ["macros", "net", "rt-multi-thread", "time"] }
 # The service's IDs on the wire, and the fake's own, from a UUIDv7.
 uuid = { version = "1.28", features = ["serde", "v7"] }
 
 [dev-dependencies]
-# #[tokio::test]. Cargo adds this feature to the one above.
-tokio = { version = "1.54.1", features = ["macros"] }
+# The process and the output of the test that runs the binary. Cargo adds these
+# features to the one above.
+tokio = { version = "1.54.1", features = ["io-util", "process"] }
 
 [lints]
 workspace = true

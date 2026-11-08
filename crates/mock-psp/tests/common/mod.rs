@@ -1,6 +1,8 @@
 // Author: Nicola Antonello
 
-//! A client for the fake's own tests, which call it over HTTP as the service will.
+//! A client and a receiver for the fake's own tests, which call it over HTTP as the
+//! service will, and take its notifications as the service's `POST /webhooks/mock`
+//! will.
 //!
 //! Cargo compiles each file directly under `tests/` as its own crate. Each test file
 //! that needs these helpers includes this one with `mod common;`.
@@ -10,15 +12,110 @@
     reason = "each test crate uses a different subset of these helpers"
 )]
 
+use std::collections::VecDeque;
+use std::sync::{Arc, Mutex};
+
+use axum::Router;
 use axum::body::Bytes;
-use axum::http::{HeaderMap, Method, Request, StatusCode, header};
+use axum::extract::State;
+use axum::http::{HeaderMap, HeaderValue, Method, Request, StatusCode, header};
+use axum::response::{IntoResponse, Response};
+use axum::routing::post;
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD;
+use hmac::{Hmac, KeyInit, Mac};
 use http_body_util::{BodyExt, Full};
 use hyper_util::client::legacy::Client;
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::rt::TokioExecutor;
 use mock_psp::MockPsp;
 use serde_json::Value;
+use sha2::Sha256;
+use tokio::net::TcpListener;
 use uuid::Uuid;
+
+/// A status, and a `Retry-After` in seconds if any.
+pub type Reply = (StatusCode, Option<u32>);
+
+/// What the receiver got, and what it answers next.
+#[derive(Clone, Default)]
+pub struct Receiver {
+    received: Arc<Mutex<Vec<(HeaderMap, Bytes)>>>,
+    replies: Arc<Mutex<VecDeque<Reply>>>,
+}
+
+impl Receiver {
+    /// Answers the next deliveries with these, then with 202s.
+    pub fn answer(&self, replies: impl IntoIterator<Item = Reply>) {
+        self.replies.lock().expect("unpoisoned").extend(replies);
+    }
+
+    /// The deliveries received so far: their headers and bodies.
+    pub fn received(&self) -> Vec<(HeaderMap, Bytes)> {
+        self.received.lock().expect("unpoisoned").clone()
+    }
+}
+
+async fn receive(State(receiver): State<Receiver>, headers: HeaderMap, body: Bytes) -> Response {
+    receiver
+        .received
+        .lock()
+        .expect("unpoisoned")
+        .push((headers, body));
+    let next = receiver.replies.lock().expect("unpoisoned").pop_front();
+    let (status, retry_after) = next.unwrap_or((StatusCode::ACCEPTED, None));
+    let mut response = status.into_response();
+    if let Some(seconds) = retry_after {
+        response
+            .headers_mut()
+            .insert(header::RETRY_AFTER, HeaderValue::from(seconds));
+    }
+    response
+}
+
+/// A receiver on a free local port, and its endpoint.
+pub async fn receiver() -> (Receiver, String) {
+    let receiver = Receiver::default();
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("a free local port");
+    let endpoint = format!(
+        "http://{}/webhooks/mock",
+        listener.local_addr().expect("bound")
+    );
+    let router = Router::new()
+        .route("/webhooks/mock", post(receive))
+        .with_state(receiver.clone());
+    tokio::spawn(async move { axum::serve(listener, router).await });
+    (receiver, endpoint)
+}
+
+/// A header's value, which the test expects.
+pub fn header_of<'a>(headers: &'a HeaderMap, name: &str) -> &'a str {
+    headers
+        .get(name)
+        .unwrap_or_else(|| panic!("no {name}"))
+        .to_str()
+        .expect("ASCII")
+}
+
+/// Whether one of the listed signatures verifies under this written key: HMAC-SHA256
+/// over `msg_id.timestamp.payload`, computed here and not by the fake.
+pub fn verifies(written_key: &str, headers: &HeaderMap, body: &[u8]) -> bool {
+    let secret = STANDARD
+        .decode(written_key.strip_prefix("whsec_").expect("a written key"))
+        .expect("base64");
+    let mut mac = Hmac::<Sha256>::new_from_slice(&secret).expect("any key length");
+    mac.update(header_of(headers, "webhook-id").as_bytes());
+    mac.update(b".");
+    mac.update(header_of(headers, "webhook-timestamp").as_bytes());
+    mac.update(b".");
+    mac.update(body);
+    let expected = format!("v1,{}", STANDARD.encode(mac.finalize().into_bytes()));
+    header_of(headers, "webhook-signature")
+        .split(' ')
+        .any(|signature| signature == expected)
+}
 
 /// What the fake answered.
 #[derive(Debug)]
