@@ -35,6 +35,9 @@ docker compose up -d --wait
 cargo test --workspace
 ```
 
+`docker compose up -d --wait` also applies a changed `docker-compose.yml`: it
+recreates the container, and the data stays in its volume.
+
 ### Running the server
 
 The server never applies migrations ([ADR-0008](docs/adr/0008-database-role-provisioning.md)),
@@ -117,10 +120,13 @@ cargo test --workspace    # every test; needs the database from the quickstart
 ```
 
 Each database test runs in its own freshly migrated database, created by
-`#[sqlx::test]`. CI runs on every pull request: formatting, `clippy` with
-warnings denied, the whole suite, a release-mode test that integer overflow
-still panics ([ADR-0003](docs/adr/0003-money-representation.md)), and a check
-that the committed sqlx query cache matches the queries.
+`#[sqlx::test]` and named after the test. Two runs of the same tests against one
+server collide, so run one suite at a time against a server
+([ADR-0040](docs/adr/0040-the-local-servers-connection-limit.md)). CI runs on
+every pull request: formatting, `clippy` with warnings denied, the whole suite,
+a release-mode test that integer overflow still panics
+([ADR-0003](docs/adr/0003-money-representation.md)), and a check that the
+committed sqlx query cache matches the queries.
 
 Two more workflows look past the project's own behaviour
 ([ADR-0027](docs/adr/0027-supply-chain-checks.md)). `cargo-deny` fails on a

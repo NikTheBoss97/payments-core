@@ -4,6 +4,9 @@
 services:
   postgres:
     image: postgres:18-alpine
+    # One `cargo test --workspace` opens up to 99 connections at once, and the default
+    # limit is 100. 300 leaves room for a second run (ADR-0040).
+    command: ["postgres", "-c", "max_connections=300"]
     environment:
       POSTGRES_USER: payments
       POSTGRES_PASSWORD: payments
