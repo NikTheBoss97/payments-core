@@ -1,0 +1,20 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO payment_facts\n                    (payment_id, position, prev_position, psp, psp_fact_id, kind, amount)\n             VALUES ($1, $2, $3, $4, $5, $6, $7)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Int4",
+        "Int4",
+        "Text",
+        "Text",
+        "Text",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "d35474a8b92d96f5d0390b4be8c7aa2603d4ff0dc3ecc28a5cc3c71585ba09c0"
+}

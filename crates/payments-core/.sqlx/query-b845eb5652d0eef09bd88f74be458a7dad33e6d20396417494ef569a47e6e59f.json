@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT r.refunded_at FROM payment_refunds r\n               JOIN payment_transitions t ON t.id = r.transition_id\n              WHERE r.payment_id = $1 ORDER BY t.seq",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "refunded_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "payment_refunds",
+            "name": "refunded_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "b845eb5652d0eef09bd88f74be458a7dad33e6d20396417494ef569a47e6e59f"
+}

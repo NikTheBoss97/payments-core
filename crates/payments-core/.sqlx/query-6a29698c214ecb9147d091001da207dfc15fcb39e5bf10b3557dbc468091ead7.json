@@ -1,0 +1,18 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO payment_request_decisions\n                    (request_id, payment_id, request_kind, position, fact_kind)\n             VALUES ($1, $2, $3, $4, $5)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Text",
+        "Int4",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "6a29698c214ecb9147d091001da207dfc15fcb39e5bf10b3557dbc468091ead7"
+}
