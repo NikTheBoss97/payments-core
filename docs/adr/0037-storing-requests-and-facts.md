@@ -2,7 +2,7 @@
 
 # ADR-0037: Storing requests and facts
 
-- Status: accepted
+- Status: accepted; partly superseded by ADR-0042
 - Date: 2026-11-08
 
 ## Context
@@ -91,6 +91,14 @@ The PSP's answer to a send:
 - Tests write every table with raw SQL as each role, break each guard alone, and assert
   its pair of SQLSTATE and constraint name; the catalog test pins the columns,
   constraints, triggers, grants and policies.
+
+## Amendments
+
+- 2026-11-09: ADR-0042 supersedes, in "Who sees what", the stops among the tables on
+  which a merchant has no privilege. `record_request` refuses a request on a stopped
+  payment, under the payment's lock and as the merchant, so the merchant's role reads
+  its own payments' stops, under a policy that tests `EXISTS` on `payments`. It still
+  has no privilege on the notifications or the links of steps.
 
 ## References
 
