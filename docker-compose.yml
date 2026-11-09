@@ -12,7 +12,9 @@ services:
       POSTGRES_PASSWORD: payments
       POSTGRES_DB: payments
     ports:
-      - "5432:5432"
+      # Another port and another project name give a second test run a server of its
+      # own (ADR-0040).
+      - "${POSTGRES_HOST_PORT:-5432}:5432"
     volumes:
       # From 18 on, the image keeps its data under /var/lib/postgresql/18/docker.
       - pgdata:/var/lib/postgresql

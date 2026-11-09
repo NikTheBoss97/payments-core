@@ -121,10 +121,22 @@ cargo test --workspace    # every test; needs the database from the quickstart
 
 Each database test runs in its own freshly migrated database, created by
 `#[sqlx::test]` and named after the test. Two runs of the same tests against one
-server collide, so run one suite at a time against a server
-([ADR-0040](docs/adr/0040-the-local-servers-connection-limit.md)). CI runs on
-every pull request: formatting, `clippy` with warnings denied, the whole suite,
-a release-mode test that integer overflow still panics
+server collide, so a second run at the same time takes a server of its own,
+under another project name and on a free port, and removes it afterwards
+([ADR-0040](docs/adr/0040-the-local-servers-limit-and-parallel-runs.md)):
+
+```sh
+POSTGRES_HOST_PORT=5434 docker compose -p payments-core-2 up -d --wait
+DATABASE_URL=postgres://payments:payments@localhost:5434/payments cargo test --workspace
+docker compose -p payments-core-2 down -v
+```
+
+A checkout can keep a server of its own instead: in its `.env`, set
+`COMPOSE_PROJECT_NAME` and `POSTGRES_HOST_PORT`, and that port in the database
+URLs.
+
+CI runs on every pull request: formatting, `clippy` with warnings denied, the
+whole suite, a release-mode test that integer overflow still panics
 ([ADR-0003](docs/adr/0003-money-representation.md)), and a check that the
 committed sqlx query cache matches the queries.
 
