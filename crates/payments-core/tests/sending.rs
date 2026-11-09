@@ -3,7 +3,7 @@
 //! Sending requests to the PSP (ADR-0028, ADR-0032, ADR-0042): the sender against the
 //! fake over real HTTP (ADR-0029), and against PSPs that answer what the test writes.
 //! Each step gets the time that the test chooses and a seeded source of jitter, so no
-//! test sleeps.
+//! test sleeps. The last two tests are I9's (ADR-0034, ADR-0039).
 
 mod common;
 
@@ -12,15 +12,17 @@ use std::time::Duration;
 
 use axum::http::StatusCode;
 use common::payments::{REQUESTED, create_command, fee_rate};
-use common::psp::{ScriptedPsp, client_of, send as post};
+use common::psp::{ScriptedPsp, client_of, outgoing, send as post};
 use common::{merchant_id, request_id, runtime_pool, runtime_transaction, tenant_pool};
 use futures_util::future::join;
 use mock_psp::wire::Detail;
 use mock_psp::{Failure, MockPsp, Route};
+use payments_core::accounts::Psp;
 use payments_core::catch_up::{StopReason, Swept, catch_up};
 use payments_core::ids::{MerchantId, PaymentId};
 use payments_core::money::PositiveAmount;
 use payments_core::payments::{create_payment, register_merchant};
+use payments_core::psp::PspClient;
 use payments_core::requests::{Ask, RecordRequest, record_request};
 use payments_core::retries::RetryBudget;
 use payments_core::sender::{Attempt, Report, Sender};
@@ -623,6 +625,71 @@ async fn the_sweep_and_the_sender_share_one_budget(pool: PgPool) -> TestResult {
             .all(|(_, attempt)| matches!(attempt, Attempt::NoToken)),
         "{report:?}"
     );
+    world.close().await;
+    Ok(())
+}
+
+/// A client of the fake that waits a second: long enough for the fake's answers, and
+/// short for a reply that never comes.
+fn impatient(fake: &MockPsp) -> PspClient {
+    PspClient::new(
+        Psp::Mock,
+        fake.url(),
+        fake.api_key(),
+        Duration::from_secs(1),
+    )
+    .expect("a local address")
+}
+
+/// The failure that I9 guards against (ADR-0028, ADR-0034): the fake takes request 1
+/// and its reply never comes, so the send times out with the outcome unknown; then the
+/// fake forgets its idempotency keys, as Stripe may after a day. Sending the request
+/// again blindly would now be a second request.
+async fn taken_unanswered_and_forgotten(world: &World) -> Result<RecordRequest, Box<dyn Error>> {
+    let request = world.requested(1).await?;
+    let id = request.request.get();
+    let mut sender = Sender::new(impatient(&world.fake), at(0));
+    sender.hand_over(&request.request);
+    world.fake.lose_replies(1);
+    let report = sender.send_due(&world.system, at(0), &mut none()).await?;
+    assert_eq!(attempts(&report), [(id, "unknown")]);
+    assert_eq!(world.fake.times_taken(id), 1);
+    world.fake.forget_keys();
+    Ok(request)
+}
+
+#[sqlx::test]
+async fn a_request_takes_effect_at_the_psp_at_most_once(pool: PgPool) -> TestResult {
+    let world = World::new(&pool).await?;
+    let request = taken_unanswered_and_forgotten(&world).await?;
+    let id = request.request.get();
+
+    // A new sender, as after a restart. Nothing acknowledged the request, so the search
+    // finds it, and its first attempt is a retry, which looks it up (ADR-0042).
+    let mut restarted = Sender::new(impatient(&world.fake), at(60));
+    let report = restarted
+        .send_due(&world.system, at(60), &mut none())
+        .await?;
+    assert_eq!(attempts(&report), [(id, "found")]);
+    // I9: the PSP acted on the request once (ADR-0034).
+    assert_eq!(world.fake.times_taken(id), 1);
+    assert_eq!(
+        answers(&world.system).await?,
+        [(id, "acknowledged".to_owned())]
+    );
+    world.close().await;
+    Ok(())
+}
+
+#[sqlx::test]
+async fn without_the_lookup_the_same_resend_takes_effect_twice(pool: PgPool) -> TestResult {
+    // The control of the test above, which shows that it can fail (ADR-0039): the same
+    // request, sent again through the client with no lookup.
+    let world = World::new(&pool).await?;
+    let request = taken_unanswered_and_forgotten(&world).await?;
+    let id = request.request.get();
+    impatient(&world.fake).send(&outgoing(&request)).await?;
+    assert_eq!(world.fake.times_taken(id), 2);
     world.close().await;
     Ok(())
 }
