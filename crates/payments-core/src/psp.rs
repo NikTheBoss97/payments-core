@@ -152,41 +152,19 @@ impl PspClient {
     ///
     /// See [`ReadError`].
     pub async fn history(&self, payment: PaymentId) -> Result<History, ReadError> {
-        let request = Request::builder()
-            .method(Method::GET)
-            .uri(format!("{}/v1/payments/{payment}/history", self.base))
-            .header(header::AUTHORIZATION, self.authorization.clone())
+        let request = self
+            .request(Method::GET, &format!("/v1/payments/{payment}/history"))
             .body(Full::new(Bytes::new()))
             .expect("an address checked when the client was made, and a UUID in the path");
-        let call = async {
-            let response =
-                self.client
-                    .request(request)
-                    .await
-                    .map_err(|source| ReadError::NoAnswer {
-                        source: source.into(),
-                    })?;
-            let status = response.status();
-            let retry_after = retry_after(response.headers());
-            let body = Limited::new(response.into_body(), MAX_BODY)
-                .collect()
-                .await
-                .map_err(|source| {
-                    if source.is::<LengthLimitError>() {
-                        ReadError::Unreadable {
-                            source: Unreadable::TooLarge,
-                        }
-                    } else {
-                        ReadError::NoAnswer { source }
-                    }
-                })?
-                .to_bytes();
-            Ok::<_, ReadError>((status, retry_after, body))
+        let answer = self.call(request).await?;
+        // A body above the bound is unreadable, whatever its status.
+        let Some(body) = answer.body else {
+            return Err(ReadError::Unreadable {
+                source: Unreadable::TooLarge,
+            });
         };
-        let (status, retry_after, body) = tokio::time::timeout(self.timeout, call)
-            .await
-            .map_err(|_| ReadError::TimedOut)??;
-        match status {
+        let retry_after = answer.retry_after;
+        match answer.status {
             StatusCode::OK => {
                 read_history(payment, &body).map_err(|source| ReadError::Unreadable { source })
             }
@@ -199,6 +177,66 @@ impl PspClient {
                 Err(ReadError::TryLater { retry_after })
             }
             status => Err(ReadError::Status { status }),
+        }
+    }
+
+    /// A call to the PSP at `path`, carrying the service's key. Its body comes next.
+    fn request(&self, method: Method, path: &str) -> axum::http::request::Builder {
+        Request::builder()
+            .method(method)
+            .uri(format!("{}{path}", self.base))
+            .header(header::AUTHORIZATION, self.authorization.clone())
+    }
+
+    /// Makes one call, bounded by the timeout around it and by [`MAX_BODY`], and never
+    /// retried (ADR-0032, ADR-0036).
+    async fn call(&self, request: Request<Full<Bytes>>) -> Result<Answer, Unanswered> {
+        let call = async {
+            let response = self
+                .client
+                .request(request)
+                .await
+                .map_err(|source| Unanswered::NoAnswer(source.into()))?;
+            let status = response.status();
+            let retry_after = retry_after(response.headers());
+            let body = match Limited::new(response.into_body(), MAX_BODY).collect().await {
+                Ok(collected) => Some(collected.to_bytes()),
+                Err(source) if source.is::<LengthLimitError>() => None,
+                Err(source) => return Err(Unanswered::NoAnswer(source)),
+            };
+            Ok(Answer {
+                status,
+                retry_after,
+                body,
+            })
+        };
+        tokio::time::timeout(self.timeout, call)
+            .await
+            .map_err(|_| Unanswered::TimedOut)?
+    }
+}
+
+/// What the PSP answered to one call.
+struct Answer {
+    status: StatusCode,
+    retry_after: Option<u32>,
+    /// The body, or none when it held more than [`MAX_BODY`] bytes.
+    body: Option<Bytes>,
+}
+
+/// Why a call ended without a whole answer.
+enum Unanswered {
+    /// The connection was refused, or broke.
+    NoAnswer(BoxError),
+    /// The timeout ended the call (ADR-0036).
+    TimedOut,
+}
+
+impl From<Unanswered> for ReadError {
+    fn from(unanswered: Unanswered) -> Self {
+        match unanswered {
+            Unanswered::NoAnswer(source) => Self::NoAnswer { source },
+            Unanswered::TimedOut => Self::TimedOut,
         }
     }
 }
