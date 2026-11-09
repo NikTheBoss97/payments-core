@@ -588,7 +588,16 @@ pub async fn authorize<'a>(
     scope: impl Into<Scope<'a>>,
     command: &Authorize,
 ) -> Result<Outcome, AuthorizeError> {
-    let plan = Plan {
+    apply(scope.into(), &authorize_plan(command), |state| {
+        authorize_move(state, command)
+    })
+    .await
+    .map_err(|failed| AuthorizeError::new(command, failed))
+}
+
+/// An [`Authorize`] as its unit of work sees it.
+fn authorize_plan(command: &Authorize) -> Plan<'_> {
+    Plan {
         id: &command.step,
         asked: Asked {
             payment: command.payment,
@@ -599,12 +608,12 @@ pub async fn authorize<'a>(
             },
         },
         posting: None,
-    };
-    apply(scope.into(), &plan, |state| {
-        lifecycle::authorize(state.status, command.amount, state.requested)
-    })
-    .await
-    .map_err(|failed| AuthorizeError::new(command, failed))
+    }
+}
+
+/// The move of an [`Authorize`]: at most the requested amount (ADR-0016).
+fn authorize_move(state: &State, command: &Authorize) -> Result<Transition, Refused> {
+    lifecycle::authorize(state.status, command.amount, state.requested)
 }
 
 /// The command that records a capture, and posts it (ADR-0016, ADR-0020).
@@ -696,57 +705,84 @@ pub async fn capture<'a>(
     command: &Capture,
 ) -> Result<Outcome, CaptureError> {
     let scope = scope.into();
-    let pool = scope.pool();
     let fail = |failed| CaptureError::new(command, failed);
-    // Outside the command's transaction, and so before the lock: the terms never change,
-    // and the accounts exist before the payment does (ADR-0019, ADR-0020).
-    let terms = read_terms(scope, command.payment).await.map_err(fail)?;
-    let receivable = posting_account(pool, AccountRef::PspReceivable(terms.psp, terms.currency))
+    let books = read_books(scope, command.payment).await.map_err(fail)?;
+    let (posting, asked) = capture_parts(&books, command);
+    let plan = Plan {
+        id: &command.step,
+        asked,
+        posting: Some(&posting),
+    };
+    apply(scope, &plan, |state| capture_move(state, command))
         .await
-        .map_err(fail)?;
+        .map_err(fail)
+}
+
+/// What a payment's postings need, read outside its transaction, and so before its
+/// lock: its terms never change, and its accounts exist before it does (ADR-0019,
+/// ADR-0020).
+struct Books {
+    currency: Currency,
+    fee_rate: BasisPoints,
+    receivable: AccountId,
+    payable: AccountId,
+    fees: AccountId,
+}
+
+/// Reads a payment's [`Books`].
+async fn read_books(scope: Scope<'_>, payment: PaymentId) -> Result<Books, Failed<PostingRefusal>> {
+    let pool = scope.pool();
+    let terms = read_terms(scope, payment).await?;
+    let receivable =
+        posting_account(pool, AccountRef::PspReceivable(terms.psp, terms.currency)).await?;
     let payable = posting_account(
         pool,
         AccountRef::MerchantPayable(terms.merchant, terms.currency),
     )
-    .await
-    .map_err(fail)?;
-    let fees = posting_account(pool, AccountRef::FeeRevenue(terms.currency))
-        .await
-        .map_err(fail)?;
-    let fee = money::fee(command.amount, terms.fee_rate);
+    .await?;
+    let fees = posting_account(pool, AccountRef::FeeRevenue(terms.currency)).await?;
+    Ok(Books {
+        currency: terms.currency,
+        fee_rate: terms.fee_rate,
+        receivable,
+        payable,
+        fees,
+    })
+}
+
+/// A [`Capture`]'s posting, and what a retry of it compares.
+fn capture_parts(books: &Books, command: &Capture) -> (LedgerTransaction, Asked) {
+    let fee = money::fee(command.amount, books.fee_rate);
     let posting = capture_posting(
         same_posting_id(&command.posting),
-        terms.currency,
+        books.currency,
         CaptureAccounts {
-            receivable,
-            payable,
-            fees,
+            receivable: books.receivable,
+            payable: books.payable,
+            fees: books.fees,
         },
         command.amount,
         fee,
     );
-    let plan = Plan {
-        id: &command.step,
-        asked: Asked {
-            payment: command.payment,
-            kind: StepKind::Capture,
-            amount: command.amount.get(),
-            detail: Detail::Capture {
-                fee,
-                captured_at: command.captured_at,
-                posting: command.posting.get(),
-            },
+    let asked = Asked {
+        payment: command.payment,
+        kind: StepKind::Capture,
+        amount: command.amount.get(),
+        detail: Detail::Capture {
+            fee,
+            captured_at: command.captured_at,
+            posting: command.posting.get(),
         },
-        posting: Some(&posting),
     };
-    apply(scope, &plan, |state| {
-        // Before an authorization the status refuses the capture, so this limit
-        // is never read.
-        let limit = state.authorized.unwrap_or(state.requested);
-        lifecycle::capture(state.status, command.amount, limit).map_err(PostingRefusal::Refused)
-    })
-    .await
-    .map_err(fail)
+    (posting, asked)
+}
+
+/// The move of a [`Capture`]: at most the authorized amount (ADR-0016).
+fn capture_move(state: &State, command: &Capture) -> Result<Transition, PostingRefusal> {
+    // Before an authorization the status refuses the capture, so this limit is never
+    // read.
+    let limit = state.authorized.unwrap_or(state.requested);
+    lifecycle::capture(state.status, command.amount, limit).map_err(PostingRefusal::Refused)
 }
 
 /// The accounts of a capture's posting.
@@ -898,32 +934,48 @@ pub async fn refund<'a>(
     let receivable = posting_account(pool, AccountRef::PspReceivable(terms.psp, terms.currency))
         .await
         .map_err(fail)?;
+    let (posting, asked) = refund_parts(terms.currency, payable, receivable, command);
+    let plan = Plan {
+        id: &command.step,
+        asked,
+        posting: Some(&posting),
+    };
+    apply(scope, &plan, |state| refund_move(state, command))
+        .await
+        .map_err(fail)
+}
+
+/// A [`Refund`]'s posting, and what a retry of it compares.
+fn refund_parts(
+    currency: Currency,
+    payable: AccountId,
+    receivable: AccountId,
+    command: &Refund,
+) -> (LedgerTransaction, Asked) {
     let posting = refund_posting(
         same_posting_id(&command.posting),
-        terms.currency,
+        currency,
         payable,
         receivable,
         command.amount,
     );
-    let plan = Plan {
-        id: &command.step,
-        asked: Asked {
-            payment: command.payment,
-            kind: StepKind::Refund,
-            amount: command.amount.get(),
-            detail: Detail::Refund {
-                refunded_at: command.refunded_at,
-                posting: command.posting.get(),
-            },
+    let asked = Asked {
+        payment: command.payment,
+        kind: StepKind::Refund,
+        amount: command.amount.get(),
+        detail: Detail::Refund {
+            refunded_at: command.refunded_at,
+            posting: command.posting.get(),
         },
-        posting: Some(&posting),
     };
-    apply(scope, &plan, |state| {
-        lifecycle::refund(state.status, command.amount, state.refundable)
-            .map_err(PostingRefusal::Refused)
-    })
-    .await
-    .map_err(fail)
+    (posting, asked)
+}
+
+/// The move of a [`Refund`]: partial or final, within what can still be refunded
+/// (ADR-0016).
+fn refund_move(state: &State, command: &Refund) -> Result<Transition, PostingRefusal> {
+    lifecycle::refund(state.status, command.amount, state.refundable)
+        .map_err(PostingRefusal::Refused)
 }
 
 /// ADR-0020's lines for a refund of R: the merchant's payable +R and the PSP's
@@ -1125,7 +1177,16 @@ async fn plain_step(
     event: Event,
     kind: StepKind,
 ) -> Result<Outcome, StepError> {
-    let plan = Plan {
+    apply(scope, &plain_plan(command, kind), |state| {
+        plain_move(state, event)
+    })
+    .await
+    .map_err(|failed| StepError::new(command, failed))
+}
+
+/// A step that carries nothing, as its unit of work sees it.
+fn plain_plan(command: &StepCommand, kind: StepKind) -> Plan<'_> {
+    Plan {
         id: &command.step,
         asked: Asked {
             payment: command.payment,
@@ -1134,10 +1195,7 @@ async fn plain_step(
             detail: Detail::None,
         },
         posting: None,
-    };
-    apply(scope, &plan, |state| plain_move(state, event))
-        .await
-        .map_err(|failed| StepError::new(command, failed))
+    }
 }
 
 /// Why a step that carries nothing is refused.
