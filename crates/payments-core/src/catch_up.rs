@@ -12,7 +12,8 @@
 //! it. [`catch_up`] runs the two halves in a row, and a test runs them in any order.
 //!
 //! [`sweep`] catches up the payments that wait for the PSP, one at a time, for the facts
-//! whose notifications never came.
+//! whose notifications never came, under the budget of retries that it shares with the
+//! sender (ADR-0042).
 //!
 //! The lints are the same as in `money`: this module handles amounts.
 #![forbid(clippy::arithmetic_side_effects, clippy::as_conversions)]
@@ -34,6 +35,7 @@ use crate::payments::{
 };
 use crate::psp::{Fact, FactDetail, FactKind, History, PspClient, ReadError};
 use crate::requests::RequestKind;
+use crate::retries::RetryBudget;
 
 /// What the first half of a catch-up read: how many facts the service held before it
 /// asked, and the PSP's history. Only [`read`] makes one.
@@ -149,6 +151,11 @@ pub struct SweepError {
 /// operator instead. A failure is reported with its payment, and the pass goes on. The
 /// caller reads `now` from its clock, and sets the cadence.
 ///
+/// Each catch-up is a retry, so it spends a token of `budget` first, and the pass ends
+/// when the bucket is empty. The pass goes through the due payments in ID order,
+/// starting after `after`, the last payment that the pass before it caught up, and
+/// wrapping round, so that every waiting payment gets its turn (ADR-0042).
+///
 /// # Errors
 ///
 /// [`SweepError`] when the payments that are due cannot be listed.
@@ -156,8 +163,12 @@ pub async fn sweep(
     pool: &PgPool,
     psp: &PspClient,
     now: DateTime<Utc>,
+    budget: &mut RetryBudget,
+    after: Option<PaymentId>,
 ) -> Result<Swept, SweepError> {
-    // Ordered by ID for a stable report, not for any correctness (ADR-0005).
+    // In ID order from the place, for fairness and never for correctness (ADR-0005): the
+    // IDs after `after` first, then the rest. With no place, the first key is NULL for
+    // every payment, which leaves the order by ID.
     let due = sqlx::query_scalar!(
         r#"SELECT p.id
              FROM payments p
@@ -180,19 +191,23 @@ pub async fn sweep(
                    OR (newest.to_status IN ($4, $5)
                        AND NOT EXISTS (SELECT 1 FROM payment_facts f
                                         WHERE f.payment_id = p.id AND f.kind = $6)))
-            ORDER BY p.id"#,
+            ORDER BY p.id <= $7, p.id"#,
         psp.psp().as_str(),
         PaymentStatus::Authorized.as_str(),
         now,
         PaymentStatus::Captured.as_str(),
         PaymentStatus::Refunded.as_str(),
-        FactKind::Settle.as_str()
+        FactKind::Settle.as_str(),
+        after.map(PaymentId::get)
     )
     .fetch_all(pool)
     .await
     .map_err(|source| SweepError { source })?;
     let mut swept = Vec::with_capacity(due.len());
     for id in due {
+        if !budget.take(now) {
+            break;
+        }
         let payment = PaymentId::try_from(id).expect("payments_id_check allows only UUIDv7 IDs");
         swept.push((payment, catch_up(pool, psp, payment).await));
     }

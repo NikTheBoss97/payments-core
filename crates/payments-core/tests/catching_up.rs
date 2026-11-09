@@ -12,6 +12,7 @@
 mod common;
 
 use std::error::Error;
+use std::time::Duration;
 
 use axum::http::StatusCode;
 use common::payments::{
@@ -23,15 +24,16 @@ use futures_util::future::{join, join_all};
 use mock_psp::wire::{Detail, History};
 use mock_psp::{Failure, MockPsp, Route};
 use payments_core::catch_up::{
-    CatchUpError, CaughtUp, Stop, StopReason, Swept, apply, catch_up, read, sweep,
+    CatchUpError, CaughtUp, Stop, StopReason, SweepError, Swept, apply, catch_up, read, sweep,
 };
 use payments_core::db::commit;
 use payments_core::ids::{MerchantId, PaymentId};
 use payments_core::lifecycle::PaymentStatus;
 use payments_core::money::PositiveAmount;
 use payments_core::payments::{create_payment, find_payment, lock_key, register_merchant};
-use payments_core::psp::{ReadError, Unreadable};
+use payments_core::psp::{PspClient, ReadError, Unreadable};
 use payments_core::requests::{Ask, RecordRequest, RequestError, record_request};
+use payments_core::retries::RetryBudget;
 use payments_core::tenancy::Tenant;
 use serde_json::json;
 use sqlx::PgPool;
@@ -994,6 +996,22 @@ fn outcomes(swept: Swept) -> Vec<(PaymentId, Result<CaughtUp, String>)> {
         .collect()
 }
 
+/// One pass of the sweep from the first payment, with tokens to spare.
+async fn sweep_all(
+    pool: &PgPool,
+    psp: &PspClient,
+    now: DateTime<Utc>,
+) -> Result<Swept, SweepError> {
+    let mut plenty = RetryBudget::new(1_000, Duration::from_secs(1), now);
+    sweep(pool, psp, now, &mut plenty, None).await
+}
+
+/// `seconds` after `time`.
+fn after(time: DateTime<Utc>, seconds: i64) -> DateTime<Utc> {
+    DateTime::from_timestamp_micros(time.timestamp_micros() + seconds * 1_000_000)
+        .expect("a time in range")
+}
+
 #[sqlx::test]
 async fn a_sweep_catches_up_every_payment_that_waits_for_the_psp(pool: PgPool) -> TestResult {
     let world = World::new(&pool).await?;
@@ -1042,7 +1060,7 @@ async fn a_sweep_catches_up_every_payment_that_waits_for_the_psp(pool: PgPool) -
     let client = client_of(&world.fake);
     let current = Ok(CaughtUp::Current { applied: 1 });
     assert_eq!(
-        outcomes(sweep(&world.system, &client, now).await?),
+        outcomes(sweep_all(&world.system, &client, now).await?),
         [
             (requested, current.clone()),
             (lapsed, current.clone()),
@@ -1062,7 +1080,7 @@ async fn a_sweep_catches_up_every_payment_that_waits_for_the_psp(pool: PgPool) -
         Some(&step("settle", 0, "settled"))
     );
     // Caught up, none waits any more.
-    assert!(sweep(&world.system, &client, now).await?.is_empty());
+    assert!(sweep_all(&world.system, &client, now).await?.is_empty());
     assert_eq!(kinds_of(&pool, fresh).await?, ["authorize"]);
     world.close().await;
     Ok(())
@@ -1076,9 +1094,9 @@ async fn an_authorization_waits_from_the_moment_it_lapses(pool: PgPool) -> TestR
     let lapses = expires_at(&pool, payment).await?;
     let client = client_of(&world.fake);
     let before = DateTime::from_timestamp_micros(lapses.timestamp_micros() - 1).expect("in range");
-    assert!(sweep(&world.system, &client, before).await?.is_empty());
+    assert!(sweep_all(&world.system, &client, before).await?.is_empty());
     assert_eq!(
-        outcomes(sweep(&world.system, &client, lapses).await?),
+        outcomes(sweep_all(&world.system, &client, lapses).await?),
         [(payment, Ok(CaughtUp::Current { applied: 1 }))]
     );
     world.close().await;
@@ -1111,14 +1129,14 @@ async fn a_capture_refunded_in_full_waits_until_it_settles(pool: PgPool) -> Test
 
     let client = client_of(&world.fake);
     assert_eq!(
-        outcomes(sweep(&world.system, &client, at()).await?),
+        outcomes(sweep_all(&world.system, &client, at()).await?),
         [(unsettled, Ok(CaughtUp::Current { applied: 1 }))]
     );
     assert_eq!(
         kinds_of(&pool, unsettled).await?,
         ["authorize", "capture", "refund", "settle"]
     );
-    assert!(sweep(&world.system, &client, at()).await?.is_empty());
+    assert!(sweep_all(&world.system, &client, at()).await?.is_empty());
     world.close().await;
     Ok(())
 }
@@ -1141,7 +1159,7 @@ async fn one_payments_failure_does_not_end_the_pass(pool: PgPool) -> TestResult 
 
     let failed = format!("the PSP's history of payment {first} could not be read");
     assert_eq!(
-        outcomes(sweep(&world.system, &client, at()).await?),
+        outcomes(sweep_all(&world.system, &client, at()).await?),
         [
             (first, Err(failed)),
             (second, Ok(CaughtUp::Current { applied: 1 })),
@@ -1149,9 +1167,51 @@ async fn one_payments_failure_does_not_end_the_pass(pool: PgPool) -> TestResult 
     );
     // The next pass catches up the payment that the failure left waiting.
     assert_eq!(
-        outcomes(sweep(&world.system, &client, at()).await?),
+        outcomes(sweep_all(&world.system, &client, at()).await?),
         [(first, Ok(CaughtUp::Current { applied: 1 }))]
     );
+    world.close().await;
+    Ok(())
+}
+
+#[sqlx::test]
+async fn a_pass_spends_a_token_a_payment_and_resumes_after_its_last_one(
+    pool: PgPool,
+) -> TestResult {
+    let world = World::new(&pool).await?;
+    let mut due = Vec::new();
+    for n in 1..=3 {
+        let payment = world.created(n).await?;
+        // Undecided, so each payment stays due after every pass.
+        world
+            .ask(n, payment, Ask::Authorize(amount(REQUESTED)))
+            .await?;
+        due.push(payment);
+    }
+    let client = client_of(&world.fake);
+    let now = at();
+    let mut budget = RetryBudget::new(2, Duration::from_secs(1), now);
+    let swept = |swept: Swept| -> Vec<PaymentId> {
+        swept.into_iter().map(|(payment, _)| payment).collect()
+    };
+
+    // Two tokens catch up the first two payments, and the third waits (ADR-0042).
+    let first = swept(sweep(&world.system, &client, now, &mut budget, None).await?);
+    assert_eq!(first, [due[0], due[1]]);
+    // A second later the bucket holds one token, and the pass resumes after the second.
+    let place = first.last().copied();
+    let second = swept(sweep(&world.system, &client, after(now, 1), &mut budget, place).await?);
+    assert_eq!(second, [due[2]]);
+    // Then it wraps round to the first.
+    let place = second.last().copied();
+    let third = swept(sweep(&world.system, &client, after(now, 2), &mut budget, place).await?);
+    assert_eq!(third, [due[0]]);
+    // From the first payment every pass, the third would wait as long as tokens ran short.
+    let again = swept(sweep(&world.system, &client, after(now, 3), &mut budget, None).await?);
+    assert_eq!(again, [due[0]]);
+    // With no token left, a pass catches up nothing.
+    let empty = sweep(&world.system, &client, after(now, 3), &mut budget, None).await?;
+    assert!(empty.is_empty());
     world.close().await;
     Ok(())
 }
@@ -1415,7 +1475,7 @@ async fn walk(world: &World, pool: &PgPool, n: u32) -> Result<Stage, Box<dyn Err
                 assert_prefix(world, pool, payment, &context).await?;
             }
             20 => {
-                let swept = sweep(&world.system, &client_of(&world.fake), later()).await?;
+                let swept = sweep_all(&world.system, &client_of(&world.fake), later()).await?;
                 for (other, result) in swept {
                     let caught = result?;
                     assert!(
@@ -1442,7 +1502,7 @@ async fn facts_reach_a_payment_in_the_psps_order_whatever_its_notifications_do(
     let walks: Vec<u32> = (1..=24).collect();
     let ends = join_all(walks.iter().map(|&n| walk(&world, &pool, n))).await;
     // Every notification may have been lost: a last sweep finds every fact.
-    for (payment, result) in sweep(&world.system, &client_of(&world.fake), later()).await? {
+    for (payment, result) in sweep_all(&world.system, &client_of(&world.fake), later()).await? {
         let caught = result?;
         assert!(
             matches!(caught, CaughtUp::Current { .. }),
