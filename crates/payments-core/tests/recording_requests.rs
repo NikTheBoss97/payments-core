@@ -22,6 +22,7 @@ use common::{
     wait_for_lock_wait,
 };
 use futures_util::future::{join, join_all};
+use payments_core::catch_up::StopReason;
 use payments_core::db::commit;
 use payments_core::idempotency::{Seal, recall};
 use payments_core::ids::{MerchantId, PaymentId};
@@ -125,6 +126,21 @@ fn above(amount: i64, limit: i64) -> Refusal {
 
 fn pending(kind: RequestKind) -> Refusal {
     Conflict::Pending(kind).into()
+}
+
+/// Stops a payment as the catch-up does, as the system role (ADR-0041).
+async fn stop(pool: &PgPool, payment: PaymentId) -> TestResult {
+    let mut tx = runtime_transaction(pool).await?;
+    sqlx::query!(
+        "INSERT INTO payment_stops (payment_id, position, reason) VALUES ($1, $2, $3)",
+        payment.get(),
+        1,
+        StopReason::NoPlace.as_str()
+    )
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(())
 }
 
 /// Every request recorded, whoever owns it, in the order of the test's IDs.
@@ -395,6 +411,100 @@ async fn a_refund_counts_the_refunds_in_flight(pool: PgPool) -> TestResult {
         recorded(5, payment)
     );
     assert_eq!(requests_stored(&pool).await?.len(), 3);
+    tenant.close().await;
+    Ok(())
+}
+
+#[sqlx::test]
+async fn a_stopped_payment_takes_no_request(pool: PgPool) -> TestResult {
+    let (tenant, merchant, _) = two_merchants(&pool).await?;
+    let me = Tenant::new(&tenant, merchant);
+    let created = created(me, merchant, 1).await?;
+    let authorized = authorized(me, merchant, 2).await?;
+    let captured = captured(me, merchant, 3).await?;
+    for payment in [created, authorized, captured] {
+        stop(&pool, payment).await?;
+    }
+
+    // What each status would take, and a refund that the status would refuse: the stop
+    // decides first (ADR-0042).
+    for (n, payment, ask) in [
+        (1, created, Ask::Authorize(amount(REQUESTED))),
+        (2, authorized, Ask::Capture(amount(AUTHORIZED))),
+        (3, authorized, Ask::Void),
+        (4, captured, Ask::Refund(amount(1))),
+        (5, created, Ask::Refund(amount(1))),
+    ] {
+        assert_eq!(
+            refusal(me, &request(n, payment, ask)).await,
+            Conflict::Stopped.into(),
+            "request {n}"
+        );
+    }
+
+    // Under a key the refusal is final, so it is stored (ADR-0026).
+    let under_a_key = key("authorize-stopped");
+    let seal = Seal {
+        key: &under_a_key,
+        fingerprint: print(6),
+        answer: &render,
+    };
+    let err = record_request(
+        me.sealed(&seal),
+        &request(6, created, Ask::Authorize(amount(REQUESTED))),
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            RequestError::Refused(Refusal::Conflict(Conflict::Stopped))
+        ),
+        "{err:?}"
+    );
+    assert_eq!(
+        recall(me, &under_a_key, print(6)).await?,
+        answered(
+            409,
+            r#"{"type":"conflict","conflict":"this payment is stopped until an operator looks at it"}"#
+        )
+    );
+    assert_eq!(requests_stored(&pool).await?, Vec::<Stored>::new());
+    tenant.close().await;
+    Ok(())
+}
+
+#[sqlx::test]
+async fn a_stop_holds_only_its_payment_and_a_retry_still_finds_its_request(
+    pool: PgPool,
+) -> TestResult {
+    let (tenant, merchant, _) = two_merchants(&pool).await?;
+    let me = Tenant::new(&tenant, merchant);
+    let payment = created(me, merchant, 1).await?;
+    let other = created(me, merchant, 2).await?;
+    let first = request(1, payment, Ask::Authorize(amount(REQUESTED)));
+    assert_eq!(record_request(me, &first).await?, recorded(1, payment));
+    stop(&pool, payment).await?;
+
+    // Identity first (ADR-0019): a copy of a request recorded before the stop is the
+    // same request, and a new one is refused.
+    assert_eq!(
+        record_request(me, &first).await?,
+        RequestOutcome::AlreadyRecorded(RequestRecorded {
+            request: request_id(1).get(),
+            payment,
+        })
+    );
+    assert_eq!(
+        refusal(me, &request(2, payment, Ask::Void)).await,
+        Conflict::Stopped.into()
+    );
+    // Another payment of the same merchant takes its requests.
+    assert_eq!(
+        record_request(me, &request(3, other, Ask::Authorize(amount(REQUESTED)))).await?,
+        recorded(3, other)
+    );
+    assert_eq!(requests_stored(&pool).await?.len(), 2);
     tenant.close().await;
     Ok(())
 }

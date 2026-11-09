@@ -4,9 +4,9 @@
 //!
 //! A request is recorded here, not sent: under the payment's lock and its merchant, in
 //! the transaction that stores its 202 under the key. The sender sends it after that
-//! commit. Some requests are refused at once: by the table of moves, by an amount's
-//! limit, or because they conflict with a request already recorded. A request is in
-//! flight until a fact of the PSP's decides it (ADR-0037).
+//! commit. Some requests are refused at once: on a stopped payment, by the table of
+//! moves, by an amount's limit, or because they conflict with a request already
+//! recorded. A request is in flight until a fact of the PSP's decides it (ADR-0037).
 //!
 //! The lints are the same as in `money`: this module handles amounts.
 
@@ -141,9 +141,14 @@ pub enum RequestOutcome {
     AlreadyRecorded(RequestRecorded),
 }
 
-/// A conflict with a request already recorded (ADR-0028, ADR-0039).
+/// A conflict with a request already recorded, or with a stop (ADR-0028, ADR-0039,
+/// ADR-0042).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum Conflict {
+    /// The catch-up stopped the payment for an operator. Money that the PSP moved now
+    /// could not reach the ledger, so the payment takes no request, whatever its status.
+    #[error("this payment is stopped until an operator looks at it")]
+    Stopped,
     /// The payment has a request to authorize it, decided or not: a payment has one
     /// authorization.
     #[error("an authorization of this payment was requested already")]
@@ -360,6 +365,8 @@ async fn stored(tx: &mut Transaction<'_, Postgres>, request: Uuid) -> sqlx::Resu
 /// What a request's one read under the lock found.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct RequestState {
+    /// Whether the catch-up stopped the payment (ADR-0042).
+    stopped: bool,
     status: PaymentStatus,
     /// What can still be refunded, after the payment's newest step.
     refundable: i64,
@@ -383,7 +390,9 @@ async fn read_state(
     payment: PaymentId,
 ) -> sqlx::Result<Option<RequestState>> {
     let row = sqlx::query!(
-        r#"SELECT newest.to_status, newest.refundable,
+        r#"SELECT EXISTS (SELECT 1 FROM payment_stops s WHERE s.payment_id = p.id)
+                      AS "stopped!",
+                  newest.to_status, newest.refundable,
                   p.amount AS requested,
                   authorized.amount AS "authorized?",
                   EXISTS (SELECT 1 FROM payment_requests r
@@ -418,6 +427,7 @@ async fn read_state(
     .fetch_optional(&mut **tx)
     .await?;
     Ok(row.map(|row| RequestState {
+        stopped: row.stopped,
         status: PaymentStatus::parse(&row.to_status)
             .expect("payment_transitions_edge_check allows only known statuses"),
         refundable: row.refundable,
@@ -435,9 +445,13 @@ async fn read_state(
     }))
 }
 
-/// Whether a request may be recorded: the table of moves and the amount's limit first,
-/// as for a step, then the requests already recorded (ADR-0028, ADR-0039).
+/// Whether a request may be recorded: a stop first, since a stopped payment takes no
+/// request whatever its status (ADR-0042); then the table of moves and the amount's
+/// limit, as for a step; then the requests already recorded (ADR-0028, ADR-0039).
 fn decide(ask: Ask, state: &RequestState) -> Result<(), Refusal> {
+    if state.stopped {
+        return Err(Conflict::Stopped.into());
+    }
     match ask {
         Ask::Authorize(amount) => {
             lifecycle::authorize(state.status, amount, state.requested)?;
@@ -509,6 +523,7 @@ mod tests {
             0
         };
         RequestState {
+            stopped: false,
             status,
             refundable,
             requested: amount(100),
@@ -568,6 +583,30 @@ mod tests {
             ),
         ] {
             assert_eq!(decide(ask, &state), expected, "{ask:?} at {}", state.status);
+        }
+    }
+
+    #[test]
+    fn a_stopped_payment_takes_no_request_whatever_its_status() {
+        // Each ask would be recorded, or refused for another reason, if the payment were
+        // not stopped: the stop comes first (ADR-0042).
+        for &status in PaymentStatus::ALL {
+            let state = RequestState {
+                stopped: true,
+                ..at(status)
+            };
+            for ask in [
+                Ask::Authorize(amount(100)),
+                Ask::Capture(amount(80)),
+                Ask::Void,
+                Ask::Refund(amount(1)),
+            ] {
+                assert_eq!(
+                    decide(ask, &state),
+                    Err(Conflict::Stopped.into()),
+                    "{ask:?} at {status}"
+                );
+            }
         }
     }
 

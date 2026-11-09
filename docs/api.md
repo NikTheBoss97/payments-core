@@ -285,6 +285,13 @@ it, so the payment can no longer be cancelled. It is final and stored under the 
 would race it. It is final and stored under the key, as for an [`illegal-move`](#illegal-move):
 once the provider has decided, trying again takes a new key.
 
+### payment-stopped
+
+`409`. The payment is stopped: the provider's history held something that the service could not
+apply, and an operator has to look at the payment before it takes another request. Requests
+recorded before the stop wait too, and the provider is not sent them. It is final and stored
+under the key, as for an [`illegal-move`](#illegal-move).
+
 ### unavailable
 
 `503`. The service could not finish the request, for instance because the database could
