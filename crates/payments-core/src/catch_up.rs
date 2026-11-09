@@ -11,12 +11,16 @@
 //! it holds, stops the payment for an operator at its position, after the facts before
 //! it. [`catch_up`] runs the two halves in a row, and a test runs them in any order.
 //!
+//! [`sweep`] catches up the payments that wait for the PSP, one at a time, for the facts
+//! whose notifications never came.
+//!
 //! The lints are the same as in `money`: this module handles amounts.
 #![forbid(clippy::arithmetic_side_effects, clippy::as_conversions)]
 
 use std::collections::HashMap;
 use std::convert::Infallible;
 
+use sqlx::types::chrono::{DateTime, Utc};
 use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
@@ -123,6 +127,76 @@ pub enum CatchUpError {
         #[source]
         source: sqlx::Error,
     },
+}
+
+/// What one pass of the sweep did: each payment that was due, in the order of their IDs,
+/// with what catching it up did.
+pub type Swept = Vec<(PaymentId, Result<CaughtUp, CatchUpError>)>;
+
+/// Why a pass of the sweep could not list the payments that are due. It caught up none,
+/// and the next pass lists them again.
+#[derive(Debug, thiserror::Error)]
+#[error("the payments that wait for the PSP could not be listed")]
+pub struct SweepError {
+    #[source]
+    source: sqlx::Error,
+}
+
+/// One pass of the sweep (ADR-0031, ADR-0039, ADR-0041): catches up, one at a time,
+/// every payment of this PSP that waits for it: one with a request not yet decided, an
+/// authorization that lapses at or before `now`, or a capture not yet settled, which
+/// may have been refunded in full first (ADR-0016). A stopped payment waits for an
+/// operator instead. A failure is reported with its payment, and the pass goes on. The
+/// caller reads `now` from its clock, and sets the cadence.
+///
+/// # Errors
+///
+/// [`SweepError`] when the payments that are due cannot be listed.
+pub async fn sweep(
+    pool: &PgPool,
+    psp: &PspClient,
+    now: DateTime<Utc>,
+) -> Result<Swept, SweepError> {
+    // Ordered by ID for a stable report, not for any correctness (ADR-0005).
+    let due = sqlx::query_scalar!(
+        r#"SELECT p.id
+             FROM payments p
+            CROSS JOIN LATERAL (
+                  SELECT t.to_status
+                    FROM payment_transitions t
+                   WHERE t.payment_id = p.id
+                   ORDER BY t.seq DESC
+                   LIMIT 1
+                  ) newest
+            WHERE p.psp = $1
+              AND NOT EXISTS (SELECT 1 FROM payment_stops s WHERE s.payment_id = p.id)
+              AND (EXISTS (SELECT 1 FROM payment_requests r
+                            WHERE r.payment_id = p.id
+                              AND NOT EXISTS (SELECT 1 FROM payment_request_decisions d
+                                               WHERE d.request_id = r.id))
+                   OR (newest.to_status = $2
+                       AND EXISTS (SELECT 1 FROM payment_authorizations a
+                                    WHERE a.payment_id = p.id AND a.expires_at <= $3))
+                   OR (newest.to_status IN ($4, $5)
+                       AND NOT EXISTS (SELECT 1 FROM payment_facts f
+                                        WHERE f.payment_id = p.id AND f.kind = $6)))
+            ORDER BY p.id"#,
+        psp.psp().as_str(),
+        PaymentStatus::Authorized.as_str(),
+        now,
+        PaymentStatus::Captured.as_str(),
+        PaymentStatus::Refunded.as_str(),
+        FactKind::Settle.as_str()
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|source| SweepError { source })?;
+    let mut swept = Vec::with_capacity(due.len());
+    for id in due {
+        let payment = PaymentId::try_from(id).expect("payments_id_check allows only UUIDv7 IDs");
+        swept.push((payment, catch_up(pool, psp, payment).await));
+    }
+    Ok(swept)
 }
 
 /// Catches a payment up with its PSP's history: [`read`], then [`apply`].

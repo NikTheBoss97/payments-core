@@ -22,7 +22,9 @@ use common::{merchant_id, payment_id, request_id, runtime_pool, tenant_pool, wai
 use futures_util::future::{join, join_all};
 use mock_psp::wire::{Detail, History};
 use mock_psp::{Failure, MockPsp, Route};
-use payments_core::catch_up::{CatchUpError, CaughtUp, Stop, StopReason, apply, catch_up, read};
+use payments_core::catch_up::{
+    CatchUpError, CaughtUp, Stop, StopReason, Swept, apply, catch_up, read, sweep,
+};
 use payments_core::db::commit;
 use payments_core::ids::{MerchantId, PaymentId};
 use payments_core::money::PositiveAmount;
@@ -969,6 +971,186 @@ async fn a_payment_that_does_not_exist_is_not_found(pool: PgPool) -> TestResult 
         Err(CatchUpError::NotFound { payment }) => assert_eq!(payment, unknown),
         other => panic!("{other:?}"),
     }
+    world.close().await;
+    Ok(())
+}
+
+/// When the PSP said that the payment's authorization lapses, as its record holds it.
+async fn expires_at(pool: &PgPool, payment: PaymentId) -> sqlx::Result<DateTime<Utc>> {
+    sqlx::query_scalar!(
+        "SELECT expires_at FROM payment_authorizations WHERE payment_id = $1",
+        payment.get()
+    )
+    .fetch_one(pool)
+    .await
+}
+
+/// What a pass of the sweep did to each payment, with a failure written out.
+fn outcomes(swept: Swept) -> Vec<(PaymentId, Result<CaughtUp, String>)> {
+    swept
+        .into_iter()
+        .map(|(payment, result)| (payment, result.map_err(|err| err.to_string())))
+        .collect()
+}
+
+#[sqlx::test]
+async fn a_sweep_catches_up_every_payment_that_waits_for_the_psp(pool: PgPool) -> TestResult {
+    let world = World::new(&pool).await?;
+    // An authorization that lapsed by `now`, which the PSP let expire. The others are
+    // authorized later, so they lapse later.
+    let lapsed = world.authorized(2).await?;
+    world.fake.expire(lapsed.get());
+    let now = expires_at(&pool, lapsed).await?;
+    // A request that the PSP decided, whose notification never came.
+    let requested = world.created(1).await?;
+    let authorize = world
+        .ask(1, requested, Ask::Authorize(amount(REQUESTED)))
+        .await?;
+    world.fake.approve(authorize);
+    // A capture not yet settled, which the PSP has settled.
+    let captured = world.captured(3).await?;
+    world.fake.settle(captured.get());
+    // None of these waits for the PSP, although the PSP holds a new fact of the first:
+    // an authorization that lapses after `now`, a settled payment, a payment that asked
+    // nothing, and a stopped payment, whose request was never decided.
+    let fresh = world.authorized(4).await?;
+    world.fake.expire(fresh.get());
+    assert!(expires_at(&pool, fresh).await? > now);
+    let settled = world.captured(5).await?;
+    world.fake.settle(settled.get());
+    assert_eq!(
+        world.catch_up(settled).await?,
+        CaughtUp::Current { applied: 1 }
+    );
+    world.created(6).await?;
+    let stopped_one = world.created(7).await?;
+    world
+        .ask(7, stopped_one, Ask::Authorize(amount(REQUESTED)))
+        .await?;
+    world.fake.append(
+        stopped_one.get(),
+        Detail::Declined {
+            request_id: Uuid::now_v7(),
+        },
+    );
+    assert_eq!(
+        world.catch_up(stopped_one).await?,
+        stopped(0, 1, StopReason::Contradiction)
+    );
+
+    let client = client_of(&world.fake);
+    let current = Ok(CaughtUp::Current { applied: 1 });
+    assert_eq!(
+        outcomes(sweep(&world.system, &client, now).await?),
+        [
+            (requested, current.clone()),
+            (lapsed, current.clone()),
+            (captured, current),
+        ]
+    );
+    assert_eq!(
+        steps_of(&pool, requested).await?.last(),
+        Some(&step("authorize", REQUESTED, "authorized"))
+    );
+    assert_eq!(
+        steps_of(&pool, lapsed).await?.last(),
+        Some(&step("expire", 0, "voided"))
+    );
+    assert_eq!(
+        steps_of(&pool, captured).await?.last(),
+        Some(&step("settle", 0, "settled"))
+    );
+    // Caught up, none waits any more.
+    assert!(sweep(&world.system, &client, now).await?.is_empty());
+    assert_eq!(kinds_of(&pool, fresh).await?, ["authorize"]);
+    world.close().await;
+    Ok(())
+}
+
+#[sqlx::test]
+async fn an_authorization_waits_from_the_moment_it_lapses(pool: PgPool) -> TestResult {
+    let world = World::new(&pool).await?;
+    let payment = world.authorized(1).await?;
+    world.fake.expire(payment.get());
+    let lapses = expires_at(&pool, payment).await?;
+    let client = client_of(&world.fake);
+    let before = DateTime::from_timestamp_micros(lapses.timestamp_micros() - 1).expect("in range");
+    assert!(sweep(&world.system, &client, before).await?.is_empty());
+    assert_eq!(
+        outcomes(sweep(&world.system, &client, lapses).await?),
+        [(payment, Ok(CaughtUp::Current { applied: 1 }))]
+    );
+    world.close().await;
+    Ok(())
+}
+
+#[sqlx::test]
+async fn a_capture_refunded_in_full_waits_until_it_settles(pool: PgPool) -> TestResult {
+    // A capture not yet settled may be refunded in full first. The PSP settles it later,
+    // and that settlement reaches the payment only through a catch-up (ADR-0016).
+    let world = World::new(&pool).await?;
+    let unsettled = world.captured(1).await?;
+    let refund = world
+        .ask(1, unsettled, Ask::Refund(amount(AUTHORIZED)))
+        .await?;
+    world.fake.approve(refund);
+    // Settled before its full refund, the other one waits for nothing.
+    let settled = world.captured(2).await?;
+    world.fake.settle(settled.get());
+    let other = world
+        .ask(2, settled, Ask::Refund(amount(AUTHORIZED)))
+        .await?;
+    world.fake.approve(other);
+    for payment in [unsettled, settled] {
+        world.catch_up(payment).await?;
+    }
+    // Refunded, the first is still a capture not yet settled; the PSP settles it, and
+    // the notification never comes.
+    world.fake.settle(unsettled.get());
+
+    let client = client_of(&world.fake);
+    assert_eq!(
+        outcomes(sweep(&world.system, &client, at()).await?),
+        [(unsettled, Ok(CaughtUp::Current { applied: 1 }))]
+    );
+    assert_eq!(
+        kinds_of(&pool, unsettled).await?,
+        ["authorize", "capture", "refund", "settle"]
+    );
+    assert!(sweep(&world.system, &client, at()).await?.is_empty());
+    world.close().await;
+    Ok(())
+}
+
+#[sqlx::test]
+async fn one_payments_failure_does_not_end_the_pass(pool: PgPool) -> TestResult {
+    let world = World::new(&pool).await?;
+    let first = world.created(1).await?;
+    let second = world.created(2).await?;
+    for (n, payment) in [(1, first), (2, second)] {
+        let authorize = world
+            .ask(n, payment, Ask::Authorize(amount(REQUESTED)))
+            .await?;
+        world.fake.approve(authorize);
+    }
+    world
+        .fake
+        .fail_next(Route::History, [Failure::InternalError]);
+    let client = client_of(&world.fake);
+
+    let failed = format!("the PSP's history of payment {first} could not be read");
+    assert_eq!(
+        outcomes(sweep(&world.system, &client, at()).await?),
+        [
+            (first, Err(failed)),
+            (second, Ok(CaughtUp::Current { applied: 1 })),
+        ]
+    );
+    // The next pass catches up the payment that the failure left waiting.
+    assert_eq!(
+        outcomes(sweep(&world.system, &client, at()).await?),
+        [(first, Ok(CaughtUp::Current { applied: 1 }))]
+    );
     world.close().await;
     Ok(())
 }
