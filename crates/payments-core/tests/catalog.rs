@@ -237,6 +237,7 @@ async fn the_tenant_role_has_exactly_the_expected_privileges(pool: PgPool) -> sq
             "payment_requests.id INSERT",
             "payment_requests.kind INSERT",
             "payment_requests.payment_id INSERT",
+            "payment_stops SELECT",
             "payment_transitions SELECT",
             "payment_transitions.amount INSERT",
             "payment_transitions.from_status INSERT",
@@ -1006,6 +1007,7 @@ async fn row_level_security_covers_exactly_what_a_merchant_owns(pool: PgPool) ->
             "payment_request_answers",
             "payment_request_decisions",
             "payment_requests",
+            "payment_stops",
             "payment_transitions",
             "payments",
         ]
@@ -1077,6 +1079,8 @@ async fn every_policy_keeps_its_text(pool: PgPool) -> sqlx::Result<()> {
                 "payment_requests_tenant_isolation",
                 "ALL"
             ),
+            // A stop refuses a merchant's request, so the merchant reads it (ADR-0042).
+            of_a_child("payment_stops", "payment_stops_tenant_isolation", "SELECT"),
             of_a_child(
                 "payment_transitions",
                 "payment_transitions_tenant_isolation",

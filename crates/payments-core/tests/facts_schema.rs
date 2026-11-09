@@ -256,15 +256,16 @@ async fn created_payment(pool: &PgPool) -> sqlx::Result<Uuid> {
     Ok(new_payment(pool, false).await?.1.payment_id)
 }
 
-/// How many facts and decisions the connection sees.
-async fn visible(conn: &mut PgConnection) -> sqlx::Result<(i64, i64)> {
+/// How many facts, decisions and stops the connection sees.
+async fn visible(conn: &mut PgConnection) -> sqlx::Result<(i64, i64, i64)> {
     let row = sqlx::query!(
         r#"SELECT (SELECT count(*) FROM payment_facts) AS "facts!",
-                  (SELECT count(*) FROM payment_request_decisions) AS "decisions!""#
+                  (SELECT count(*) FROM payment_request_decisions) AS "decisions!",
+                  (SELECT count(*) FROM payment_stops) AS "stops!""#
     )
     .fetch_one(conn)
     .await?;
-    Ok((row.facts, row.decisions))
+    Ok((row.facts, row.decisions, row.stops))
 }
 
 #[sqlx::test]
@@ -695,16 +696,16 @@ async fn one_of_each(pool: &PgPool) -> sqlx::Result<(Uuid, Uuid)> {
 }
 
 #[sqlx::test]
-async fn a_merchant_reads_only_its_own_facts_and_decisions(pool: PgPool) -> TestResult {
+async fn a_merchant_reads_only_its_own_facts_decisions_and_stops(pool: PgPool) -> TestResult {
     let (a, _) = one_of_each(&pool).await?;
     let (b, _) = one_of_each(&pool).await?;
     for merchant in [a, b] {
         let mut tenant = tenant_transaction(&pool, merchant).await?;
-        assert_eq!(visible(&mut tenant).await?, (1, 1));
+        assert_eq!(visible(&mut tenant).await?, (1, 1, 1));
         tenant.rollback().await?;
     }
     let mut login = tenant_login(&pool).await?;
-    assert_eq!(visible(&mut login).await?, (0, 0));
+    assert_eq!(visible(&mut login).await?, (0, 0, 0));
     login.close().await?;
     Ok(())
 }
@@ -715,8 +716,8 @@ async fn only_the_system_role_writes_them_and_neither_role_changes_one(pool: PgP
     let mut app = runtime_connection(&pool).await?;
     let mut tenant = tenant_login(&pool).await?;
     for err in [
-        // A merchant reads the facts and decisions of its requests, and writes none
-        // of these tables.
+        // A merchant reads the facts and decisions of its requests and its payments'
+        // stops (ADR-0042), and writes none of these tables.
         Fact::first(payment, "settle", 0)
             .insert(&mut tenant)
             .await
@@ -730,10 +731,6 @@ async fn only_the_system_role_writes_them_and_neither_role_changes_one(pool: PgP
         .await
         .unwrap_err(),
         sqlx::query!("SELECT transition_id FROM payment_transition_facts")
-            .fetch_all(&mut tenant)
-            .await
-            .unwrap_err(),
-        sqlx::query!("SELECT reason FROM payment_stops")
             .fetch_all(&mut tenant)
             .await
             .unwrap_err(),
