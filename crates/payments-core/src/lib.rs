@@ -18,5 +18,6 @@ pub mod payments;
 pub mod posting;
 pub mod psp;
 pub mod requests;
+pub mod retries;
 pub mod tenancy;
 pub mod times;
