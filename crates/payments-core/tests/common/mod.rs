@@ -16,6 +16,7 @@ pub mod api;
 pub mod crashes;
 pub mod keys;
 pub mod payments;
+pub mod psp;
 
 use std::time::{Duration, Instant};
 

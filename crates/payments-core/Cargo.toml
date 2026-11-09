@@ -15,6 +15,12 @@ axum = { version = "0.8.9", default-features = false, features = ["http1", "toki
 # The secret of an API key, from the operating system (ADR-0024). uuid builds this
 # crate already.
 getrandom = "0.4"
+# Reads the PSP's histories (ADR-0036): the legacy client, with the one retry that it
+# makes by itself switched off, and the body, bounded in size (ADR-0041). Also reads a
+# response's body in the tests that send a request without a socket (ADR-0023). axum
+# builds http-body-util already, and the fake PSP builds hyper-util.
+http-body-util = "0.1"
+hyper-util = { version = "0.1.21", features = ["client-legacy", "http1", "tokio"] }
 # Renders a problem, and later reads and answers requests (ADR-0023). sqlx builds these
 # crates already.
 serde = { version = "1", features = ["derive"] }
@@ -31,23 +37,26 @@ subtle = { version = "2.6", default-features = false }
 # it too.
 thiserror = "2.0.21"
 # The server's runtime (ADR-0023). 1.54.0 has a data race in its timers
-# (GHSA-5wjr-9356-4wc8), so this asks for the release that reverted it.
-tokio = { version = "1.54.1", features = ["macros", "net", "rt-multi-thread"] }
+# (GHSA-5wjr-9356-4wc8), so this asks for the release that reverted it. Its timer
+# bounds each call to the PSP (ADR-0036).
+tokio = { version = "1.54.1", features = ["macros", "net", "rt-multi-thread", "time"] }
 # The server's log (ADR-0023). sqlx builds tracing already, and this leaves out the
 # default features: an environment filter and colours have no use here.
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "std"] }
-# UUIDv7 IDs, created by the caller (ADR-0005: 1.27 or later).
-uuid = { version = "1.28", features = ["v7"] }
+# UUIDv7 IDs, created by the caller (ADR-0005: 1.27 or later), and read from the PSP's
+# histories (ADR-0038).
+uuid = { version = "1.28", features = ["serde", "v7"] }
 
 [dev-dependencies]
 # join_all, to run futures together in the concurrency tests. Only alloc:
 # the default features would add the futures-macro crate. sqlx builds this
 # crate already.
 futures-util = { version = "0.3.34", default-features = false, features = ["alloc"] }
-# Reads a response's body, in the tests that send a request without a socket
-# (ADR-0023). axum builds this crate already.
-http-body-util = "0.1"
+# The fake PSP, which each test starts and scripts (ADR-0029). Only here, so the
+# server reaches it only over HTTP, and the two share the wire format and no code. The
+# version keeps cargo-deny from reading the path as a wildcard (ADR-0027).
+mock-psp = { path = "../mock-psp", version = "0.1.0" }
 # Only the std feature: the default fork, timeout and bit-set features are
 # unused and would add rusty-fork, tempfile and bit-set to the build.
 proptest = { version = "1.12.0", default-features = false, features = ["std"] }
