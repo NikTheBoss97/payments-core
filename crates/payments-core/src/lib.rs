@@ -5,6 +5,7 @@
 pub mod accounts;
 pub mod api;
 pub mod balances;
+pub mod catch_up;
 pub mod credentials;
 pub mod db;
 pub mod idempotency;

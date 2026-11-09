@@ -595,6 +595,18 @@ pub async fn authorize<'a>(
     .map_err(|failed| AuthorizeError::new(command, failed))
 }
 
+/// An [`Authorize`]'s steps 3 to 6, in a transaction that the caller has begun and
+/// locked: the catch-up applies the PSP's facts this way (ADR-0039).
+pub(crate) async fn authorize_in(
+    tx: &mut Transaction<'_, Postgres>,
+    command: &Authorize,
+) -> Result<Outcome, Failed<Refused>> {
+    apply_in(tx, &authorize_plan(command), |state| {
+        authorize_move(state, command)
+    })
+    .await
+}
+
 /// An [`Authorize`] as its unit of work sees it.
 fn authorize_plan(command: &Authorize) -> Plan<'_> {
     Plan {
@@ -718,10 +730,26 @@ pub async fn capture<'a>(
         .map_err(fail)
 }
 
+/// A [`Capture`]'s steps 3 to 6, in a transaction that the caller has begun and locked,
+/// with the payment's [`Books`] read before the lock (ADR-0039).
+pub(crate) async fn capture_in(
+    tx: &mut Transaction<'_, Postgres>,
+    books: &Books,
+    command: &Capture,
+) -> Result<Outcome, Failed<PostingRefusal>> {
+    let (posting, asked) = capture_parts(books, command);
+    let plan = Plan {
+        id: &command.step,
+        asked,
+        posting: Some(&posting),
+    };
+    apply_in(tx, &plan, |state| capture_move(state, command)).await
+}
+
 /// What a payment's postings need, read outside its transaction, and so before its
 /// lock: its terms never change, and its accounts exist before it does (ADR-0019,
 /// ADR-0020).
-struct Books {
+pub(crate) struct Books {
     currency: Currency,
     fee_rate: BasisPoints,
     receivable: AccountId,
@@ -730,7 +758,10 @@ struct Books {
 }
 
 /// Reads a payment's [`Books`].
-async fn read_books(scope: Scope<'_>, payment: PaymentId) -> Result<Books, Failed<PostingRefusal>> {
+pub(crate) async fn read_books(
+    scope: Scope<'_>,
+    payment: PaymentId,
+) -> Result<Books, Failed<PostingRefusal>> {
     let pool = scope.pool();
     let terms = read_terms(scope, payment).await?;
     let receivable =
@@ -943,6 +974,22 @@ pub async fn refund<'a>(
     apply(scope, &plan, |state| refund_move(state, command))
         .await
         .map_err(fail)
+}
+
+/// A [`Refund`]'s steps 3 to 6, in a transaction that the caller has begun and locked,
+/// with the payment's [`Books`] read before the lock (ADR-0039).
+pub(crate) async fn refund_in(
+    tx: &mut Transaction<'_, Postgres>,
+    books: &Books,
+    command: &Refund,
+) -> Result<Outcome, Failed<PostingRefusal>> {
+    let (posting, asked) = refund_parts(books.currency, books.payable, books.receivable, command);
+    let plan = Plan {
+        id: &command.step,
+        asked,
+        posting: Some(&posting),
+    };
+    apply_in(tx, &plan, |state| refund_move(state, command)).await
 }
 
 /// A [`Refund`]'s posting, and what a retry of it compares.
@@ -1184,6 +1231,20 @@ async fn plain_step(
     .map_err(|failed| StepError::new(command, failed))
 }
 
+/// A step that carries nothing, in a transaction that the caller has begun and locked
+/// (ADR-0039).
+pub(crate) async fn plain_in(
+    tx: &mut Transaction<'_, Postgres>,
+    command: &StepCommand,
+    event: Event,
+    kind: StepKind,
+) -> Result<Outcome, Failed<PlainRefusal>> {
+    apply_in(tx, &plain_plan(command, kind), |state| {
+        plain_move(state, event)
+    })
+    .await
+}
+
 /// A step that carries nothing, as its unit of work sees it.
 fn plain_plan(command: &StepCommand, kind: StepKind) -> Plan<'_> {
     Plan {
@@ -1200,7 +1261,7 @@ fn plain_plan(command: &StepCommand, kind: StepKind) -> Plan<'_> {
 
 /// Why a step that carries nothing is refused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PlainRefusal {
+pub(crate) enum PlainRefusal {
     /// The table of moves.
     Illegal(IllegalTransition),
     /// A request to authorize the payment, which only a cancellation meets.
@@ -1835,7 +1896,7 @@ pub(crate) fn classify(code: Option<&str>) -> Failure {
     }
 }
 
-fn failure_of(err: &sqlx::Error) -> Failure {
+pub(crate) fn failure_of(err: &sqlx::Error) -> Failure {
     let (code, _) = code_and_constraint(err);
     classify(code.as_deref())
 }

@@ -1,0 +1,40 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT psp_fact_id, kind FROM payment_facts WHERE payment_id = $1 ORDER BY position",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "psp_fact_id",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "payment_facts",
+            "name": "psp_fact_id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "kind",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "payment_facts",
+            "name": "kind"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "c1049fef316e685aadb121956d4f3e9b160923d065f7c1dcc5c6fea481497b53"
+}
