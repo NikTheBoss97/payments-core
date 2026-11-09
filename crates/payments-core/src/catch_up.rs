@@ -46,6 +46,15 @@ pub struct Read {
     history: History,
 }
 
+impl Read {
+    /// The history that this read holds, in which the sender's lookup also looks for its
+    /// request (ADR-0042).
+    #[must_use]
+    pub fn history(&self) -> &History {
+        &self.history
+    }
+}
+
 /// Where a catch-up left a payment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CaughtUp {

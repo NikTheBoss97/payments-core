@@ -1,0 +1,38 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT request_id, answer FROM payment_request_answers ORDER BY request_id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "request_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "payment_request_answers",
+            "name": "request_id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "answer",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "payment_request_answers",
+            "name": "answer"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "22cdb60b0848bebe5399298c50499e2c74831c14a6979a82ab26c54739b17394"
+}
