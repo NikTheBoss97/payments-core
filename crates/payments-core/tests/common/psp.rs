@@ -4,6 +4,7 @@
 //! the fake as the sender will post them, and PSPs that answer what the test writes, or
 //! never answer, for what the fake cannot serve.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -12,14 +13,16 @@ use axum::body::Bytes;
 use axum::extract::State;
 use axum::http::{HeaderValue, Method, Request, StatusCode, header};
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
 use http_body_util::Full;
 use hyper_util::client::legacy::Client;
 use hyper_util::rt::TokioExecutor;
 use mock_psp::MockPsp;
 use payments_core::accounts::Psp;
-use payments_core::psp::PspClient;
-use payments_core::requests::{Ask, RecordRequest};
+use payments_core::ids::RequestId;
+use payments_core::money::Currency;
+use payments_core::psp::{Outgoing, PspClient};
+use payments_core::requests::{Ask, RecordRequest, RequestKind};
 use serde_json::json;
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
@@ -40,6 +43,18 @@ pub fn wire_ask(ask: &Ask) -> (&'static str, i64) {
         Ask::Capture(amount) => ("capture", amount.get()),
         Ask::Refund(amount) => ("refund", amount.get()),
         Ask::Void => ("void", 0),
+    }
+}
+
+/// What the sender sends for this recorded request, in euros like [`send`].
+pub fn outgoing(command: &RecordRequest) -> Outgoing {
+    let (kind, amount) = wire_ask(&command.ask);
+    Outgoing {
+        request: RequestId::try_from(command.request.get()).expect("a request's ID"),
+        payment: command.payment,
+        kind: RequestKind::parse(kind).expect("a kind of the wire's"),
+        amount,
+        currency: Currency::parse("EUR").expect("a currency"),
     }
 }
 
@@ -79,25 +94,39 @@ struct Script {
     body: Vec<u8>,
 }
 
-/// A PSP whose history route answers whatever the test wrote last, for any payment,
-/// with or without a key: the answers that the fake never gives.
+/// What a [`ScriptedPsp`] answers, and how many calls each of its routes took.
+#[derive(Debug)]
+struct Scripted {
+    script: Mutex<Script>,
+    histories: AtomicUsize,
+    sends: AtomicUsize,
+}
+
+/// A PSP whose routes answer whatever the test wrote last, for any payment, with or
+/// without a key: the answers that the fake never gives. It counts the calls to each
+/// route, so a test can tell a lookup from a send.
 pub struct ScriptedPsp {
     url: String,
-    script: Arc<Mutex<Script>>,
+    scripted: Arc<Scripted>,
     server: JoinHandle<()>,
 }
 
 impl ScriptedPsp {
     /// Starts one on a free local port, answering 404 until the test writes an answer.
     pub async fn start() -> Self {
-        let script = Arc::new(Mutex::new(Script {
-            status: StatusCode::NOT_FOUND,
-            retry_after: None,
-            body: Vec::new(),
-        }));
+        let scripted = Arc::new(Scripted {
+            script: Mutex::new(Script {
+                status: StatusCode::NOT_FOUND,
+                retry_after: None,
+                body: Vec::new(),
+            }),
+            histories: AtomicUsize::new(0),
+            sends: AtomicUsize::new(0),
+        });
         let router = Router::new()
-            .route("/v1/payments/{payment_id}/history", get(answer))
-            .with_state(Arc::clone(&script));
+            .route("/v1/payments/{payment_id}/history", get(history))
+            .route("/v1/requests", post(take))
+            .with_state(Arc::clone(&scripted));
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("a free local port");
@@ -107,7 +136,7 @@ impl ScriptedPsp {
         });
         Self {
             url,
-            script,
+            scripted,
             server,
         }
     }
@@ -119,11 +148,23 @@ impl ScriptedPsp {
 
     /// Answers every later call with this status, `Retry-After` and body.
     pub fn answer(&self, status: StatusCode, retry_after: Option<u32>, body: Vec<u8>) {
-        *self.script.lock().expect("no test panicked holding it") = Script {
+        *self
+            .scripted
+            .script
+            .lock()
+            .expect("no test panicked holding it") = Script {
             status,
             retry_after,
             body,
         };
+    }
+
+    /// How many histories it was asked for, and how many requests it was sent.
+    pub fn calls(&self) -> (usize, usize) {
+        (
+            self.scripted.histories.load(Ordering::SeqCst),
+            self.scripted.sends.load(Ordering::SeqCst),
+        )
     }
 }
 
@@ -133,8 +174,22 @@ impl Drop for ScriptedPsp {
     }
 }
 
-async fn answer(State(script): State<Arc<Mutex<Script>>>) -> Response {
-    let script = script.lock().expect("no test panicked holding it").clone();
+async fn history(State(scripted): State<Arc<Scripted>>) -> Response {
+    scripted.histories.fetch_add(1, Ordering::SeqCst);
+    answer(&scripted)
+}
+
+async fn take(State(scripted): State<Arc<Scripted>>) -> Response {
+    scripted.sends.fetch_add(1, Ordering::SeqCst);
+    answer(&scripted)
+}
+
+fn answer(scripted: &Scripted) -> Response {
+    let script = scripted
+        .script
+        .lock()
+        .expect("no test panicked holding it")
+        .clone();
     let mut response = (script.status, script.body).into_response();
     if let Some(seconds) = script.retry_after {
         response

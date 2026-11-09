@@ -1,8 +1,9 @@
 // Author: Nicola Antonello
 
-//! Reading a payment's history from the PSP (ADR-0031, ADR-0032, ADR-0036, ADR-0041):
-//! against the fake over real HTTP (ADR-0029), and against PSPs that answer what the
-//! test writes, or never answer, for what the fake never does.
+//! Reading a payment's history from the PSP (ADR-0031, ADR-0032, ADR-0036, ADR-0041),
+//! and sending it requests (ADR-0028, ADR-0042): against the fake over real HTTP
+//! (ADR-0029), and against PSPs that answer what the test writes, or never answer, for
+//! what the fake never does.
 
 mod common;
 
@@ -10,13 +11,15 @@ use std::error::Error;
 use std::time::{Duration, Instant};
 
 use axum::http::StatusCode;
-use common::psp::{ScriptedPsp, TIMEOUT, client_of, closed_address, send, silent_psp};
+use common::psp::{ScriptedPsp, TIMEOUT, client_of, closed_address, outgoing, send, silent_psp};
 use common::{payment_id, request_id};
 use mock_psp::wire::Detail;
 use mock_psp::{Failure, MockPsp, Route};
 use payments_core::accounts::Psp;
 use payments_core::money::PositiveAmount;
-use payments_core::psp::{FactDetail, MAX_BODY, PspClient, ReadError, Unreadable};
+use payments_core::psp::{
+    FactDetail, MAX_BODY, Outgoing, PspClient, ReadError, SendError, Unreadable,
+};
 use payments_core::requests::{Ask, RecordRequest};
 use payments_core::times::BusinessTime;
 use serde_json::json;
@@ -224,7 +227,7 @@ async fn a_200_that_is_not_the_payments_history_is_unreadable() -> TestResult {
     psp.answer(
         StatusCode::OK,
         None,
-        serde_json::to_vec(&json!({"payment_id": other, "facts": []}))?,
+        serde_json::to_vec(&json!({"payment_id": other, "facts": [], "requests": []}))?,
     );
     match psp.client().history(payment_id(1)).await {
         Err(ReadError::Unreadable { source }) => {
@@ -232,5 +235,114 @@ async fn a_200_that_is_not_the_payments_history_is_unreadable() -> TestResult {
         }
         other => panic!("{other:?}"),
     }
+    Ok(())
+}
+
+/// What the sender sends for request `n` of payment 1.
+fn sent(n: u32, ask: Ask) -> Outgoing {
+    outgoing(&request(n, ask))
+}
+
+#[tokio::test]
+async fn a_send_leaves_the_request_with_the_psp_once() -> TestResult {
+    let fake = MockPsp::start().await?;
+    let client = client_of(&fake);
+    let authorize = sent(1, Ask::Authorize(amount(10_000)));
+    client.send(&authorize).await?;
+    assert_eq!(fake.times_taken(request_id(1).get()), 1);
+    assert!(client.history(payment_id(1)).await?.holds(&request_id(1)));
+
+    // A copy under the same key is the same request at the PSP (ADR-0028).
+    client.send(&authorize).await?;
+    assert_eq!(fake.times_taken(request_id(1).get()), 1);
+    // The same ID with other content is a bug of ours, which the PSP will never take.
+    let other = Outgoing {
+        amount: 9_000,
+        ..sent(1, Ask::Authorize(amount(10_000)))
+    };
+    match client.send(&other).await {
+        Err(SendError::Malformed { status }) => {
+            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(fake.times_taken(request_id(1).get()), 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn each_answer_to_a_send_says_whether_the_psp_holds_it() -> TestResult {
+    let psp = ScriptedPsp::start().await;
+    let client = psp.client();
+    let void = sent(1, Ask::Void);
+    for status in [StatusCode::OK, StatusCode::CREATED, StatusCode::ACCEPTED] {
+        psp.answer(status, None, Vec::new());
+        assert!(client.send(&void).await.is_ok(), "{status}");
+    }
+    for status in [StatusCode::BAD_REQUEST, StatusCode::UNPROCESSABLE_ENTITY] {
+        psp.answer(status, None, Vec::new());
+        match client.send(&void).await {
+            Err(SendError::Malformed { status: answered }) => assert_eq!(answered, status),
+            other => panic!("{status}: {other:?}"),
+        }
+    }
+    for (status, retry_after) in [
+        (StatusCode::TOO_MANY_REQUESTS, Some(7)),
+        (StatusCode::TOO_MANY_REQUESTS, None),
+        (StatusCode::SERVICE_UNAVAILABLE, Some(30)),
+    ] {
+        psp.answer(status, retry_after, Vec::new());
+        match client.send(&void).await {
+            Err(SendError::TryLater { retry_after: asked }) => assert_eq!(asked, retry_after),
+            other => panic!("{status}: {other:?}"),
+        }
+    }
+    // Any other answer leaves the outcome unknown, so the sender looks the request up
+    // before it sends it again (ADR-0032, ADR-0042).
+    for status in [
+        StatusCode::SERVICE_UNAVAILABLE,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        StatusCode::UNAUTHORIZED,
+        StatusCode::FORBIDDEN,
+        StatusCode::NOT_FOUND,
+        StatusCode::CONFLICT,
+    ] {
+        psp.answer(status, None, Vec::new());
+        match client.send(&void).await {
+            Err(SendError::Status { status: answered }) => assert_eq!(answered, status),
+            other => panic!("{status}: {other:?}"),
+        }
+    }
+    assert_eq!(psp.calls(), (0, 14));
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_send_whose_reply_is_lost_times_out_and_the_psp_holds_it() -> TestResult {
+    let fake = MockPsp::start().await?;
+    let client = PspClient::new(
+        Psp::Mock,
+        fake.url(),
+        fake.api_key(),
+        Duration::from_millis(300),
+    )?;
+    fake.lose_replies(1);
+    let started = Instant::now();
+    let outcome = client.send(&sent(1, Ask::Authorize(amount(10_000)))).await;
+    assert!(matches!(outcome, Err(SendError::TimedOut)), "{outcome:?}");
+    assert!(started.elapsed() < TIMEOUT, "{:?}", started.elapsed());
+    // The PSP acted: only a lookup can tell (ADR-0028).
+    assert_eq!(fake.times_taken(request_id(1).get()), 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_send_to_a_psp_that_is_down_has_no_answer() -> TestResult {
+    let client = PspClient::new(Psp::Mock, &closed_address().await, "key", TIMEOUT)?;
+    let outcome = client.send(&sent(1, Ask::Void)).await;
+    assert!(
+        matches!(outcome, Err(SendError::NoAnswer { .. })),
+        "{outcome:?}"
+    );
     Ok(())
 }

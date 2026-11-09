@@ -1,8 +1,9 @@
 // Author: Nicola Antonello
 
-//! The PSP over HTTP: the client that reads a payment's history (ADR-0031, ADR-0036),
-//! and the service's own reading of the wire format (ADR-0038). The fake speaks the same
-//! format with types of its own, so the two share the format and no code (ADR-0029).
+//! The PSP over HTTP: the client that sends requests (ADR-0028) and reads a payment's
+//! history (ADR-0031, ADR-0036), and the service's own reading of the wire format
+//! (ADR-0038). The fake speaks the same format with types of its own, so the two share
+//! the format and no code (ADR-0029).
 //!
 //! An answer wrong as a whole is [`Unreadable`], and nothing of it is applied. A fact
 //! that the service cannot place keeps why, and stops its payment there (ADR-0041).
@@ -21,14 +22,15 @@ use http_body_util::{BodyExt, Full, LengthLimitError, Limited};
 use hyper_util::client::legacy::Client;
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::rt::TokioExecutor;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use sqlx::types::chrono::{DateTime, Utc};
 use uuid::Uuid;
 
 use crate::accounts::Psp;
-use crate::ids::PaymentId;
-use crate::money::PositiveAmount;
+use crate::ids::{PaymentId, RequestId};
+use crate::money::{Currency, PositiveAmount};
+use crate::requests::RequestKind;
 use crate::times::BusinessTime;
 
 /// The most bytes that a history's body may hold: far above any payment's history, and
@@ -101,6 +103,56 @@ pub enum ReadError {
     },
 }
 
+/// Why a send did not leave the request with the PSP. Apart from
+/// [`SendError::Malformed`], the PSP may hold the request or not, so the sender looks it
+/// up before it sends it again (ADR-0028, ADR-0032).
+#[derive(Debug, thiserror::Error)]
+pub enum SendError {
+    /// No whole answer: the connection was refused, or broke.
+    #[error("the PSP gave no answer")]
+    NoAnswer {
+        #[source]
+        source: BoxError,
+    },
+    /// The timeout ended the call (ADR-0036).
+    #[error("the PSP did not answer in time")]
+    TimedOut,
+    /// A 429, or a 503 with `Retry-After`: send again later, and not before
+    /// `retry_after` seconds if the PSP said (ADR-0032).
+    #[error("the PSP asked to be called again later")]
+    TryLater { retry_after: Option<u32> },
+    /// A 400 or a 422: the PSP will never take this request, which is a bug of ours
+    /// (ADR-0032).
+    #[error("the PSP refused the request as malformed ({status})")]
+    Malformed { status: StatusCode },
+    /// Any other status than a `2xx` and those above.
+    #[error("the PSP answered {status}")]
+    Status { status: StatusCode },
+}
+
+/// A request as the PSP takes it (ADR-0028, ADR-0038), under its `RequestId`, which is
+/// its idempotency key and its reference on every send.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Outgoing {
+    pub request: RequestId,
+    pub payment: PaymentId,
+    pub kind: RequestKind,
+    /// In minor units. A void asks for nothing.
+    pub amount: i64,
+    /// The payment's currency.
+    pub currency: Currency,
+}
+
+/// A request as the wire carries it.
+#[derive(Serialize)]
+struct WireRequest<'a> {
+    id: Uuid,
+    payment_id: Uuid,
+    kind: &'a str,
+    amount: i64,
+    currency: &'a str,
+}
+
 impl PspClient {
     /// A client of `psp` at `base_url`, whose calls carry `api_key` and wait at most
     /// `timeout` (ADR-0036).
@@ -171,12 +223,48 @@ impl PspClient {
             StatusCode::NOT_FOUND => Ok(History {
                 payment,
                 facts: Vec::new(),
+                requests: Vec::new(),
             }),
             StatusCode::TOO_MANY_REQUESTS => Err(ReadError::TryLater { retry_after }),
             StatusCode::SERVICE_UNAVAILABLE if retry_after.is_some() => {
                 Err(ReadError::TryLater { retry_after })
             }
             status => Err(ReadError::Status { status }),
+        }
+    }
+
+    /// Sends a request to the PSP (ADR-0028). A `2xx` means only that the PSP holds it:
+    /// whether it is accepted or refused comes later, in the history (ADR-0032).
+    ///
+    /// # Errors
+    ///
+    /// See [`SendError`].
+    pub async fn send(&self, outgoing: &Outgoing) -> Result<(), SendError> {
+        let body = serde_json::to_vec(&WireRequest {
+            id: outgoing.request.get(),
+            payment_id: outgoing.payment.get(),
+            kind: outgoing.kind.as_str(),
+            amount: outgoing.amount,
+            currency: outgoing.currency.as_str(),
+        })
+        .expect("IDs, labels and numbers always serialize");
+        let request = self
+            .request(Method::POST, "/v1/requests")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Full::new(Bytes::from(body)))
+            .expect("an address checked when the client was made, and a fixed path");
+        let answer = self.call(request).await?;
+        let retry_after = answer.retry_after;
+        match answer.status {
+            status if status.is_success() => Ok(()),
+            status @ (StatusCode::BAD_REQUEST | StatusCode::UNPROCESSABLE_ENTITY) => {
+                Err(SendError::Malformed { status })
+            }
+            StatusCode::TOO_MANY_REQUESTS => Err(SendError::TryLater { retry_after }),
+            StatusCode::SERVICE_UNAVAILABLE if retry_after.is_some() => {
+                Err(SendError::TryLater { retry_after })
+            }
+            status => Err(SendError::Status { status }),
         }
     }
 
@@ -241,6 +329,15 @@ impl From<Unanswered> for ReadError {
     }
 }
 
+impl From<Unanswered> for SendError {
+    fn from(unanswered: Unanswered) -> Self {
+        match unanswered {
+            Unanswered::NoAnswer(source) => Self::NoAnswer { source },
+            Unanswered::TimedOut => Self::TimedOut,
+        }
+    }
+}
+
 /// A `Retry-After` in seconds. The HTTP-date form reads as none.
 fn retry_after(headers: &HeaderMap) -> Option<u32> {
     headers
@@ -253,11 +350,13 @@ fn retry_after(headers: &HeaderMap) -> Option<u32> {
 }
 
 /// A payment's history in the service's own types (ADR-0031, ADR-0038): its facts at
-/// positions 1, 2, 3 and so on, in the PSP's order.
+/// positions 1, 2, 3 and so on, in the PSP's order, and the requests that the PSP holds.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct History {
     payment: PaymentId,
     facts: Vec<Fact>,
+    /// The IDs of every request that the PSP took for the payment, decided or not.
+    requests: Vec<Uuid>,
 }
 
 impl History {
@@ -269,6 +368,13 @@ impl History {
     #[must_use]
     pub fn facts(&self) -> &[Fact] {
         &self.facts
+    }
+
+    /// Whether the PSP holds this request, decided or not: the sender's lookup before it
+    /// sends a request again (ADR-0028, ADR-0042).
+    #[must_use]
+    pub fn holds(&self, request: &RequestId) -> bool {
+        self.requests.contains(&request.get())
     }
 }
 
@@ -489,12 +595,21 @@ pub enum Unreadable {
     FactId { position: i32 },
 }
 
-/// A history as the wire carries it. Fields that the service does not know, such as
-/// the requests that the sender looks up, are ignored (ADR-0041).
+/// A history as the wire carries it. Fields that the service does not know are ignored
+/// (ADR-0041).
 #[derive(Deserialize)]
 struct WireHistory {
     payment_id: Uuid,
     facts: Vec<WireFact>,
+    /// Required: read as empty, a history without its requests would send again a
+    /// request that the PSP may hold under a key that it has forgotten (ADR-0042).
+    requests: Vec<WireHeld>,
+}
+
+/// A request that the PSP holds, of which the sender needs only the ID.
+#[derive(Deserialize)]
+struct WireHeld {
+    id: Uuid,
 }
 
 /// A fact's place in the history, which an answer must get right as a whole, and the
@@ -577,7 +692,12 @@ fn read_history(payment: PaymentId, body: &[u8]) -> Result<History, Unreadable> 
             })
         })
         .collect::<Result<_, _>>()?;
-    Ok(History { payment, facts })
+    let requests = wire.requests.into_iter().map(|held| held.id).collect();
+    Ok(History {
+        payment,
+        facts,
+        requests,
+    })
 }
 
 /// Whether a fact's ID has the shape of ADR-0037, which `payment_facts_psp_fact_id_check`
@@ -791,6 +911,22 @@ mod tests {
     }
 
     #[test]
+    fn a_history_says_which_requests_the_psp_holds() {
+        let held = RequestId::try_from(REQUEST).expect("a UUIDv7");
+        let other = RequestId::try_from(Uuid::from_u128(0x019b_76da_a800_7000_8000_0000_0000_0003))
+            .expect("a UUIDv7");
+        let wire = json!({"payment_id": PAYMENT, "facts": [], "requests": [
+            {"id": REQUEST, "payment_id": PAYMENT, "kind": "void", "amount": 0, "currency": "EUR"},
+        ]});
+        let history =
+            read_history(payment(), &serde_json::to_vec(&wire).expect("JSON")).expect("readable");
+        assert!(history.holds(&held));
+        assert!(!history.holds(&other));
+        let empty = read_history(payment(), &body(json!([]))).expect("readable");
+        assert!(!empty.holds(&held));
+    }
+
+    #[test]
     fn facts_read_in_order_and_unknown_fields_are_ignored() {
         let facts = json!([
             {"id": "fct_1", "position": 1, "kind": "authorized", "request_id": REQUEST,
@@ -892,6 +1028,15 @@ mod tests {
             body(json!([{"id": 1, "position": 1, "kind": "settled"}])),
             body(json!([{"id": "fct_1", "position": -1, "kind": "settled"}])),
             body(json!(["fct_1"])),
+            // Without the requests that the PSP holds, a history cannot answer the
+            // sender's lookup (ADR-0042).
+            serde_json::to_vec(&json!({"payment_id": PAYMENT, "facts": []})).expect("JSON"),
+            serde_json::to_vec(&json!({"payment_id": PAYMENT, "facts": [], "requests": {}}))
+                .expect("JSON"),
+            serde_json::to_vec(
+                &json!({"payment_id": PAYMENT, "facts": [], "requests": [{"id": "req_1"}]}),
+            )
+            .expect("JSON"),
         ] {
             assert!(
                 matches!(read(&body), Err(Unreadable::Shape(_))),
@@ -901,7 +1046,10 @@ mod tests {
         }
         let other = Uuid::from_u128(3);
         assert_eq!(
-            read(&serde_json::to_vec(&json!({"payment_id": other, "facts": []})).expect("JSON")),
+            read(
+                &serde_json::to_vec(&json!({"payment_id": other, "facts": [], "requests": []}))
+                    .expect("JSON")
+            ),
             Err(Unreadable::OtherPayment { found: other })
         );
         for (facts, expected, found) in [
