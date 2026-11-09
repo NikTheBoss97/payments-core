@@ -17,7 +17,7 @@ use axum::http::StatusCode;
 use common::payments::{
     AUTHORIZED, REQUESTED, create_command, fee_rate, unbalanced_currencies, uncaused_postings,
 };
-use common::psp::{ScriptedPsp, client_of, send};
+use common::psp::{ScriptedPsp, client_of, send, wire_ask};
 use common::{merchant_id, payment_id, request_id, runtime_pool, tenant_pool, wait_for_lock_wait};
 use futures_util::future::{join, join_all};
 use mock_psp::wire::{Detail, History};
@@ -27,10 +27,11 @@ use payments_core::catch_up::{
 };
 use payments_core::db::commit;
 use payments_core::ids::{MerchantId, PaymentId};
+use payments_core::lifecycle::PaymentStatus;
 use payments_core::money::PositiveAmount;
-use payments_core::payments::{create_payment, lock_key, register_merchant};
+use payments_core::payments::{create_payment, find_payment, lock_key, register_merchant};
 use payments_core::psp::{ReadError, Unreadable};
-use payments_core::requests::{Ask, RecordRequest, record_request};
+use payments_core::requests::{Ask, RecordRequest, RequestError, record_request};
 use payments_core::tenancy::Tenant;
 use serde_json::json;
 use sqlx::PgPool;
@@ -1151,6 +1152,349 @@ async fn one_payments_failure_does_not_end_the_pass(pool: PgPool) -> TestResult 
         outcomes(sweep(&world.system, &client, at()).await?),
         [(first, Ok(CaughtUp::Current { applied: 1 }))]
     );
+    world.close().await;
+    Ok(())
+}
+
+/// A time after every authorization of the tests has lapsed: 2100-01-01T00:00:00Z.
+fn later() -> DateTime<Utc> {
+    DateTime::from_timestamp_micros(4_102_444_800_000_000).expect("a time in range")
+}
+
+/// SplitMix64, as in the model's tests: seeded, so that a failure repeats.
+struct Rng(u64);
+
+impl Rng {
+    fn next(&mut self) -> u64 {
+        self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = self.0;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
+    }
+
+    /// A number from 1 to `n`.
+    fn up_to(&mut self, n: i64) -> i64 {
+        let n = u64::try_from(n).expect("positive");
+        i64::try_from(self.next() % n).expect("below n") + 1
+    }
+
+    /// An index into a list of `len` items.
+    fn index(&mut self, len: usize) -> usize {
+        usize::try_from(self.next() % u64::try_from(len).expect("a short list")).expect("below len")
+    }
+}
+
+/// A payment as the PSP holds it, which the fake checks every decision against
+/// (ADR-0038), so that a walk asks it only for what a PSP could do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Stage {
+    Created,
+    Authorized {
+        amount: i64,
+    },
+    Declined,
+    Voided,
+    Expired,
+    Captured {
+        amount: i64,
+        refunded: i64,
+        settled: bool,
+    },
+}
+
+impl Stage {
+    /// The status that the PSP's history puts the payment in (ADR-0016): a settlement
+    /// after a full refund leaves it refunded.
+    fn status(self) -> PaymentStatus {
+        match self {
+            Self::Created => PaymentStatus::Created,
+            Self::Authorized { .. } => PaymentStatus::Authorized,
+            Self::Declined => PaymentStatus::Failed,
+            Self::Voided | Self::Expired => PaymentStatus::Voided,
+            Self::Captured {
+                amount, refunded, ..
+            } if refunded == amount => PaymentStatus::Refunded,
+            Self::Captured { settled: true, .. } => PaymentStatus::Settled,
+            Self::Captured { .. } => PaymentStatus::Captured,
+        }
+    }
+}
+
+/// A request that the PSP holds and has not decided: its ID, its kind and its amount.
+type Held = (Uuid, &'static str, i64);
+
+/// Checks, after a catch-up, that the facts held are a prefix of the PSP's history,
+/// ID for ID, and that nothing stopped the payment (ADR-0031).
+async fn assert_prefix(
+    world: &World,
+    pool: &PgPool,
+    payment: PaymentId,
+    context: &str,
+) -> TestResult {
+    // Ours first: the PSP's history only grows, so a later read of it is no shorter.
+    let ours = facts_of(pool, payment).await?;
+    let theirs = world
+        .fake
+        .history(payment.get())
+        .map(|history| history.facts)
+        .unwrap_or_default();
+    assert!(ours.len() <= theirs.len(), "{context}: {ours:?} {theirs:?}");
+    for ((position, id, _, _), fact) in ours.iter().zip(&theirs) {
+        assert_eq!(id, &fact.id, "{context}, position {position}");
+    }
+    assert_eq!(stop_of(pool, payment).await?, None, "{context}");
+    Ok(())
+}
+
+/// The amount that a walk asks for: often one that meets a limit exactly, as the PSP
+/// holds it, and otherwise any.
+fn either(rng: &mut Rng, exact: i64) -> PositiveAmount {
+    if exact > 0 && rng.up_to(2) == 1 {
+        amount(exact)
+    } else {
+        amount(rng.up_to(REQUESTED))
+    }
+}
+
+/// What a merchant asks next: mostly the next step that its payment's status allows, as
+/// the service shows it, and now and then anything, which the service may refuse.
+fn next_ask(rng: &mut Rng, status: PaymentStatus, stage: Stage) -> Ask {
+    let (authorized, left) = match stage {
+        Stage::Authorized { amount } => (amount, 0),
+        Stage::Captured {
+            amount, refunded, ..
+        } => (amount, amount - refunded),
+        _ => (0, 0),
+    };
+    let kind = match (status, rng.up_to(8)) {
+        (_, 1) => rng.up_to(4),
+        (PaymentStatus::Created, _) => 1,
+        (PaymentStatus::Authorized, 2) => 3,
+        (PaymentStatus::Authorized, _) => 2,
+        (PaymentStatus::Captured | PaymentStatus::Settled, _) => 4,
+        _ => rng.up_to(4),
+    };
+    match kind {
+        1 => Ask::Authorize(either(rng, REQUESTED)),
+        2 => Ask::Capture(either(rng, authorized)),
+        3 => Ask::Void,
+        _ => Ask::Refund(either(rng, left)),
+    }
+}
+
+/// Walks payment `n` through a random history that a PSP could write: the merchant asks
+/// for a step, which the service may refuse at once; the PSP decides what it holds in any
+/// order, and settles and lets lapse when it likes. Catch-ups come at random points, as
+/// notifications would start them: twice for a duplicate, later for one that came out of
+/// order, never for one that was lost, and in sweeps over every payment that other walks
+/// run at the same time. Returns where the PSP left the payment.
+///
+/// A merchant asks after it sees its payment's status move, which a catch-up moves, so a
+/// catch-up comes before each request. Then what the service refuses depends on the seed
+/// alone, not on when the sweeps of other walks ran, and so does each walk.
+async fn walk(world: &World, pool: &PgPool, n: u32) -> Result<Stage, Box<dyn Error>> {
+    let mut rng = Rng(0x0D3E_0000 + u64::from(n));
+    let payment = world.created(n).await?;
+    let mut stage = Stage::Created;
+    let mut held: Vec<Held> = Vec::new();
+    let rounds = u32::try_from(rng.up_to(60))?;
+    for round in 0..rounds {
+        let context = format!("payment {n}, round {round}, {stage:?}");
+        match rng.up_to(24) {
+            1..=6 => {
+                let caught = world.catch_up(payment).await?;
+                assert!(
+                    matches!(caught, CaughtUp::Current { .. }),
+                    "{context}: {caught:?}"
+                );
+                assert_prefix(world, pool, payment, &context).await?;
+                let status = find_payment(&world.system, payment)
+                    .await?
+                    .ok_or("the payment exists")?
+                    .status;
+                assert_eq!(status, stage.status(), "{context}");
+                let ask = next_ask(&mut rng, status, stage);
+                let command = RecordRequest {
+                    request: request_id(n * 1_000 + round),
+                    payment,
+                    ask,
+                };
+                match record_request(world.me(), &command).await {
+                    Ok(_) => {
+                        send(&world.fake, &command).await;
+                        let (kind, minor) = wire_ask(&command.ask);
+                        held.push((command.request.get(), kind, minor));
+                    }
+                    Err(RequestError::Refused(_)) => {}
+                    Err(other) => return Err(format!("{context}: {other}").into()),
+                }
+            }
+            7..=12 if !held.is_empty() => {
+                let (id, kind, minor) = held.remove(rng.index(held.len()));
+                let refuse = rng.up_to(4) == 1;
+                stage = match (kind, stage) {
+                    ("authorize", Stage::Created) => match rng.up_to(6) {
+                        1 => {
+                            world.fake.decline(id);
+                            Stage::Declined
+                        }
+                        2..=3 => {
+                            let less = rng.up_to(minor);
+                            world.fake.approve_for(id, less);
+                            Stage::Authorized { amount: less }
+                        }
+                        _ => {
+                            world.fake.approve(id);
+                            Stage::Authorized { amount: minor }
+                        }
+                    },
+                    ("capture", Stage::Authorized { amount }) if minor <= amount && !refuse => {
+                        world.fake.approve(id);
+                        Stage::Captured {
+                            amount: minor,
+                            refunded: 0,
+                            settled: false,
+                        }
+                    }
+                    ("void", Stage::Authorized { .. }) if !refuse => {
+                        world.fake.approve(id);
+                        Stage::Voided
+                    }
+                    (
+                        "refund",
+                        Stage::Captured {
+                            amount,
+                            refunded,
+                            settled,
+                        },
+                    ) if minor <= amount - refunded && !refuse => {
+                        world.fake.approve(id);
+                        Stage::Captured {
+                            amount,
+                            refunded: refunded + minor,
+                            settled,
+                        }
+                    }
+                    ("authorize", _) => {
+                        panic!("{context}: a second authorization reached the PSP")
+                    }
+                    _ => {
+                        world.fake.refuse(id);
+                        stage
+                    }
+                };
+            }
+            13..=14 => match stage {
+                Stage::Captured {
+                    amount,
+                    refunded,
+                    settled: false,
+                } if rng.up_to(2) == 1 => {
+                    world.fake.settle(payment.get());
+                    stage = Stage::Captured {
+                        amount,
+                        refunded,
+                        settled: true,
+                    };
+                }
+                Stage::Authorized { .. } if rng.up_to(4) == 1 => {
+                    world.fake.expire(payment.get());
+                    stage = Stage::Expired;
+                }
+                _ => {}
+            },
+            15..=19 => {
+                for _ in 0..rng.up_to(2) {
+                    let caught = world.catch_up(payment).await?;
+                    assert!(
+                        matches!(caught, CaughtUp::Current { .. }),
+                        "{context}: {caught:?}"
+                    );
+                }
+                assert_prefix(world, pool, payment, &context).await?;
+            }
+            20 => {
+                let swept = sweep(&world.system, &client_of(&world.fake), later()).await?;
+                for (other, result) in swept {
+                    let caught = result?;
+                    assert!(
+                        matches!(caught, CaughtUp::Current { .. }),
+                        "{context}: payment {other}: {caught:?}"
+                    );
+                }
+                assert_prefix(world, pool, payment, &context).await?;
+            }
+            // A notification lost, or a moment when nothing happens.
+            _ => {}
+        }
+    }
+    Ok(stage)
+}
+
+#[sqlx::test]
+async fn facts_reach_a_payment_in_the_psps_order_whatever_its_notifications_do(
+    pool: PgPool,
+) -> TestResult {
+    // ADR-0031's property test, with catch-ups in place of notifications until the
+    // server records them: a notification only starts one.
+    let world = World::new(&pool).await?;
+    let walks: Vec<u32> = (1..=24).collect();
+    let ends = join_all(walks.iter().map(|&n| walk(&world, &pool, n))).await;
+    // Every notification may have been lost: a last sweep finds every fact.
+    for (payment, result) in sweep(&world.system, &client_of(&world.fake), later()).await? {
+        let caught = result?;
+        assert!(
+            matches!(caught, CaughtUp::Current { .. }),
+            "payment {payment}: {caught:?}"
+        );
+    }
+
+    let mut statuses = Vec::new();
+    for (&n, end) in walks.iter().zip(ends) {
+        let stage = end?;
+        let payment = payment_id(n);
+        let ours: Vec<String> = facts_of(&pool, payment)
+            .await?
+            .into_iter()
+            .map(|(_, id, _, _)| id)
+            .collect();
+        let theirs: Vec<String> = world
+            .fake
+            .history(payment.get())
+            .map(|history| history.facts)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|fact| fact.id)
+            .collect();
+        assert_eq!(ours, theirs, "payment {n}: {stage:?}");
+        let status = find_payment(&world.system, payment)
+            .await?
+            .ok_or("the payment exists")?
+            .status;
+        assert_eq!(status, stage.status(), "payment {n}: {stage:?}");
+        statuses.push(status);
+    }
+    // Walks that end everywhere, and a settlement after a full refund, or the test would
+    // prove little. The seeds are fixed, so this holds until the logic changes.
+    for status in PaymentStatus::ALL {
+        assert!(
+            statuses.contains(status),
+            "no walk ended {status}: {statuses:?}"
+        );
+    }
+    let unlinked = sqlx::query_scalar!(
+        r#"SELECT count(*) AS "count!" FROM payment_facts f
+            WHERE f.kind = $1
+              AND NOT EXISTS (SELECT 1 FROM payment_transition_facts l
+                               WHERE l.payment_id = f.payment_id AND l.position = f.position)"#,
+        "settle"
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert!(unlinked > 0, "no settlement came after a full refund");
+    assert!(unbalanced_currencies(&pool).await?.is_empty());
+    assert!(uncaused_postings(&pool).await?.is_empty());
     world.close().await;
     Ok(())
 }
