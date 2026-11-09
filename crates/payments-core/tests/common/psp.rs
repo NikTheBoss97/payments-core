@@ -94,10 +94,11 @@ struct Script {
     body: Vec<u8>,
 }
 
-/// What a [`ScriptedPsp`] answers, and how many calls each of its routes took.
+/// What each route of a [`ScriptedPsp`] answers, and how many calls each took.
 #[derive(Debug)]
 struct Scripted {
-    script: Mutex<Script>,
+    history: Mutex<Script>,
+    send: Mutex<Script>,
     histories: AtomicUsize,
     sends: AtomicUsize,
 }
@@ -114,12 +115,14 @@ pub struct ScriptedPsp {
 impl ScriptedPsp {
     /// Starts one on a free local port, answering 404 until the test writes an answer.
     pub async fn start() -> Self {
+        let not_found = Script {
+            status: StatusCode::NOT_FOUND,
+            retry_after: None,
+            body: Vec::new(),
+        };
         let scripted = Arc::new(Scripted {
-            script: Mutex::new(Script {
-                status: StatusCode::NOT_FOUND,
-                retry_after: None,
-                body: Vec::new(),
-            }),
+            history: Mutex::new(not_found.clone()),
+            send: Mutex::new(not_found),
             histories: AtomicUsize::new(0),
             sends: AtomicUsize::new(0),
         });
@@ -146,11 +149,31 @@ impl ScriptedPsp {
         PspClient::new(Psp::Mock, &self.url, "scripted", TIMEOUT).expect("a local address")
     }
 
-    /// Answers every later call with this status, `Retry-After` and body.
+    /// Answers every later call, to either route, with this status, `Retry-After` and
+    /// body.
     pub fn answer(&self, status: StatusCode, retry_after: Option<u32>, body: Vec<u8>) {
+        self.answer_history(status, retry_after, body.clone());
+        self.answer_sends(status, retry_after, body);
+    }
+
+    /// Answers every later read of a history with this status, `Retry-After` and body.
+    pub fn answer_history(&self, status: StatusCode, retry_after: Option<u32>, body: Vec<u8>) {
         *self
             .scripted
-            .script
+            .history
+            .lock()
+            .expect("no test panicked holding it") = Script {
+            status,
+            retry_after,
+            body,
+        };
+    }
+
+    /// Answers every later send with this status, `Retry-After` and body.
+    pub fn answer_sends(&self, status: StatusCode, retry_after: Option<u32>, body: Vec<u8>) {
+        *self
+            .scripted
+            .send
             .lock()
             .expect("no test panicked holding it") = Script {
             status,
@@ -176,20 +199,16 @@ impl Drop for ScriptedPsp {
 
 async fn history(State(scripted): State<Arc<Scripted>>) -> Response {
     scripted.histories.fetch_add(1, Ordering::SeqCst);
-    answer(&scripted)
+    answer(&scripted.history)
 }
 
 async fn take(State(scripted): State<Arc<Scripted>>) -> Response {
     scripted.sends.fetch_add(1, Ordering::SeqCst);
-    answer(&scripted)
+    answer(&scripted.send)
 }
 
-fn answer(scripted: &Scripted) -> Response {
-    let script = scripted
-        .script
-        .lock()
-        .expect("no test panicked holding it")
-        .clone();
+fn answer(script: &Mutex<Script>) -> Response {
+    let script = script.lock().expect("no test panicked holding it").clone();
     let mut response = (script.status, script.body).into_response();
     if let Some(seconds) = script.retry_after {
         response

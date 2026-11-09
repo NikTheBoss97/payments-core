@@ -19,5 +19,6 @@ pub mod posting;
 pub mod psp;
 pub mod requests;
 pub mod retries;
+pub mod sender;
 pub mod tenancy;
 pub mod times;
