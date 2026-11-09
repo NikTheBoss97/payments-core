@@ -1,0 +1,33 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT p.id\n             FROM payments p\n            CROSS JOIN LATERAL (\n                  SELECT t.to_status\n                    FROM payment_transitions t\n                   WHERE t.payment_id = p.id\n                   ORDER BY t.seq DESC\n                   LIMIT 1\n                  ) newest\n            WHERE p.psp = $1\n              AND NOT EXISTS (SELECT 1 FROM payment_stops s WHERE s.payment_id = p.id)\n              AND (EXISTS (SELECT 1 FROM payment_requests r\n                            WHERE r.payment_id = p.id\n                              AND NOT EXISTS (SELECT 1 FROM payment_request_decisions d\n                                               WHERE d.request_id = r.id))\n                   OR (newest.to_status = $2\n                       AND EXISTS (SELECT 1 FROM payment_authorizations a\n                                    WHERE a.payment_id = p.id AND a.expires_at <= $3))\n                   OR (newest.to_status IN ($4, $5)\n                       AND NOT EXISTS (SELECT 1 FROM payment_facts f\n                                        WHERE f.payment_id = p.id AND f.kind = $6)))\n            ORDER BY p.id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "payments",
+            "name": "id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Timestamptz",
+        "Text",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "c542e47f0cb93655e62690199af1b3e07f333b2790c1a71b375fb8af856730ea"
+}
