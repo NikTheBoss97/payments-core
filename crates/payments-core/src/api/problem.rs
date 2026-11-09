@@ -50,6 +50,9 @@ pub enum Problem {
     /// A capture or a void of the payment waits for the provider's decision. It is final, so
     /// it is stored under the key (ADR-0039).
     CaptureOrVoidPending,
+    /// The payment is stopped until an operator looks at it, so it takes no request. It is
+    /// final, so it is stored under the key (ADR-0042).
+    PaymentStopped,
     /// The database could not answer, or the outcome is unknown. Sending the request
     /// again is safe.
     Unavailable,
@@ -125,6 +128,11 @@ impl Problem {
                 StatusCode::CONFLICT,
                 "capture-or-void-pending",
                 "A capture or a void of this payment waits for the provider",
+            ),
+            Self::PaymentStopped => (
+                StatusCode::CONFLICT,
+                "payment-stopped",
+                "This payment is stopped until an operator looks at it",
             ),
             Self::Unavailable => (
                 StatusCode::SERVICE_UNAVAILABLE,
@@ -204,7 +212,7 @@ mod tests {
     use super::*;
 
     /// Every problem. The match stops a new one from compiling until it is added here.
-    const ALL: [Problem; 14] = [
+    const ALL: [Problem; 15] = [
         Problem::Unauthorized,
         Problem::NotFound,
         Problem::MethodNotAllowed,
@@ -217,6 +225,7 @@ mod tests {
         Problem::AmountAboveLimit,
         Problem::AuthorizationRequested,
         Problem::CaptureOrVoidPending,
+        Problem::PaymentStopped,
         Problem::Unavailable,
         Problem::Internal,
     ];
@@ -235,6 +244,7 @@ mod tests {
             | Problem::AmountAboveLimit
             | Problem::AuthorizationRequested
             | Problem::CaptureOrVoidPending
+            | Problem::PaymentStopped
             | Problem::Unavailable
             | Problem::Internal => {}
         }

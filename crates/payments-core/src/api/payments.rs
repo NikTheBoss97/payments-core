@@ -181,6 +181,7 @@ fn decided(outcome: Decided<'_>) -> Answer {
         Decided::Refused(Refusal::Conflict(Conflict::Pending(_))) => {
             Problem::CaptureOrVoidPending.answer()
         }
+        Decided::Refused(Refusal::Conflict(Conflict::Stopped)) => Problem::PaymentStopped.answer(),
     }
 }
 
@@ -440,6 +441,7 @@ mod tests {
                 Conflict::Pending(RequestKind::Void),
                 Problem::CaptureOrVoidPending,
             ),
+            (Conflict::Stopped, Problem::PaymentStopped),
         ] {
             assert_eq!(
                 decided(Decided::Refused(conflict.into())),

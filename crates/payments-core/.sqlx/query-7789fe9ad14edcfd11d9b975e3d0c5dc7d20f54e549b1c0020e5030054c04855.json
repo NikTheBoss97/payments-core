@@ -1,0 +1,96 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT EXISTS (SELECT 1 FROM payment_stops s WHERE s.payment_id = p.id)\n                      AS \"stopped!\",\n                  newest.to_status, newest.refundable,\n                  p.amount AS requested,\n                  authorized.amount AS \"authorized?\",\n                  EXISTS (SELECT 1 FROM payment_requests r\n                           WHERE r.payment_id = p.id AND r.kind = $2)\n                      AS \"authorization_requested!\",\n                  COALESCE((SELECT SUM(r.amount) FROM payment_requests r\n                             WHERE r.payment_id = p.id AND r.kind = $3\n                               AND NOT EXISTS (SELECT 1 FROM payment_request_decisions d\n                                                WHERE d.request_id = r.id)), 0)::bigint\n                      AS \"refunds_in_flight!\",\n                  (SELECT r.kind FROM payment_requests r\n                    WHERE r.payment_id = p.id AND r.kind IN ($4, $5)\n                      AND NOT EXISTS (SELECT 1 FROM payment_request_decisions d\n                                       WHERE d.request_id = r.id)\n                    LIMIT 1) AS \"capture_or_void_in_flight?\"\n             FROM payments p\n            CROSS JOIN LATERAL (\n                  SELECT t.to_status, t.refundable\n                    FROM payment_transitions t\n                   WHERE t.payment_id = p.id\n                   ORDER BY t.seq DESC\n                   LIMIT 1\n                  ) newest\n             LEFT JOIN payment_authorizations authorized ON authorized.payment_id = p.id\n            WHERE p.id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "stopped!",
+        "type_info": "Bool",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 1,
+        "name": "to_status",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "payment_transitions",
+            "name": "to_status"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "refundable",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "payment_transitions",
+            "name": "refundable"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "requested",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "payments",
+            "name": "amount"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "authorized?",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "payment_authorizations",
+            "name": "amount"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "authorization_requested!",
+        "type_info": "Bool",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 6,
+        "name": "refunds_in_flight!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 7,
+        "name": "capture_or_void_in_flight?",
+        "type_info": "Text",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Text",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      null,
+      false,
+      false,
+      false,
+      true,
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "7789fe9ad14edcfd11d9b975e3d0c5dc7d20f54e549b1c0020e5030054c04855"
+}
