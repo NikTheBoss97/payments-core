@@ -4,6 +4,7 @@
 
 pub mod accounts;
 pub mod api;
+pub mod background;
 pub mod balances;
 pub mod catch_up;
 pub mod credentials;

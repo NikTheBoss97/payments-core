@@ -192,7 +192,7 @@ impl Problem {
 }
 
 /// An error and each error that caused it, in turn, joined by `: `, for the log.
-pub(super) fn chain(error: &dyn Error) -> String {
+pub(crate) fn chain(error: &dyn Error) -> String {
     let mut chain = error.to_string();
     let mut cause = error.source();
     while let Some(next) = cause {
