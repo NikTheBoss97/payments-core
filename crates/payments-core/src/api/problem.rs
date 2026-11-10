@@ -186,16 +186,21 @@ impl Problem {
     /// header can reach it (ADR-0024).
     #[must_use]
     pub(super) fn because(self, error: &dyn Error) -> Self {
-        let mut chain = error.to_string();
-        let mut cause = error.source();
-        while let Some(next) = cause {
-            chain.push_str(": ");
-            chain.push_str(&next.to_string());
-            cause = next.source();
-        }
-        tracing::error!(status = self.status().as_u16(), "{chain}");
+        tracing::error!(status = self.status().as_u16(), "{}", chain(error));
         self
     }
+}
+
+/// An error and each error that caused it, in turn, joined by `: `, for the log.
+pub(super) fn chain(error: &dyn Error) -> String {
+    let mut chain = error.to_string();
+    let mut cause = error.source();
+    while let Some(next) = cause {
+        chain.push_str(": ");
+        chain.push_str(&next.to_string());
+        cause = next.source();
+    }
+    chain
 }
 
 impl IntoResponse for Problem {
@@ -283,6 +288,20 @@ mod tests {
             assert!(kind.starts_with("https://"), "not absolute: {kind}");
             assert!(body["title"].is_string(), "{problem:?}");
         }
+    }
+
+    #[test]
+    fn a_chain_names_the_error_and_each_cause_in_turn() {
+        #[derive(Debug, thiserror::Error)]
+        #[error("{0}")]
+        struct Link(&'static str, #[source] Option<Box<Link>>);
+        let root = Link("the root", None);
+        assert_eq!(chain(&root), "the root");
+        let top = Link(
+            "the top",
+            Some(Box::new(Link("the middle", Some(Box::new(root))))),
+        );
+        assert_eq!(chain(&top), "the top: the middle: the root");
     }
 
     #[test]
