@@ -44,8 +44,9 @@ subtle = { version = "2.6", default-features = false }
 thiserror = "2.0.21"
 # The server's runtime (ADR-0023). 1.54.0 has a data race in its timers
 # (GHSA-5wjr-9356-4wc8), so this asks for the release that reverted it. Its timer
-# bounds each call to the PSP (ADR-0036).
-tokio = { version = "1.54.1", features = ["macros", "net", "rt-multi-thread", "time"] }
+# bounds each call to the PSP (ADR-0036), and its semaphore the catch-ups that
+# notifications start (ADR-0043).
+tokio = { version = "1.54.1", features = ["macros", "net", "rt-multi-thread", "sync", "time"] }
 # The server's log (ADR-0023). sqlx builds tracing already, and this leaves out the
 # default features: an environment filter and colours have no use here.
 tracing = "0.1"

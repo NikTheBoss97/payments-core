@@ -16,16 +16,22 @@ use std::time::{Duration, Instant};
 use common::api::{Pools, written};
 use common::crashes::{assert_books_are_whole, balances};
 use common::keys::issued_key;
-use common::payments::{AUTHORIZED, FEE, create_command, fee_rate, steps, take_lock};
-use common::{merchant_id, test_uuid, wait_for_lock_waits};
+use common::payments::{
+    AUTHORIZED, FEE, REQUESTED, create_command, fee_rate, status_of, steps, take_lock,
+};
+use common::{merchant_id, request_id, test_uuid, wait_for_lock_waits};
 use futures_util::future::{join, join_all};
 use mock_psp::signing::SigningKey;
-use mock_psp::{Attempt, MockPsp};
+use mock_psp::wire::Detail;
+use mock_psp::{Attempt, Failure, MockPsp, Route, new_api_key};
 use payments_core::api::problem::Problem;
 use payments_core::credentials::ApiKeySecret;
 use payments_core::idempotency::Fingerprint;
 use payments_core::ids::{MerchantId, PaymentId};
+use payments_core::lifecycle::PaymentStatus;
+use payments_core::money::PositiveAmount;
 use payments_core::payments::{create_payment, register_merchant};
+use payments_core::requests::{Ask, RecordRequest, record_request};
 use payments_core::tenancy::Tenant;
 use sqlx::PgPool;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWriteExt, BufReader};
@@ -64,14 +70,17 @@ fn url(pool: &PgPool, role: &str) -> String {
     )
 }
 
-/// The binary with the configuration that a test's database needs. The test's own
-/// environment could hold anything, so nothing comes from it.
+/// The binary with the configuration that a test's database needs, and a PSP that it never
+/// reaches, port 9 of the local interface, with keys made now. The test's own environment
+/// could hold anything, so nothing comes from it.
 fn configured(pool: &PgPool, operator: &ApiKeySecret) -> Command {
     let mut command = Command::new(BINARY);
     command
         .env("TENANT_DATABASE_URL", url(pool, "payments_tenant"))
         .env("SYSTEM_DATABASE_URL", url(pool, "payments_app"))
         .env("OPERATOR_KEY_SHA256", written(operator.digest()))
+        .env("MOCK_PSP_URL", "http://127.0.0.1:9")
+        .env("MOCK_PSP_API_KEY", new_api_key())
         .env("MOCK_PSP_SIGNING_KEYS", SigningKey::generate().written())
         .env("BIND_ADDRESS", "127.0.0.1:0")
         .stdout(Stdio::piped())
@@ -127,12 +136,15 @@ impl Server {
         Self::launched(pool, ApiKeySecret::generate(), log).await
     }
 
-    /// Starts the binary next to this fake: it verifies notifications with the fake's
-    /// keys.
+    /// Starts the binary next to this fake: it reads the fake's histories with the fake's
+    /// API key, and verifies notifications with the fake's keys.
     async fn start_next_to(pool: &PgPool, fake: &MockPsp) -> Result<Self, Box<dyn Error>> {
         let operator = ApiKeySecret::generate();
         let mut command = configured(pool, &operator);
-        command.env("MOCK_PSP_SIGNING_KEYS", fake.signing_keys().join(" "));
+        command
+            .env("MOCK_PSP_URL", fake.url())
+            .env("MOCK_PSP_API_KEY", fake.api_key())
+            .env("MOCK_PSP_SIGNING_KEYS", fake.signing_keys().join(" "));
         let log = Arc::new(Mutex::new(String::new()));
         Self::spawned(command, operator, log).await
     }
@@ -957,6 +969,8 @@ async fn the_binary_stops_at_once_without_its_configuration(pool: PgPool) -> Tes
         "TENANT_DATABASE_URL",
         "SYSTEM_DATABASE_URL",
         "OPERATOR_KEY_SHA256",
+        "MOCK_PSP_URL",
+        "MOCK_PSP_API_KEY",
         "MOCK_PSP_SIGNING_KEYS",
     ] {
         let mut command = configured(&pool, &ApiKeySecret::generate());
@@ -998,6 +1012,127 @@ async fn the_binary_flags_a_notification_about_a_payment_that_it_does_not_hold(
         ))
         .await;
     server.stop().await?;
+    Ok(())
+}
+
+/// That the fake's last notification, delivered now to the binary, got a 202.
+async fn delivered_last(fake: &MockPsp) -> TestResult {
+    let last = fake
+        .notifications()
+        .last()
+        .ok_or("a notification")?
+        .id
+        .clone();
+    let answer = fake.deliver(&last).await;
+    assert_eq!(
+        answer,
+        Attempt::Answered {
+            status: 202,
+            retry_after: None
+        }
+    );
+    Ok(())
+}
+
+#[sqlx::test]
+async fn the_binary_verifies_a_notification_with_its_keys_and_catches_its_payment_up(
+    pool: PgPool,
+) -> TestResult {
+    let fake = MockPsp::start().await?;
+    let server = Server::start_next_to(&pool, &fake).await?;
+    fake.deliver_to(&format!("http://{}/webhooks/mock", server.address));
+    let pools = Pools::login(&pool).await?;
+    let merchant = merchant_id(1);
+    register_merchant(&pools.system, merchant, fee_rate()).await?;
+    let create = create_command(1, merchant);
+    create_payment(Tenant::new(&pools.tenant, merchant), &create).await?;
+    let request = RecordRequest {
+        request: request_id(1),
+        payment: create.id,
+        ask: Ask::Authorize(PositiveAmount::new(REQUESTED)?),
+    };
+    record_request(Tenant::new(&pools.tenant, merchant), &request).await?;
+    common::psp::send(&fake, &request).await;
+    fake.approve(request.request.get());
+    delivered_last(&fake).await?;
+    // A catch-up in the binary reads the fake's history and applies the authorization.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while status_of(&pools.system, create.id).await? != PaymentStatus::Authorized {
+        assert!(
+            Instant::now() < deadline,
+            "the payment was never authorized"
+        );
+        sleep(Duration::from_millis(20)).await;
+    }
+    pools.close().await;
+    let log = server.stop().await?;
+    assert!(!log.contains(fake.api_key()), "the PSP's key: {log}");
+    for key in fake.signing_keys() {
+        assert!(
+            !log.contains(key.trim_start_matches("whsec_")),
+            "a signing key: {log}"
+        );
+    }
+    Ok(())
+}
+
+#[sqlx::test]
+async fn the_binary_logs_a_catch_up_that_fails_or_stops_its_payment(pool: PgPool) -> TestResult {
+    let fake = MockPsp::start().await?;
+    let server = Server::start_next_to(&pool, &fake).await?;
+    fake.deliver_to(&format!("http://{}/webhooks/mock", server.address));
+    let pools = Pools::login(&pool).await?;
+    let merchant = merchant_id(1);
+    register_merchant(&pools.system, merchant, fee_rate()).await?;
+    let create = create_command(1, merchant);
+    create_payment(Tenant::new(&pools.tenant, merchant), &create).await?;
+    let payment = create.id;
+    // The history cannot be read: the sweep will catch the payment up.
+    fake.fail_next(Route::History, [Failure::InternalError]);
+    fake.notify_again(payment.get());
+    delivered_last(&fake).await?;
+    server
+        .until_logged(&format!(
+            "catching payment {payment} up failed, so the sweep catches it up"
+        ))
+        .await;
+    // A settlement of a payment that was never captured has no place: it stops the payment.
+    fake.append(payment.get(), Detail::Settled);
+    delivered_last(&fake).await?;
+    server
+        .until_logged(&format!(
+            "payment {payment} stopped at position 1 of the PSP's history: no_place"
+        ))
+        .await;
+    pools.close().await;
+    server.stop().await?;
+    Ok(())
+}
+
+#[sqlx::test]
+async fn the_binary_stops_at_once_on_a_psp_that_it_cannot_call_and_never_shows_the_key(
+    pool: PgPool,
+) -> TestResult {
+    for url in [
+        "not a url",
+        "https://127.0.0.1:4100",
+        "http://127.0.0.1:4100/v1",
+    ] {
+        let mut command = configured(&pool, &ApiKeySecret::generate());
+        command.env("MOCK_PSP_URL", url);
+        let (succeeded, said) = refused(command).await?;
+        assert!(!succeeded, "{url}: {said}");
+        assert!(said.contains("MOCK_PSP_URL"), "{url}: {said}");
+        assert!(!said.contains("listening on"), "{url}: {said}");
+    }
+    // A key that no header can carry, and that is never shown.
+    let key = new_api_key();
+    let mut command = configured(&pool, &ApiKeySecret::generate());
+    command.env("MOCK_PSP_API_KEY", format!("{key}\u{7f}"));
+    let (succeeded, said) = refused(command).await?;
+    assert!(!succeeded, "{said}");
+    assert!(said.contains("MOCK_PSP_API_KEY"), "{said}");
+    assert!(!said.contains(&key), "{said}");
     Ok(())
 }
 

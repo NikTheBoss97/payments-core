@@ -21,6 +21,8 @@ cannot use it. A variable that is set but empty counts as not set.
 | `TENANT_DATABASE_URL` | The login that merchant routes hold. It sees nothing until a transaction names its merchant. | required |
 | `SYSTEM_DATABASE_URL` | The login that looks an API key up, runs the operator's routes and records the provider's notifications. | required |
 | `OPERATOR_KEY_SHA256` | The SHA-256 of the operator's secret, as 64 lowercase hex digits. The server never holds the secret itself. | required |
+| `MOCK_PSP_URL` | Where the provider's API is: `http://` and its host and port, with no path. | required |
+| `MOCK_PSP_API_KEY` | The key that the server's calls to the provider carry, as `Authorization: Bearer`. The server never logs it. | required |
 | `MOCK_PSP_SIGNING_KEYS` | The keys that sign the provider's notifications, each `whsec_` and the base64 of 24 to 64 bytes, separated by spaces: the current one, and during a rotation the next. | required |
 | `BIND_ADDRESS` | Where to listen. | `127.0.0.1:8080` |
 
@@ -249,6 +251,11 @@ that the service does not know, which it ignores.
 A notification about a payment that the service does not hold is recorded, logged as a
 warning, and answered `202`, since sending it again cannot change that. The service never
 answers `410`, on which a sender stops delivering to an endpoint.
+
+Once it has answered, the service reads the payment's history from the provider and
+applies what the provider decided, in a task of its own: the answer never waits for that
+read. At most 4 such reads run at once. A notification that finds them all busy, or whose
+read fails, is recorded and answered all the same, and its payment waits for a later read.
 
 ## Problems
 

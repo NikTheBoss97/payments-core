@@ -5,26 +5,39 @@
 //! A fake PSP delivers each notification to the router, served on a port of its own, and
 //! reads the answer as a PSP does: its status, and its `Retry-After`. What the fake cannot
 //! send, such as a header twice, goes to the router without a socket, signed in the test.
+//!
+//! A catch-up follows the answer in a task of its own. Its tests read the history from a
+//! PSP that never answers, so that each catch-up holds its permit while the test counts
+//! them, and nothing depends on timing; only the one that applies a fact waits, bounded,
+//! for the payment to move.
 
 mod common;
 
 use std::error::Error;
 use std::net::SocketAddr;
+use std::time::{Duration, Instant};
 
 use axum::Router;
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
-use common::api::{Pools, get, send};
+use common::api::{Pools, get, send, unused_psp};
 use common::crashes::{NOTIFICATION_AT_COMMIT, install_crash_points, plan_death};
-use common::payments::{create_command, fee_rate};
-use common::{merchant_id, runtime_pool, runtime_pool_of_one, test_uuid};
+use common::payments::{REQUESTED, create_command, fee_rate, status_of};
+use common::psp::{client_of, silent_psp};
+use common::{merchant_id, request_id, runtime_pool, runtime_pool_of_one, test_uuid};
 use mock_psp::signing::{SigningKey, signature_header};
 use mock_psp::{Attempt, MockPsp, Tamper};
+use payments_core::accounts::Psp;
 use payments_core::api::problem::Problem;
 use payments_core::api::{AppState, Webhooks, router};
 use payments_core::ids::PaymentId;
+use payments_core::lifecycle::PaymentStatus;
+use payments_core::money::PositiveAmount;
 use payments_core::notifications::SigningKeys;
 use payments_core::payments::{create_payment, register_merchant};
+use payments_core::psp::PspClient;
+use payments_core::requests::{Ask, RecordRequest, record_request};
+use payments_core::tenancy::Tenant;
 use sqlx::PgPool;
 use sqlx::types::chrono::Utc;
 use tokio::net::TcpListener;
@@ -40,15 +53,16 @@ fn answered(status: u16, retry_after: Option<u32>) -> Attempt {
     }
 }
 
-/// What the route holds to hear from this fake: the keys that it signs with.
-fn webhooks_of(fake: &MockPsp) -> Webhooks {
-    let keys = SigningKeys::parse(&fake.signing_keys().join(" ")).expect("the fake's keys");
-    Webhooks::new(keys)
+/// The keys that this fake signs with, as the server reads them.
+fn keys_of(fake: &MockPsp) -> SigningKeys {
+    SigningKeys::parse(&fake.signing_keys().join(" ")).expect("the fake's keys")
 }
 
-/// What the route holds to hear from a test that signs with this key.
+/// What the route holds to hear from a test that signs with this key, and whose PSP it
+/// never reaches.
 fn webhooks_for(key: &SigningKey) -> Webhooks {
-    Webhooks::new(SigningKeys::parse(&key.written()).expect("a key that the fake made"))
+    let keys = SigningKeys::parse(&key.written()).expect("a key that the fake made");
+    Webhooks::new(unused_psp(), keys)
 }
 
 /// Serves this router on a port of its own, until the runtime ends with the test.
@@ -61,17 +75,36 @@ async fn serve(router: Router) -> SocketAddr {
     address
 }
 
-/// A server that holds a fake's keys, and the fake, which delivers to it.
+/// A server that holds a fake's keys, the fake, which delivers to it, and what the
+/// server's route holds, whose catch-ups a test counts.
 struct World {
     pools: Pools,
     fake: MockPsp,
+    webhooks: Webhooks,
 }
 
 impl World {
+    /// A server that reads its histories from the fake.
     async fn new(pool: &PgPool) -> Result<Self, Box<dyn Error>> {
+        let fake = MockPsp::start().await?;
+        let psp = client_of(&fake);
+        Self::started(pool, fake, psp).await
+    }
+
+    /// A server that reads its histories from the PSP at `url`, and waits a minute for
+    /// each, while the fake delivers the notifications.
+    async fn reading(pool: &PgPool, url: &str) -> Result<Self, Box<dyn Error>> {
+        let fake = MockPsp::start().await?;
+        let psp = PspClient::new(Psp::Mock, url, fake.api_key(), Duration::from_secs(60))?;
+        Self::started(pool, fake, psp).await
+    }
+
+    async fn started(pool: &PgPool, fake: MockPsp, psp: PspClient) -> Result<Self, Box<dyn Error>> {
+        let webhooks = Webhooks::new(psp, keys_of(&fake));
         let world = Self {
             pools: Pools::login(pool).await?,
-            fake: MockPsp::start().await?,
+            fake,
+            webhooks,
         };
         world.serve_with(world.pools.system.clone()).await;
         Ok(world)
@@ -84,7 +117,7 @@ impl World {
             self.pools.tenant.clone(),
             system,
             self.pools.operator.digest(),
-            webhooks_of(&self.fake),
+            self.webhooks.clone(),
         );
         let address = serve(router(state)).await;
         self.fake
@@ -99,6 +132,28 @@ impl World {
     /// The ID of a new notification that `payment` changed.
     fn notify(&self, payment: Uuid) -> String {
         self.fake.notify_again(payment)
+    }
+
+    /// Asks, as the merchant of payment `n`, for an authorization of it, which the fake
+    /// then holds. Returns the request's ID.
+    async fn ask_authorization(&self, n: u32, payment: PaymentId) -> Result<Uuid, Box<dyn Error>> {
+        let command = RecordRequest {
+            request: request_id(n),
+            payment,
+            ask: Ask::Authorize(PositiveAmount::new(REQUESTED)?),
+        };
+        record_request(Tenant::new(&self.pools.tenant, merchant_id(n)), &command).await?;
+        common::psp::send(&self.fake, &command).await;
+        Ok(command.request.get())
+    }
+
+    /// Waits, at most 10 seconds, until no catch-up runs.
+    async fn until_no_catch_up_runs(&self) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while self.webhooks.catch_ups_running() > 0 {
+            assert!(Instant::now() < deadline, "a catch-up still runs");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
     }
 
     async fn close(self) {
@@ -356,5 +411,126 @@ async fn only_the_mock_psp_takes_notifications_and_only_by_post(pool: PgPool) ->
     assert_eq!(reply.status, StatusCode::METHOD_NOT_ALLOWED);
     assert_eq!(reply.body, Problem::MethodNotAllowed.body());
     pools.close().await;
+    Ok(())
+}
+
+/// Waits, at most 10 seconds, until the payment has this status.
+async fn until_status(
+    system: &PgPool,
+    payment: PaymentId,
+    status: PaymentStatus,
+) -> Result<(), Box<dyn Error>> {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while status_of(system, payment).await? != status {
+        assert!(
+            Instant::now() < deadline,
+            "payment {payment} never became {status:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    Ok(())
+}
+
+#[sqlx::test]
+async fn a_notification_catches_its_payment_up_after_the_answer(pool: PgPool) -> TestResult {
+    let world = World::new(&pool).await?;
+    let payment = world.payment(1).await?;
+    let request = world.ask_authorization(1, payment).await?;
+    world.fake.approve(request);
+    let approval = world
+        .fake
+        .notifications()
+        .last()
+        .ok_or("the approval's notification")?
+        .id
+        .clone();
+    assert_eq!(world.fake.deliver(&approval).await, answered(202, None));
+    // The catch-up reads the PSP's history and applies the authorization that it holds.
+    until_status(&world.pools.system, payment, PaymentStatus::Authorized).await?;
+    world.until_no_catch_up_runs().await;
+    world.close().await;
+    Ok(())
+}
+
+#[sqlx::test]
+async fn the_answer_does_not_wait_for_the_catch_up_that_it_starts(pool: PgPool) -> TestResult {
+    let (silent, holder) = silent_psp().await;
+    let world = World::reading(&pool, &silent).await?;
+    let payment = world.payment(1).await?;
+    let event = world.notify(payment.get());
+    // The PSP never answers the read, and the fake gives up on an answer after 15 seconds.
+    assert_eq!(world.fake.deliver(&event).await, answered(202, None));
+    assert_eq!(world.webhooks.catch_ups_running(), 1);
+    holder.abort();
+    world.close().await;
+    Ok(())
+}
+
+#[sqlx::test]
+async fn at_most_four_catch_ups_run_at_once(pool: PgPool) -> TestResult {
+    let (silent, holder) = silent_psp().await;
+    let world = World::reading(&pool, &silent).await?;
+    for n in 1..=5 {
+        let payment = world.payment(n).await?;
+        let event = world.notify(payment.get());
+        assert_eq!(world.fake.deliver(&event).await, answered(202, None), "{n}");
+    }
+    // The fifth found no permit, and was recorded and answered all the same.
+    assert_eq!(world.webhooks.catch_ups_running(), 4);
+    assert_eq!(recorded(&pool).await?.len(), 5);
+    holder.abort();
+    world.close().await;
+    Ok(())
+}
+
+#[sqlx::test]
+async fn a_notification_about_a_payment_that_the_service_does_not_hold_starts_no_catch_up(
+    pool: PgPool,
+) -> TestResult {
+    let (silent, holder) = silent_psp().await;
+    let world = World::reading(&pool, &silent).await?;
+    let event = world.notify(test_uuid(9));
+    assert_eq!(world.fake.deliver(&event).await, answered(202, None));
+    assert_eq!(world.webhooks.catch_ups_running(), 0);
+    holder.abort();
+    world.close().await;
+    Ok(())
+}
+
+#[sqlx::test]
+async fn a_copy_starts_a_catch_up_as_the_first_did(pool: PgPool) -> TestResult {
+    let (silent, holder) = silent_psp().await;
+    let world = World::reading(&pool, &silent).await?;
+    let payment = world.payment(1).await?;
+    let event = world.notify(payment.get());
+    // The first catch-up may have found no permit, or failed: a copy tries again.
+    for _ in 0..2 {
+        assert_eq!(world.fake.deliver(&event).await, answered(202, None));
+    }
+    assert_eq!(world.webhooks.catch_ups_running(), 2);
+    assert_eq!(recorded(&pool).await?, [(event, payment.get())]);
+    holder.abort();
+    world.close().await;
+    Ok(())
+}
+
+#[sqlx::test]
+async fn a_catch_up_that_fails_lets_its_permit_go(pool: PgPool) -> TestResult {
+    let (silent, holder) = silent_psp().await;
+    let world = World::reading(&pool, &silent).await?;
+    let payment = world.payment(1).await?;
+    let event = world.notify(payment.get());
+    assert_eq!(world.fake.deliver(&event).await, answered(202, None));
+    assert_eq!(world.webhooks.catch_ups_running(), 1);
+    // The PSP drops the connection, so the read fails, and the catch-up ends.
+    holder.abort();
+    world.until_no_catch_up_runs().await;
+    // The payment waits for the sweep, and its notification stays recorded.
+    assert_eq!(
+        status_of(&world.pools.system, payment).await?,
+        PaymentStatus::Created
+    );
+    assert_eq!(recorded(&pool).await?, [(event, payment.get())]);
+    world.close().await;
     Ok(())
 }

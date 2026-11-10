@@ -3,17 +3,20 @@
 //! What the tests of the HTTP API share (ADR-0023).
 
 use std::error::Error;
+use std::time::Duration;
 
 use axum::Router;
 use axum::body::Body;
 use axum::http::{HeaderMap, Method, Request, StatusCode};
 use http_body_util::BodyExt;
 use mock_psp::signing::SigningKey;
+use payments_core::accounts::Psp;
 use payments_core::api::{AppState, Webhooks};
 use payments_core::credentials::{ApiKeySecret, SecretDigest};
 use payments_core::ids::{MerchantId, PaymentId};
 use payments_core::notifications::SigningKeys;
 use payments_core::payments::{create_payment, register_merchant};
+use payments_core::psp::PspClient;
 use payments_core::tenancy::Tenant;
 use sqlx::PgPool;
 use tower::ServiceExt;
@@ -147,11 +150,26 @@ pub async fn payments_stored(pool: &PgPool) -> sqlx::Result<i64> {
         .await
 }
 
+/// A client of a PSP that the test never means to reach: port 9 of the local interface,
+/// where nothing listens, so a call fails, which a catch-up only logs.
+pub fn unused_psp() -> PspClient {
+    PspClient::new(
+        Psp::Mock,
+        "http://127.0.0.1:9",
+        "unused",
+        Duration::from_secs(10),
+    )
+    .expect("a local address and a key that a header can carry")
+}
+
 /// What the PSP's route holds in a test that sends it nothing: a key of its own, which
-/// signs nothing that the test sends.
+/// signs nothing that the test sends, and a PSP that it never reaches.
 pub fn unused_webhooks() -> Webhooks {
     let key = SigningKey::generate().written();
-    Webhooks::new(SigningKeys::parse(&key).expect("a key that the fake made"))
+    Webhooks::new(
+        unused_psp(),
+        SigningKeys::parse(&key).expect("a key that the fake made"),
+    )
 }
 
 /// The two login roles' pools, as the server holds them (ADR-0025), and the operator's

@@ -7,12 +7,18 @@
 use std::env;
 use std::error::Error;
 use std::process::ExitCode;
+use std::time::Duration;
 
+use payments_core::accounts::Psp;
 use payments_core::api::{AppState, Webhooks, router};
 use payments_core::credentials::SecretDigest;
 use payments_core::notifications::SigningKeys;
+use payments_core::psp::{InvalidClient, PspClient};
 use sqlx::PgPool;
 use tokio::net::TcpListener;
+
+/// How long each call to the PSP waits for its answer (ADR-0036, ADR-0042).
+const PSP_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[tokio::main]
 async fn main() -> ExitCode {
@@ -36,13 +42,16 @@ async fn run() -> Result<(), Box<dyn Error>> {
     // Its errors say what is wrong with a key, never what the key holds.
     let keys = SigningKeys::parse(&required("MOCK_PSP_SIGNING_KEYS")?)
         .map_err(|error| format!("MOCK_PSP_SIGNING_KEYS: {error}"))?;
+    let psp_url = required("MOCK_PSP_URL")?;
+    let psp_key = required("MOCK_PSP_API_KEY")?;
+    let psp = PspClient::new(Psp::Mock, &psp_url, &psp_key, PSP_TIMEOUT).map_err(unusable)?;
     let address = bind_address(env::var("BIND_ADDRESS").ok());
 
     let tenant = PgPool::connect(&tenant_url).await?;
     let system = PgPool::connect(&system_url).await?;
     let listener = TcpListener::bind(&address).await?;
     tracing::info!("listening on {}", listener.local_addr()?);
-    let state = AppState::new(tenant, system, operator, Webhooks::new(keys));
+    let state = AppState::new(tenant, system, operator, Webhooks::new(psp, keys));
     axum::serve(listener, router(state)).await?;
     Ok(())
 }
@@ -54,6 +63,15 @@ fn required(name: &str) -> Result<String, String> {
         .ok()
         .filter(|value| !value.is_empty())
         .ok_or_else(|| format!("{name} is not set"))
+}
+
+/// Which of the PSP's variables a client could not use, and why. Neither message shows
+/// the key.
+fn unusable(error: InvalidClient) -> String {
+    match error {
+        InvalidClient::Address(_) => format!("MOCK_PSP_URL: {error}"),
+        InvalidClient::Key => format!("MOCK_PSP_API_KEY: {error}"),
+    }
 }
 
 fn bind_address(configured: Option<String>) -> String {
