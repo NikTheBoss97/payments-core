@@ -12,9 +12,15 @@ publish.workspace = true
 # The HTTP server (ADR-0023). HTTP/1.1 only, and none of the default extractors: a
 # body is read raw, because its fingerprint needs the exact bytes (ADR-0026).
 axum = { version = "0.8.9", default-features = false, features = ["http1", "tokio"] }
+# The base64 of the keys and the signatures of the PSP's notifications (ADR-0030).
+# sqlx builds this crate already.
+base64 = "0.22"
 # The secret of an API key, from the operating system (ADR-0024). uuid builds this
 # crate already.
 getrandom = "0.4"
+# The MAC that signs a notification, compared through its constant-time output
+# (ADR-0030). sqlx builds this crate already.
+hmac = "0.13"
 # Reads the PSP's histories (ADR-0036): the legacy client, with the one retry that it
 # makes by itself switched off, and the body, bounded in size (ADR-0041). Also reads a
 # response's body in the tests that send a request without a socket (ADR-0023). axum
