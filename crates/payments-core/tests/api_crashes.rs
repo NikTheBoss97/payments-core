@@ -14,6 +14,7 @@ use std::error::Error;
 use axum::http::StatusCode;
 use common::api::{
     Pools, Reply, a_merchant, a_payment, bearer, get_with_authorization, post, send,
+    unused_webhooks,
 };
 use common::crashes::{
     AT_COMMIT, ATTEMPTS, OPERATOR_AT_COMMIT, OPERATOR_KEY_POINTS, POSTING_POINTS, Role,
@@ -205,6 +206,7 @@ async fn killed_at_every_point(
             tenant.clone(),
             pools.system.clone(),
             pools.operator.digest(),
+            unused_webhooks(),
         ),
     };
     let mut applied = 0;
@@ -241,6 +243,7 @@ async fn a_create_killed_anywhere_is_a_503_and_the_retry_settles_it(pool: PgPool
             tenant.clone(),
             pools.system.clone(),
             pools.operator.digest(),
+            unused_webhooks(),
         ),
     };
     let points = [
@@ -415,6 +418,7 @@ async fn a_refusal_killed_as_it_is_stored_is_decided_again(pool: PgPool) -> Test
             tenant.clone(),
             pools.system.clone(),
             pools.operator.digest(),
+            unused_webhooks(),
         ),
     };
     for (n, point) in (1_u32..).zip(KEY_POINTS) {
@@ -540,7 +544,12 @@ async fn a_capture_whose_commit_commits_and_loses_its_session_gets_its_answer(
     let pools = Pools::login(&pool).await?;
     let (merchant, secret) = a_merchant(&pools, 1).await?;
     let app = slow_commit_pool(&pool, Role::Tenant).await?;
-    let state = AppState::new(app.clone(), pools.system.clone(), pools.operator.digest());
+    let state = AppState::new(
+        app.clone(),
+        pools.system.clone(),
+        pools.operator.digest(),
+        unused_webhooks(),
+    );
     let answer = r#"{"seq":2,"from":"authorized","to":"captured","refundable":8000}"#;
     let mut hits = 0;
     for n in 1..=ATTEMPTS {
@@ -610,6 +619,7 @@ async fn a_registration_killed_anywhere_is_a_503_and_the_retry_settles_it(
             pools.tenant.clone(),
             system.clone(),
             pools.operator.digest(),
+            unused_webhooks(),
         ),
     };
     let points = ["die_before merchants", "die_after merchants"]
@@ -658,6 +668,7 @@ async fn an_issue_killed_anywhere_is_a_503_and_the_retry_shows_the_secret_once(
             pools.tenant.clone(),
             system.clone(),
             pools.operator.digest(),
+            unused_webhooks(),
         ),
     };
     let path = format!("/merchants/{merchant}/api-keys");
@@ -700,6 +711,7 @@ async fn a_revocation_killed_anywhere_is_a_503_that_leaves_the_key_working_and_t
             pools.tenant.clone(),
             system.clone(),
             pools.operator.digest(),
+            unused_webhooks(),
         ),
     };
     let points = [
@@ -743,7 +755,12 @@ async fn a_registration_whose_commit_commits_and_loses_its_session_gets_its_answ
     // with exactly one merchant, and with one answer, the same to every retry.
     let pools = Pools::login(&pool).await?;
     let app = slow_commit_pool(&pool, Role::System).await?;
-    let state = AppState::new(pools.tenant.clone(), app.clone(), pools.operator.digest());
+    let state = AppState::new(
+        pools.tenant.clone(),
+        app.clone(),
+        pools.operator.digest(),
+        unused_webhooks(),
+    );
     let mut hits = 0;
     for n in 1..=ATTEMPTS {
         let key = format!("register-{n}");

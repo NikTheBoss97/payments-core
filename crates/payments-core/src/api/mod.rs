@@ -8,6 +8,7 @@ mod operator;
 mod path_id;
 mod payments;
 pub mod problem;
+mod webhooks;
 
 use axum::Router;
 use axum::extract::Request;
@@ -21,26 +22,31 @@ pub use credential::Merchant;
 pub use keyed::KeyedRequest;
 pub use payments::OwnPayment;
 use problem::Problem;
+pub use webhooks::Webhooks;
 
-/// What a request can reach: the two login roles' pools (ADR-0025), and what the operator's
-/// secret hashes to, which is all that the server holds of it (ADR-0024).
+/// What a request can reach: the two login roles' pools (ADR-0025), what the operator's
+/// secret hashes to, which is all that the server holds of it (ADR-0024), and what the
+/// PSP's route holds (ADR-0043).
 #[derive(Debug, Clone)]
 pub struct AppState {
     tenant: PgPool,
     system: PgPool,
     operator: SecretDigest,
+    webhooks: Webhooks,
 }
 
 impl AppState {
     /// The pool that merchant routes hold, whose role sees nothing until a transaction
-    /// names its merchant, the system role's, for looking a key up and for the operator's
-    /// commands, and the digest of the operator's secret.
+    /// names its merchant, the system role's, for looking a key up, for the operator's
+    /// commands and for the PSP's notifications, the digest of the operator's secret, and
+    /// what the PSP's route holds.
     #[must_use]
-    pub fn new(tenant: PgPool, system: PgPool, operator: SecretDigest) -> Self {
+    pub fn new(tenant: PgPool, system: PgPool, operator: SecretDigest, webhooks: Webhooks) -> Self {
         Self {
             tenant,
             system,
             operator,
+            webhooks,
         }
     }
 }
@@ -59,6 +65,7 @@ pub fn router(state: AppState) -> Router {
         .route("/payments/{id}/refund", post(payments::refund))
         .route("/payments/{id}/void", post(payments::void))
         .route("/payments/{id}/cancel", post(payments::cancel))
+        .route("/webhooks/mock", post(webhooks::receive))
         .fallback(no_such_route)
         .method_not_allowed_fallback(wrong_method)
         .layer(middleware::from_fn(in_its_own_task))

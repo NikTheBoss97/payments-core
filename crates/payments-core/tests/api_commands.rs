@@ -10,7 +10,9 @@ use std::error::Error;
 
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
-use common::api::{Pools, Reply, a_merchant, bearer, get_with_authorization, post, records, send};
+use common::api::{
+    Pools, Reply, a_merchant, bearer, get_with_authorization, post, records, send, unused_webhooks,
+};
 use common::crashes::{balances, install_crash_points, plan_death};
 use common::payments::{AUTHORIZED, FEE, steps, unbalanced_currencies, uncaused_postings};
 use common::{payment_id, request_id, tenant_pool_of_one};
@@ -743,6 +745,7 @@ async fn a_command_that_cannot_be_confirmed_is_a_503_and_the_retry_settles_it(
         tenant.clone(),
         pools.system.clone(),
         pools.operator.digest(),
+        unused_webhooks(),
     );
 
     for (verb, payment, body, steps_before) in commands {

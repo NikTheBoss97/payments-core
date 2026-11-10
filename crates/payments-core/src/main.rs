@@ -8,8 +8,9 @@ use std::env;
 use std::error::Error;
 use std::process::ExitCode;
 
-use payments_core::api::{AppState, router};
+use payments_core::api::{AppState, Webhooks, router};
 use payments_core::credentials::SecretDigest;
+use payments_core::notifications::SigningKeys;
 use sqlx::PgPool;
 use tokio::net::TcpListener;
 
@@ -32,18 +33,27 @@ async fn run() -> Result<(), Box<dyn Error>> {
     // The message names the variable and not its value, which is often the wrong secret.
     let operator = SecretDigest::from_hex(&required("OPERATOR_KEY_SHA256")?)
         .map_err(|_| "OPERATOR_KEY_SHA256 is not 64 lowercase hex digits")?;
+    // Its errors say what is wrong with a key, never what the key holds.
+    let keys = SigningKeys::parse(&required("MOCK_PSP_SIGNING_KEYS")?)
+        .map_err(|error| format!("MOCK_PSP_SIGNING_KEYS: {error}"))?;
     let address = bind_address(env::var("BIND_ADDRESS").ok());
 
     let tenant = PgPool::connect(&tenant_url).await?;
     let system = PgPool::connect(&system_url).await?;
     let listener = TcpListener::bind(&address).await?;
     tracing::info!("listening on {}", listener.local_addr()?);
-    axum::serve(listener, router(AppState::new(tenant, system, operator))).await?;
+    let state = AppState::new(tenant, system, operator, Webhooks::new(keys));
+    axum::serve(listener, router(state)).await?;
     Ok(())
 }
 
+/// A variable's value. One that is set but empty counts as not set, as `.env.example`
+/// leaves the secrets (ADR-0043).
 fn required(name: &str) -> Result<String, String> {
-    env::var(name).map_err(|_| format!("{name} is not set"))
+    env::var(name)
+        .ok()
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| format!("{name} is not set"))
 }
 
 fn bind_address(configured: Option<String>) -> String {

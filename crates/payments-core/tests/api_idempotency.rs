@@ -15,6 +15,7 @@ use axum::body::{Body, Bytes};
 use axum::http::{Method, Request, StatusCode};
 use common::api::{
     Pools, a_merchant, bearer, get_with_authorization, payments_stored, post, records, send,
+    unused_webhooks,
 };
 use common::crashes::{install_crash_points, plan_death};
 use common::keys::issued_key;
@@ -409,6 +410,7 @@ async fn a_command_that_cannot_be_confirmed_is_a_503_and_the_retry_settles_it(
         tenant.clone(),
         pools.system.clone(),
         pools.operator.digest(),
+        unused_webhooks(),
     );
     plan_death(&tenant, "die_before idempotency_records").await?;
 

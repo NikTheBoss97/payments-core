@@ -51,13 +51,15 @@ cargo install sqlx-cli --git https://github.com/transact-rs/sqlx \
 sqlx migrate run --source crates/payments-core/migrations
 ```
 
-The operator is one secret, of which the server holds only the digest. Make one for this shell,
-and start the server there:
+The operator is one secret, of which the server holds only the digest, and the payment provider
+signs its notifications with a key that the server holds too. Make both for this shell, and start
+the server there:
 
 ```sh
 set -a; . ./.env; set +a
 operator="pck_$(openssl rand -hex 32)"
 export OPERATOR_KEY_SHA256="$(printf %s "$operator" | openssl dgst -sha256 -r | cut -d' ' -f1)"
+export MOCK_PSP_SIGNING_KEYS="whsec_$(openssl rand -base64 32)"
 cargo run -p payments-core &
 ```
 

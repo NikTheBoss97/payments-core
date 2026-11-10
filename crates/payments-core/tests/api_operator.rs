@@ -12,7 +12,7 @@ use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
 use common::api::{
     Pools, Reply, a_merchant, a_payment, bearer, get_with_authorization, payments_stored, post,
-    post_with_authorization, records, send, written,
+    post_with_authorization, records, send, unused_webhooks, written,
 };
 use common::crashes::{install_crash_points, plan_death};
 use common::keys::issued_key;
@@ -830,6 +830,7 @@ async fn killed_then_retried(
         pools.tenant.clone(),
         system.clone(),
         pools.operator.digest(),
+        unused_webhooks(),
     );
     let before = stored(pool).await?;
     plan_death(system, "die_before operator_idempotency_records").await?;

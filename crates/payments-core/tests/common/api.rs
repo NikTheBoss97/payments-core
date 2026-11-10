@@ -8,9 +8,11 @@ use axum::Router;
 use axum::body::Body;
 use axum::http::{HeaderMap, Method, Request, StatusCode};
 use http_body_util::BodyExt;
-use payments_core::api::AppState;
+use mock_psp::signing::SigningKey;
+use payments_core::api::{AppState, Webhooks};
 use payments_core::credentials::{ApiKeySecret, SecretDigest};
 use payments_core::ids::{MerchantId, PaymentId};
+use payments_core::notifications::SigningKeys;
 use payments_core::payments::{create_payment, register_merchant};
 use payments_core::tenancy::Tenant;
 use sqlx::PgPool;
@@ -145,6 +147,13 @@ pub async fn payments_stored(pool: &PgPool) -> sqlx::Result<i64> {
         .await
 }
 
+/// What the PSP's route holds in a test that sends it nothing: a key of its own, which
+/// signs nothing that the test sends.
+pub fn unused_webhooks() -> Webhooks {
+    let key = SigningKey::generate().written();
+    Webhooks::new(SigningKeys::parse(&key).expect("a key that the fake made"))
+}
+
 /// The two login roles' pools, as the server holds them (ADR-0025), and the operator's
 /// secret, of which the server holds the digest (ADR-0024). The system role's connections
 /// act through `SET ROLE`, so close both before the test returns.
@@ -168,6 +177,7 @@ impl Pools {
             self.tenant.clone(),
             self.system.clone(),
             self.operator.digest(),
+            unused_webhooks(),
         )
     }
 
