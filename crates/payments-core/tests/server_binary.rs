@@ -19,12 +19,14 @@ use common::keys::issued_key;
 use common::payments::{
     AUTHORIZED, FEE, REQUESTED, create_command, fee_rate, status_of, steps, take_lock,
 };
+use common::psp::{client_of, send};
 use common::{merchant_id, request_id, test_uuid, wait_for_lock_waits};
 use futures_util::future::{join, join_all};
 use mock_psp::signing::SigningKey;
 use mock_psp::wire::Detail;
 use mock_psp::{Attempt, Failure, MockPsp, Route, new_api_key};
 use payments_core::api::problem::Problem;
+use payments_core::catch_up::catch_up;
 use payments_core::credentials::ApiKeySecret;
 use payments_core::idempotency::Fingerprint;
 use payments_core::ids::{MerchantId, PaymentId};
@@ -319,6 +321,21 @@ impl Server {
             .lock()
             .expect("no test panics while holding this");
         Ok(log.clone())
+    }
+
+    /// Waits, at most 30 seconds, for the process to end by itself: whether it succeeded, and
+    /// everything that it wrote.
+    async fn ended(mut self) -> Result<(bool, String), Box<dyn Error>> {
+        let status = timeout(Duration::from_secs(30), self.child.wait()).await??;
+        for collector in self.collectors {
+            collector.await?;
+        }
+        let log = self
+            .log
+            .lock()
+            .expect("no test panics while holding this")
+            .clone();
+        Ok((status.success(), log))
     }
 
     /// Ends the process at once. It has no graceful shutdown to skip, so this is what any stop
@@ -1133,6 +1150,128 @@ async fn the_binary_stops_at_once_on_a_psp_that_it_cannot_call_and_never_shows_t
     assert!(!succeeded, "{said}");
     assert!(said.contains("MOCK_PSP_API_KEY"), "{said}");
     assert!(!said.contains(&key), "{said}");
+    Ok(())
+}
+
+/// Payment `n` of merchant `n`, created, with a request to authorize it recorded as that
+/// merchant.
+async fn requested(pools: &Pools, n: u32) -> Result<(PaymentId, RecordRequest), Box<dyn Error>> {
+    let merchant = merchant_id(n);
+    register_merchant(&pools.system, merchant, fee_rate()).await?;
+    let create = create_command(n, merchant);
+    create_payment(Tenant::new(&pools.tenant, merchant), &create).await?;
+    let request = RecordRequest {
+        request: request_id(n),
+        payment: create.id,
+        ask: Ask::Authorize(PositiveAmount::new(REQUESTED)?),
+    };
+    record_request(Tenant::new(&pools.tenant, merchant), &request).await?;
+    Ok((create.id, request))
+}
+
+#[sqlx::test]
+async fn the_binary_sweeps_as_it_starts_and_sends_what_is_recorded(pool: PgPool) -> TestResult {
+    let fake = MockPsp::start().await?;
+    let pools = Pools::login(&pool).await?;
+    let client = client_of(&fake);
+    // Payment 1 is authorized and captured through the PSP, which then settles it with no
+    // notification. No request of it waits, so no step can settle it: only a pass can.
+    let (settled, authorize) = requested(&pools, 1).await?;
+    send(&fake, &authorize).await;
+    fake.approve_for(authorize.request.get(), AUTHORIZED);
+    catch_up(&pools.system, &client, settled).await?;
+    let capture = RecordRequest {
+        request: request_id(101),
+        payment: settled,
+        ask: Ask::Capture(PositiveAmount::new(AUTHORIZED)?),
+    };
+    record_request(Tenant::new(&pools.tenant, merchant_id(1)), &capture).await?;
+    send(&fake, &capture).await;
+    fake.approve(capture.request.get());
+    catch_up(&pools.system, &client, settled).await?;
+    fake.settle(settled.get());
+    // Payment 2 has a request that only the binary's steps can send.
+    let (_, waiting) = requested(&pools, 2).await?;
+    let waiting = waiting.request.get();
+
+    let server = Server::start_next_to(&pool, &fake).await?;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while status_of(&pools.system, settled).await? != PaymentStatus::Settled
+        || fake.times_taken(waiting) == 0
+    {
+        assert!(
+            Instant::now() < deadline,
+            "settled: {:?}, sent: {}",
+            status_of(&pools.system, settled).await?,
+            fake.times_taken(waiting)
+        );
+        sleep(Duration::from_millis(20)).await;
+    }
+    pools.close().await;
+    server.stop().await?;
+    assert_eq!(fake.times_taken(waiting), 1);
+    Ok(())
+}
+
+#[sqlx::test]
+async fn the_binary_logs_a_held_request_once(pool: PgPool) -> TestResult {
+    let fake = MockPsp::start().await?;
+    let pools = Pools::login(&pool).await?;
+    let (payment, request) = requested(&pools, 1).await?;
+    // A settlement of a payment that was never captured has no place, so the first
+    // catch-up stops the payment, and its request waits with it.
+    fake.append(payment.get(), Detail::Settled);
+    let server = Server::start_next_to(&pool, &fake).await?;
+    let held = format!(
+        "request {} waits with its stopped payment for an operator",
+        request.request.get()
+    );
+    server.until_logged(&held).await;
+    // Three steps later, still once.
+    sleep(Duration::from_secs(3)).await;
+    pools.close().await;
+    let log = server.stop().await?;
+    assert_eq!(log.matches(&held).count(), 1, "{log}");
+    // A request that waits for an operator is a warning.
+    let line = log
+        .lines()
+        .find(|line| line.contains(&held))
+        .ok_or("the line of the held request")?;
+    assert!(line.contains("WARN"), "{line}");
+    Ok(())
+}
+
+#[sqlx::test]
+async fn the_binary_stops_when_its_senders_task_ends(pool: PgPool) -> TestResult {
+    // A request of a kind that the types rule out, which only a database without its
+    // checks can hold: the sender's search panics on it, and the task ends.
+    sqlx::query!(
+        "ALTER TABLE payment_requests DROP CONSTRAINT payment_requests_amount_check, \
+         DROP CONSTRAINT payment_requests_kind_check"
+    )
+    .execute(&pool)
+    .await?;
+    let pools = Pools::login(&pool).await?;
+    let merchant = merchant_id(1);
+    register_merchant(&pools.system, merchant, fee_rate()).await?;
+    let create = create_command(1, merchant);
+    create_payment(Tenant::new(&pools.tenant, merchant), &create).await?;
+    pools.close().await;
+    sqlx::query!(
+        "INSERT INTO payment_requests (id, payment_id, kind, amount) VALUES ($1, $2, 'teleport', 1)",
+        request_id(1).get(),
+        create.id.get()
+    )
+    .execute(&pool)
+    .await?;
+    let server = Server::start(&pool).await?;
+    let (succeeded, log) = server.ended().await?;
+    assert!(!succeeded, "{log}");
+    assert!(log.contains("the sender's task stopped"), "{log}");
+    assert!(
+        log.contains("payment_requests_kind_check allows only known kinds"),
+        "{log}"
+    );
     Ok(())
 }
 

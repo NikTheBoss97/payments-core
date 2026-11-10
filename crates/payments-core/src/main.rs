@@ -1,8 +1,8 @@
 // Author: Nicola Antonello
 
 //! The server (ADR-0023). It reads its configuration, logs in as the two roles, and
-//! serves. It never runs migrations (ADR-0008), and it speaks plain HTTP: TLS ends in
-//! front of it.
+//! serves, with the sender's task beside the routes (ADR-0043, ADR-0044). It never runs
+//! migrations (ADR-0008), and it speaks plain HTTP: TLS ends in front of it.
 
 use std::env;
 use std::error::Error;
@@ -11,10 +11,13 @@ use std::time::Duration;
 
 use payments_core::accounts::Psp;
 use payments_core::api::{AppState, Webhooks, router};
+use payments_core::background::{self, Cadence};
 use payments_core::credentials::SecretDigest;
 use payments_core::notifications::SigningKeys;
 use payments_core::psp::{InvalidClient, PspClient};
+use payments_core::sender::Sender;
 use sqlx::PgPool;
+use sqlx::types::chrono::Utc;
 use tokio::net::TcpListener;
 
 /// How long each call to the PSP waits for its answer (ADR-0036, ADR-0042).
@@ -44,15 +47,27 @@ async fn run() -> Result<(), Box<dyn Error>> {
         .map_err(|error| format!("MOCK_PSP_SIGNING_KEYS: {error}"))?;
     let psp_url = required("MOCK_PSP_URL")?;
     let psp_key = required("MOCK_PSP_API_KEY")?;
+    // One client for the route's catch-ups and one for the sender's task.
     let psp = PspClient::new(Psp::Mock, &psp_url, &psp_key, PSP_TIMEOUT).map_err(unusable)?;
+    let sender = PspClient::new(Psp::Mock, &psp_url, &psp_key, PSP_TIMEOUT).map_err(unusable)?;
     let address = bind_address(env::var("BIND_ADDRESS").ok());
 
     let tenant = PgPool::connect(&tenant_url).await?;
     let system = PgPool::connect(&system_url).await?;
     let listener = TcpListener::bind(&address).await?;
+    let sender = Sender::new(sender, Utc::now());
+    let work = tokio::spawn(background::run(system.clone(), sender, Cadence::STANDARD));
     tracing::info!("listening on {}", listener.local_addr()?);
     let state = AppState::new(tenant, system, operator, Webhooks::new(psp, keys));
-    axum::serve(listener, router(state)).await?;
+    // The task never returns, so if it ends, it panicked. The server then stops, as from
+    // a crash, rather than serve requests that nothing sends (ADR-0044).
+    tokio::select! {
+        served = axum::serve(listener, router(state)) => served?,
+        ended = work => {
+            let Err(ended) = ended;
+            return Err(format!("the sender's task stopped: {ended}").into());
+        }
+    }
     Ok(())
 }
 
