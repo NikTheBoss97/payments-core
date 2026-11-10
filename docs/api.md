@@ -5,19 +5,23 @@
 What a client of this service can rely on. The decisions behind it are in
 [ADR-0023](adr/0023-the-http-api.md) (routes and answers),
 [ADR-0024](adr/0024-authentication.md) (credentials),
-[ADR-0025](adr/0025-tenant-isolation.md) (isolation) and
-[ADR-0026](adr/0026-idempotency-keys.md) (idempotency keys).
+[ADR-0025](adr/0025-tenant-isolation.md) (isolation),
+[ADR-0026](adr/0026-idempotency-keys.md) (idempotency keys), and
+[ADR-0030](adr/0030-signed-notifications.md),
+[ADR-0032](adr/0032-answers-and-retries.md) and
+[ADR-0043](adr/0043-the-servers-psp-routes-and-tasks.md) (the provider's notifications).
 
 ## Running the server
 
 The binary takes its configuration from the environment, and stops at once if it
-cannot use it.
+cannot use it. A variable that is set but empty counts as not set.
 
 | Variable | Meaning | Default |
 |---|---|---|
 | `TENANT_DATABASE_URL` | The login that merchant routes hold. It sees nothing until a transaction names its merchant. | required |
-| `SYSTEM_DATABASE_URL` | The login that looks an API key up and runs the operator's routes. | required |
+| `SYSTEM_DATABASE_URL` | The login that looks an API key up, runs the operator's routes and records the provider's notifications. | required |
 | `OPERATOR_KEY_SHA256` | The SHA-256 of the operator's secret, as 64 lowercase hex digits. The server never holds the secret itself. | required |
+| `MOCK_PSP_SIGNING_KEYS` | The keys that sign the provider's notifications, each `whsec_` and the base64 of 24 to 64 bytes, separated by spaces: the current one, and during a rotation the next. | required |
 | `BIND_ADDRESS` | Where to listen. | `127.0.0.1:8080` |
 
 It never runs migrations. It speaks plain HTTP/1.1, so TLS ends in front of it, and
@@ -39,7 +43,8 @@ restarting the server with a new digest.
 
 ## Idempotency keys
 
-Every `POST` requires `Idempotency-Key: "..."`: a quoted string of 1 to 255 visible ASCII
+Every `POST` but the [provider's notifications](#the-providers-notifications) requires
+`Idempotency-Key: "..."`: a quoted string of 1 to 255 visible ASCII
 characters without `"` or `\`. Sending a request again under its key is always safe: it
 has one effect at most, and it gets the answer that the first attempt got.
 
@@ -215,6 +220,36 @@ Revokes an API key, which stops working on its next request. It takes no body, n
 { "api_key_id": "019b76da-a800-7000-8000-000000000002" }
 ```
 
+## The provider's notifications
+
+`POST /webhooks/mock` takes the payment provider's notifications, signed as Standard
+Webhooks `v1` signs them. It takes no API key and no idempotency key: the signature says
+who sent a notification, and its ID tells its copies apart. A notification only names a
+payment. What the provider decided, the service reads from the provider itself.
+
+Before it reads the body, the service checks, in this order:
+
+1. `webhook-id`, `webhook-timestamp` and `webhook-signature` each appear once;
+2. the ID is 1 to 255 of `[0-9A-Za-z_-]`, and the timestamp is whole Unix seconds in
+   digits alone;
+3. the timestamp is at most 5 minutes from the service's clock, either way;
+4. one `v1,` entry of the space-separated signature list is the base64 of the
+   HMAC-SHA256, under one of the keys, of the ID, the timestamp and the body as
+   received, joined by `.`.
+
+The body must then name `data.payment_id`. Unlike the routes above, it may hold fields
+that the service does not know, which it ignores.
+
+| The service | Answers |
+|---|---|
+| recorded the notification, now or before | `202`, with no body |
+| refused it | [`notification-refused`](#notification-refused) |
+| could not record it | [`unavailable`](#unavailable), with `Retry-After: 5` |
+
+A notification about a payment that the service does not hold is recorded, logged as a
+warning, and answered `202`, since sending it again cannot change that. The service never
+answers `410`, on which a sender stops delivering to an endpoint.
+
 ## Problems
 
 Every error is `application/problem+json` ([RFC 9457](https://www.rfc-editor.org/rfc/rfc9457.html)),
@@ -292,12 +327,20 @@ apply, and an operator has to look at the payment before it takes another reques
 recorded before the stop wait too, and the provider is not sent them. It is final and stored
 under the key, as for an [`illegal-move`](#illegal-move).
 
+### notification-refused
+
+`400`. The provider's notification is unreadable or does not verify: a header is missing,
+repeated or not visible ASCII, the ID or the timestamp has another shape, the timestamp is
+more than 5 minutes from the service's clock, no signature matches a key, or the body is
+above 2 MB or names no payment. All of these get the same answer, and nothing is recorded.
+
 ### unavailable
 
 `503`. The service could not finish the request, for instance because the database could
 not answer, or it cannot tell whether the request took effect. A good key can get this and
 never gets `unauthorized` for it. Sending the request again is safe: under its key, a request
-that did take effect gets the answer and runs nothing.
+that did take effect gets the answer and runs nothing. On the provider's route it carries
+`Retry-After: 5`, and a copy of a notification that was recorded after all gets `202`.
 
 ### internal-error
 

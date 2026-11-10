@@ -53,6 +53,9 @@ pub enum Problem {
     /// The payment is stopped until an operator looks at it, so it takes no request. It is
     /// final, so it is stored under the key (ADR-0042).
     PaymentStopped,
+    /// A notification of the PSP's that is unreadable or does not verify, whichever check
+    /// refused it: one answer for all of them (ADR-0030, ADR-0043).
+    NotificationRefused,
     /// The database could not answer, or the outcome is unknown. Sending the request
     /// again is safe.
     Unavailable,
@@ -134,6 +137,11 @@ impl Problem {
                 "payment-stopped",
                 "This payment is stopped until an operator looks at it",
             ),
+            Self::NotificationRefused => (
+                StatusCode::BAD_REQUEST,
+                "notification-refused",
+                "The notification is unreadable or does not verify",
+            ),
             Self::Unavailable => (
                 StatusCode::SERVICE_UNAVAILABLE,
                 "unavailable",
@@ -212,7 +220,7 @@ mod tests {
     use super::*;
 
     /// Every problem. The match stops a new one from compiling until it is added here.
-    const ALL: [Problem; 15] = [
+    const ALL: [Problem; 16] = [
         Problem::Unauthorized,
         Problem::NotFound,
         Problem::MethodNotAllowed,
@@ -226,6 +234,7 @@ mod tests {
         Problem::AuthorizationRequested,
         Problem::CaptureOrVoidPending,
         Problem::PaymentStopped,
+        Problem::NotificationRefused,
         Problem::Unavailable,
         Problem::Internal,
     ];
@@ -245,6 +254,7 @@ mod tests {
             | Problem::AuthorizationRequested
             | Problem::CaptureOrVoidPending
             | Problem::PaymentStopped
+            | Problem::NotificationRefused
             | Problem::Unavailable
             | Problem::Internal => {}
         }

@@ -17,8 +17,10 @@ use common::api::{Pools, written};
 use common::crashes::{assert_books_are_whole, balances};
 use common::keys::issued_key;
 use common::payments::{AUTHORIZED, FEE, create_command, fee_rate, steps, take_lock};
-use common::{merchant_id, wait_for_lock_waits};
+use common::{merchant_id, test_uuid, wait_for_lock_waits};
 use futures_util::future::{join, join_all};
+use mock_psp::signing::SigningKey;
+use mock_psp::{Attempt, MockPsp};
 use payments_core::api::problem::Problem;
 use payments_core::credentials::ApiKeySecret;
 use payments_core::idempotency::Fingerprint;
@@ -70,6 +72,7 @@ fn configured(pool: &PgPool, operator: &ApiKeySecret) -> Command {
         .env("TENANT_DATABASE_URL", url(pool, "payments_tenant"))
         .env("SYSTEM_DATABASE_URL", url(pool, "payments_app"))
         .env("OPERATOR_KEY_SHA256", written(operator.digest()))
+        .env("MOCK_PSP_SIGNING_KEYS", SigningKey::generate().written())
         .env("BIND_ADDRESS", "127.0.0.1:0")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -124,12 +127,30 @@ impl Server {
         Self::launched(pool, ApiKeySecret::generate(), log).await
     }
 
+    /// Starts the binary next to this fake: it verifies notifications with the fake's
+    /// keys.
+    async fn start_next_to(pool: &PgPool, fake: &MockPsp) -> Result<Self, Box<dyn Error>> {
+        let operator = ApiKeySecret::generate();
+        let mut command = configured(pool, &operator);
+        command.env("MOCK_PSP_SIGNING_KEYS", fake.signing_keys().join(" "));
+        let log = Arc::new(Mutex::new(String::new()));
+        Self::spawned(command, operator, log).await
+    }
+
     async fn launched(
         pool: &PgPool,
         operator: ApiKeySecret,
         log: Arc<Mutex<String>>,
     ) -> Result<Self, Box<dyn Error>> {
-        let mut child = configured(pool, &operator).spawn()?;
+        Self::spawned(configured(pool, &operator), operator, log).await
+    }
+
+    async fn spawned(
+        mut command: Command,
+        operator: ApiKeySecret,
+        log: Arc<Mutex<String>>,
+    ) -> Result<Self, Box<dyn Error>> {
+        let mut child = command.spawn()?;
         let stdout = child.stdout.take().expect("a piped stdout");
         let stderr = child.stderr.take().expect("a piped stderr");
         let from_stderr = collect(stderr, &log);
@@ -160,6 +181,20 @@ impl Server {
             log,
             collectors: vec![from_stderr, from_stdout],
         })
+    }
+
+    /// Waits, at most 10 seconds, until the server has written this.
+    async fn until_logged(&self, text: &str) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !self
+            .log
+            .lock()
+            .expect("no test panics while holding this")
+            .contains(text)
+        {
+            assert!(Instant::now() < deadline, "the server never wrote {text:?}");
+            sleep(Duration::from_millis(20)).await;
+        }
     }
 
     /// One request with no body on a connection of its own. The answer's status line and its
@@ -922,12 +957,72 @@ async fn the_binary_stops_at_once_without_its_configuration(pool: PgPool) -> Tes
         "TENANT_DATABASE_URL",
         "SYSTEM_DATABASE_URL",
         "OPERATOR_KEY_SHA256",
+        "MOCK_PSP_SIGNING_KEYS",
     ] {
         let mut command = configured(&pool, &ApiKeySecret::generate());
         command.env_remove(name);
         let (succeeded, written) = refused(command).await?;
         assert!(!succeeded, "{name}: {written}");
         assert!(written.contains(name), "{name}: {written}");
+        // Set but empty, as .env.example leaves the secrets, counts as not set.
+        let mut command = configured(&pool, &ApiKeySecret::generate());
+        command.env(name, "");
+        let (succeeded, written) = refused(command).await?;
+        assert!(!succeeded, "{name} empty: {written}");
+        assert!(written.contains(name), "{name} empty: {written}");
+    }
+    Ok(())
+}
+
+#[sqlx::test]
+async fn the_binary_flags_a_notification_about_a_payment_that_it_does_not_hold(
+    pool: PgPool,
+) -> TestResult {
+    let fake = MockPsp::start().await?;
+    let server = Server::start_next_to(&pool, &fake).await?;
+    fake.deliver_to(&format!("http://{}/webhooks/mock", server.address));
+    let unknown = test_uuid(9);
+    let event = fake.notify_again(unknown);
+    let answer = fake.deliver(&event).await;
+    assert_eq!(
+        answer,
+        Attempt::Answered {
+            status: 202,
+            retry_after: None
+        }
+    );
+    // An operator learns of it from the log, since no retry can change it.
+    server
+        .until_logged(&format!(
+            "notification {event} names payment {unknown}, which the service does not hold"
+        ))
+        .await;
+    server.stop().await?;
+    Ok(())
+}
+
+#[sqlx::test]
+async fn the_binary_stops_at_once_on_signing_keys_it_cannot_read_and_never_shows_them(
+    pool: PgPool,
+) -> TestResult {
+    // Each value, and the part of it that must never be shown: a key's base64, or the
+    // whole value when it is no key at all.
+    let good = SigningKey::generate().written();
+    let bare = good.trim_start_matches("whsec_").to_owned();
+    for (value, secret) in [
+        ("not a key".to_owned(), "not a key".to_owned()),
+        (bare.clone(), bare.clone()),
+        ("whsec_c2hvcnQ=".to_owned(), "c2hvcnQ=".to_owned()),
+        ("whsec_not!base64".to_owned(), "not!base64".to_owned()),
+        (format!("{good} whsec_oops"), bare),
+    ] {
+        let mut command = configured(&pool, &ApiKeySecret::generate());
+        command.env("MOCK_PSP_SIGNING_KEYS", &value);
+        let (succeeded, said) = refused(command).await?;
+        assert!(!succeeded, "{said}");
+        assert!(said.contains("MOCK_PSP_SIGNING_KEYS"), "{said}");
+        assert!(!said.contains("listening on"), "{said}");
+        assert!(!said.contains(&secret), "{said}");
     }
     Ok(())
 }

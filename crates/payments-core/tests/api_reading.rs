@@ -13,7 +13,9 @@ use std::error::Error;
 
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
-use common::api::{Pools, a_merchant, a_payment, bearer, get, get_with_authorization, send};
+use common::api::{
+    Pools, a_merchant, a_payment, bearer, get, get_with_authorization, send, unused_webhooks,
+};
 use common::payment_id;
 use common::payments::{authorize_command, capture_command};
 use payments_core::api::problem::Problem;
@@ -101,6 +103,7 @@ async fn the_comparison_in_rust_holds_with_no_row_level_security(pool: PgPool) -
         pools.system.clone(),
         pools.system.clone(),
         pools.operator.digest(),
+        unused_webhooks(),
     );
     assert!(find_payment(&pools.system, payment).await?.is_some());
 
