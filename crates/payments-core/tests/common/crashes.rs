@@ -40,6 +40,8 @@ pub const OPERATOR_KEY_POINTS: [&str; 2] = [
 ];
 /// During `COMMIT` of an operator's command, which writes no step.
 pub const OPERATOR_AT_COMMIT: &str = "zz_die_at_commit operator_idempotency_records";
+/// During `COMMIT` of a notification's record, which writes no step either.
+pub const NOTIFICATION_AT_COMMIT: &str = "zz_die_at_commit psp_notifications";
 
 /// Adds the triggers to the test's own database, as the owner. The function runs
 /// as its owner too, the superuser, which may end a session that it opened.
@@ -81,6 +83,12 @@ pub async fn install_crash_points(pool: &PgPool) -> sqlx::Result<()> {
     .await?;
     sqlx::query!(
         "CREATE CONSTRAINT TRIGGER zz_die_at_commit AFTER INSERT ON operator_idempotency_records \
+         DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION die_if_planned()"
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query!(
+        "CREATE CONSTRAINT TRIGGER zz_die_at_commit AFTER INSERT ON psp_notifications \
          DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION die_if_planned()"
     )
     .execute(pool)

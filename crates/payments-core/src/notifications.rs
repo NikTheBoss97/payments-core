@@ -1,14 +1,15 @@
 // Author: Nicola Antonello
 
 //! The PSP's notifications (ADR-0030, ADR-0031, ADR-0032, ADR-0043): verifying one
-//! before its body is parsed.
+//! before its body is parsed, and recording it once.
 //!
 //! A notification follows Standard Webhooks `v1`: an HMAC-SHA256, under a key that the
 //! PSP and the service share, over `msg_id.timestamp.payload`. [`verify`] checks, in
 //! order, that the ID and the timestamp read one way only, that the timestamp is within
 //! 5 minutes of the service's clock, and that one listed signature matches one key, and
 //! only then parses the body. A notification decides nothing: it names a payment whose
-//! history the service then reads (ADR-0031).
+//! history the service then reads (ADR-0031). [`record`] keeps it once, by its PSP and
+//! its event ID, so that a copy is always known as one.
 //!
 //! The fake signs with code of its own. The two share the specification's test vector,
 //! not code (ADR-0029).
@@ -22,8 +23,13 @@ use hmac::digest::Output;
 use hmac::{Hmac, KeyInit, Mac};
 use serde::Deserialize;
 use sha2::Sha256;
+use sqlx::PgPool;
 use sqlx::types::chrono::{DateTime, Utc};
 use uuid::Uuid;
+
+use crate::accounts::Psp;
+use crate::db::{CommitError, code_and_constraint, commit};
+use crate::ids::PaymentId;
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -234,6 +240,98 @@ struct Body {
 #[derive(Deserialize)]
 struct Subject {
     payment_id: Uuid,
+}
+
+/// What recording a notification found about the payment that it names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Recorded {
+    /// A payment that the service holds: a catch-up follows the answer (ADR-0032).
+    Known(PaymentId),
+    /// A payment that the service does not hold. The notification is kept and flagged,
+    /// and nothing follows, since no retry can change that (ADR-0032).
+    Unknown(Uuid),
+}
+
+/// Why a notification could not be recorded. The route answers 503, and the PSP sends
+/// it again, which a copy recorded meanwhile answers (ADR-0032).
+#[derive(Debug, thiserror::Error)]
+pub enum RecordError {
+    /// A statement before the `COMMIT` failed, so nothing was recorded.
+    #[error("the notification could not be recorded")]
+    Database(#[source] sqlx::Error),
+    /// The `COMMIT` failed, so the notification may or may not be recorded (ADR-0014).
+    #[error("the notification may or may not have been recorded")]
+    NotConfirmed(#[source] CommitError),
+}
+
+/// Records a verified notification once, by its PSP and its event ID (ADR-0031,
+/// ADR-0032, ADR-0043), in a short transaction of its own on the system role's `pool`:
+/// one insert, which also reads whether the payment exists, committed through the one
+/// function of ADR-0014. A copy that committed first is no error. Its key refuses the
+/// insert with a `23505`, the transaction is dropped, and the copy is found: the payment
+/// that it names is the one recorded.
+///
+/// # Errors
+///
+/// See [`RecordError`].
+pub async fn record(
+    pool: &PgPool,
+    psp: Psp,
+    notification: &Notification,
+) -> Result<Recorded, RecordError> {
+    let mut tx = pool.begin().await.map_err(RecordError::Database)?;
+    let inserted = sqlx::query_scalar!(
+        r#"INSERT INTO psp_notifications (psp, event_id, payment_id)
+           VALUES ($1, $2, $3)
+           RETURNING EXISTS (SELECT 1 FROM payments WHERE id = $3) AS "known!""#,
+        psp.as_str(),
+        notification.event_id,
+        notification.payment
+    )
+    .fetch_one(&mut *tx)
+    .await;
+    match inserted {
+        Ok(known) => {
+            commit(tx).await.map_err(RecordError::NotConfirmed)?;
+            Ok(recorded(notification.payment, known))
+        }
+        Err(failed) => {
+            // The failed insert aborted the transaction: drop it (ADR-0014).
+            drop(tx);
+            let (code, constraint) = code_and_constraint(&failed);
+            if !is_copy(code.as_deref(), constraint) {
+                return Err(RecordError::Database(failed));
+            }
+            let copy = sqlx::query!(
+                r#"SELECT n.payment_id,
+                          EXISTS (SELECT 1 FROM payments p WHERE p.id = n.payment_id) AS "known!"
+                     FROM psp_notifications n
+                    WHERE n.psp = $1 AND n.event_id = $2"#,
+                psp.as_str(),
+                notification.event_id
+            )
+            .fetch_one(pool)
+            .await
+            .map_err(RecordError::Database)?;
+            Ok(recorded(copy.payment_id, copy.known))
+        }
+    }
+}
+
+/// Whether a failed insert met a copy of the notification that committed first: a
+/// `23505` on the primary key `(psp, event_id)`.
+fn is_copy(code: Option<&str>, constraint: Option<&str>) -> bool {
+    code == Some("23505") && constraint == Some("psp_notifications_pkey")
+}
+
+fn recorded(payment: Uuid, known: bool) -> Recorded {
+    if known {
+        Recorded::Known(
+            PaymentId::try_from(payment).expect("payments_id_check allows only UUIDv7 IDs"),
+        )
+    } else {
+        Recorded::Unknown(payment)
+    }
 }
 
 #[cfg(test)]
@@ -640,6 +738,21 @@ mod tests {
                 error,
                 "{listed:?}"
             );
+        }
+    }
+
+    #[test]
+    fn only_a_23505_on_the_notifications_key_is_a_copy() {
+        assert!(is_copy(Some("23505"), Some("psp_notifications_pkey")));
+        for (code, constraint) in [
+            (Some("23505"), Some("payment_requests_pkey")),
+            (Some("23505"), None),
+            (Some("23514"), Some("psp_notifications_pkey")),
+            (Some("42501"), None),
+            (None, Some("psp_notifications_pkey")),
+            (None, None),
+        ] {
+            assert!(!is_copy(code, constraint), "{code:?} {constraint:?}");
         }
     }
 
