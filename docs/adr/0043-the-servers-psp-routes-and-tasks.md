@@ -2,7 +2,7 @@
 
 # ADR-0043: The server's PSP routes and tasks
 
-- Status: accepted
+- Status: accepted; partly superseded by ADR-0044
 - Date: 2026-11-10
 
 ## Context
@@ -132,6 +132,14 @@ How the catch-ups that notifications start are bounded:
   copies; an unknown payment; an answer that does not wait for its catch-up; the bound of
   4; and the binary verifying a notification under the keys in its environment and
   catching its payment up.
+
+## Amendments
+
+- 2026-11-10: ADR-0044 supersedes, in "The sender's task", "A report that is not empty
+  is logged". A step's report lists held and overdue requests in every step while they
+  last, and in an outage each request that finds no token, so the task logs what
+  changes, once: each attempt and catch-up that did something, and a request when it
+  becomes held or overdue.
 
 ## References
 
