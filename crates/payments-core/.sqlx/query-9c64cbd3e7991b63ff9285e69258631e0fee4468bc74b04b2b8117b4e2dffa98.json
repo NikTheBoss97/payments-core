@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO psp_notifications (psp, event_id, payment_id) VALUES ('mock', 'msg_1', $1)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "9c64cbd3e7991b63ff9285e69258631e0fee4468bc74b04b2b8117b4e2dffa98"
+}

@@ -1,0 +1,36 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT n.payment_id,\n                          EXISTS (SELECT 1 FROM payments p WHERE p.id = n.payment_id) AS \"known!\"\n                     FROM psp_notifications n\n                    WHERE n.psp = $1 AND n.event_id = $2",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "payment_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "psp_notifications",
+            "name": "payment_id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "known!",
+        "type_info": "Bool",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      null
+    ]
+  },
+  "hash": "e132a041140a5d566754175cd3c34771eddd73eb16e381c35d0bf7d1a2e64388"
+}
