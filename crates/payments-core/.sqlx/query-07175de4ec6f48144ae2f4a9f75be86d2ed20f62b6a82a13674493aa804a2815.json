@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO payment_requests (id, payment_id, kind, amount) VALUES ($1, $2, 'teleport', 1)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "07175de4ec6f48144ae2f4a9f75be86d2ed20f62b6a82a13674493aa804a2815"
+}

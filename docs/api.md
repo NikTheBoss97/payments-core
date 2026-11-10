@@ -26,6 +26,13 @@ cannot use it. A variable that is set but empty counts as not set.
 | `MOCK_PSP_SIGNING_KEYS` | The keys that sign the provider's notifications, each `whsec_` and the base64 of 24 to 64 bytes, separated by spaces: the current one, and during a rotation the next. | required |
 | `BIND_ADDRESS` | Where to listen. | `127.0.0.1:8080` |
 
+Beside its routes, the server sends the requests recorded for the provider and sweeps
+the payments that wait for it: a step every second and a pass every minute, the first of
+each as it starts ([ADR-0043](adr/0043-the-servers-psp-routes-and-tasks.md),
+[ADR-0044](adr/0044-what-the-senders-task-logs-and-how-it-runs.md)). Its log holds each
+send, lookup and catch-up that did something, and a request once when it waits for an
+operator. If that work ever stops, the server stops with an error, as from a crash.
+
 It never runs migrations. It speaks plain HTTP/1.1, so TLS ends in front of it, and
 in any real deployment it must: a secret sent in the clear is a stolen key. Stopping it
 counts as a crash, which the design already has to survive, so there is no graceful
