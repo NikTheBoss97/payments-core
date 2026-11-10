@@ -921,8 +921,10 @@ name = "payments-core"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "base64",
  "futures-util",
  "getrandom",
+ "hmac",
  "http-body-util",
  "hyper-util",
  "mock-psp",
