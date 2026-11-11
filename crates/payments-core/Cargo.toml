@@ -14,7 +14,7 @@ publish.workspace = true
 axum = { version = "0.8.9", default-features = false, features = ["http1", "tokio"] }
 # The base64 of the keys and the signatures of the PSP's notifications (ADR-0030).
 # sqlx builds this crate already.
-base64 = "0.22"
+base64 = "0.23"
 # The secret of an API key, from the operating system (ADR-0024). uuid builds this
 # crate already.
 getrandom = "0.4"

@@ -14,7 +14,7 @@ publish.workspace = true
 axum = { version = "0.8.9", default-features = false, features = ["http1", "tokio"] }
 # A notification's signature (ADR-0030): the key's base64, the MAC and its hash. sqlx
 # builds these crates already.
-base64 = "0.22"
+base64 = "0.23"
 hmac = "0.13"
 sha2 = { version = "0.11", default-features = false }
 # The business times that facts report, in RFC 3339 (ADR-0022), and the time now.
