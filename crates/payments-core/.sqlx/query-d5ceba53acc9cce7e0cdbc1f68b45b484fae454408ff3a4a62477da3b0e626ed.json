@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT (SELECT count(*) FROM payment_facts) AS \"facts!\",\n                  (SELECT count(*) FROM payment_request_decisions) AS \"decisions!\",\n                  (SELECT count(*) FROM payment_stops) AS \"stops!\"",
+  "query": "SELECT (SELECT count(*) FROM payment_facts) AS \"facts!\",\n                  (SELECT count(*) FROM payment_request_decisions) AS \"decisions!\",\n                  (SELECT count(*) FROM payment_transition_facts) AS \"links!\",\n                  (SELECT count(*) FROM payment_stops) AS \"stops!\"",
   "describe": {
     "columns": [
       {
@@ -17,6 +17,12 @@
       },
       {
         "ordinal": 2,
+        "name": "links!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 3,
         "name": "stops!",
         "type_info": "Int8",
         "origin": "Expression"
@@ -28,8 +34,9 @@
     "nullable": [
       null,
       null,
+      null,
       null
     ]
   },
-  "hash": "6d4b2cf4b3bb0adf3f4c8ef7cc0c56d43056b24a1385f4f8a4b2ed077b51bab6"
+  "hash": "d5ceba53acc9cce7e0cdbc1f68b45b484fae454408ff3a4a62477da3b0e626ed"
 }
