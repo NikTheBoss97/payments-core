@@ -4,6 +4,7 @@
 //! the fake as the sender will post them, and PSPs that answer what the test writes, or
 //! never answer, for what the fake cannot serve.
 
+use std::error::Error;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -22,7 +23,7 @@ use mock_psp::wire::Detail;
 use payments_core::accounts::Psp;
 use payments_core::catch_up::{CaughtUp, catch_up};
 use payments_core::ids::{PaymentId, RequestId};
-use payments_core::money::Currency;
+use payments_core::money::{Currency, PositiveAmount};
 use payments_core::psp::{Outgoing, PspClient};
 use payments_core::requests::{Ask, RecordRequest, RequestKind, record_request};
 use payments_core::sender::{Report, Sender};
@@ -32,6 +33,9 @@ use sqlx::PgPool;
 use sqlx::types::chrono::Utc;
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
+
+use super::payments::{AUTHORIZED, REQUESTED};
+use super::runtime_pool;
 
 /// How long the tests' clients wait for the PSP.
 pub const TIMEOUT: Duration = Duration::from_secs(10);
@@ -105,6 +109,81 @@ pub async fn applied(
     hand_over_and_step(sender, system, &command.request).await;
     psp.approve(command.request.get());
     caught_up(system, psp, payment).await;
+}
+
+/// The PSP's side of a test: a fake, the sender that the server's task would hold for it,
+/// and the system role's pool, which sends and catches up (ADR-0043). Each step that it
+/// takes is one that the server takes.
+pub struct PspSide {
+    pub fake: MockPsp,
+    pub sender: Sender,
+    pub system: PgPool,
+}
+
+impl PspSide {
+    /// Starts a fake on a free local port, with its sender and a pool of the system role.
+    pub async fn start(pool: &PgPool) -> Result<Self, Box<dyn Error>> {
+        let fake = MockPsp::start().await?;
+        Ok(Self {
+            sender: sender_of(&fake),
+            system: runtime_pool(pool).await?,
+            fake,
+        })
+    }
+
+    /// Records `command` as the merchant of `tenant`, and sends it as the server does once
+    /// the route has committed it: the fake holds it, undecided.
+    pub async fn sent(&mut self, tenant: Tenant<'_>, command: &RecordRequest) {
+        record_request(tenant, command)
+            .await
+            .expect("the request can be recorded");
+        hand_over_and_step(&mut self.sender, &self.system, &command.request).await;
+    }
+
+    /// Applies what the fake decided about `payment`, and checks that it applied something.
+    pub async fn caught_up(&self, payment: PaymentId) {
+        caught_up(&self.system, &self.fake, payment).await;
+    }
+
+    /// Records `ask` and takes it through the fake, approved whole, as [`applied`] does.
+    pub async fn applied(&mut self, tenant: Tenant<'_>, payment: PaymentId, ask: Ask) {
+        applied(
+            &self.fake,
+            &mut self.sender,
+            tenant,
+            &self.system,
+            payment,
+            ask,
+        )
+        .await;
+    }
+
+    /// Takes a payment that is `created` to `authorized`: its merchant asks for
+    /// [`REQUESTED`], and the PSP authorizes [`AUTHORIZED`], less than asked (ADR-0016).
+    pub async fn authorized(&mut self, tenant: Tenant<'_>, payment: PaymentId) {
+        let command = RecordRequest {
+            request: RequestId::now_v7(),
+            payment,
+            ask: Ask::Authorize(positive(REQUESTED)),
+        };
+        self.sent(tenant, &command).await;
+        self.fake.approve_for(command.request.get(), AUTHORIZED);
+        self.caught_up(payment).await;
+    }
+
+    /// Takes a payment that is `authorized` to `captured`, for all of [`AUTHORIZED`].
+    pub async fn captured(&mut self, tenant: Tenant<'_>, payment: PaymentId) {
+        self.applied(tenant, payment, Ask::Capture(positive(AUTHORIZED)))
+            .await;
+    }
+
+    pub async fn close(self) {
+        self.system.close().await;
+    }
+}
+
+fn positive(minor: i64) -> PositiveAmount {
+    PositiveAmount::new(minor).expect("a positive amount")
 }
 
 /// What this fake decided about `request`: the PSP's word, to compare with ours.

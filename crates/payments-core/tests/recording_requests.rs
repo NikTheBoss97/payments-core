@@ -5,17 +5,16 @@
 //!
 //! A request moves nothing. These tests check what is recorded, what is refused at once,
 //! and that a request counts while it is in flight, until a fact of the PSP's decides it.
-//! Phase 3's commands set the payments up, and the system role writes the facts that
-//! decide a request, as the catch-up will (ADR-0037).
+//! The payments get there as the server takes them: the fake decides their requests, and
+//! a catch-up applies its decisions (ADR-0043).
 
 mod common;
 
 use std::error::Error;
 
 use common::keys::{answered, key, print, render};
-use common::payments::{
-    AUTHORIZED, REQUESTED, authorize_command, capture_command, create_command, fee_rate, steps,
-};
+use common::payments::{AUTHORIZED, REQUESTED, create_command, fee_rate, steps};
+use common::psp::PspSide;
 use common::{
     INSUFFICIENT_PRIVILEGE, UNIQUE_VIOLATION, assert_violation, merchant_id, request_id,
     runtime_pool, runtime_transaction, sqlstate, tenant_pool, tenant_transaction, transition_id,
@@ -29,7 +28,7 @@ use payments_core::ids::{MerchantId, PaymentId};
 use payments_core::lifecycle::{Event, IllegalTransition, PaymentStatus, Refused};
 use payments_core::money::PositiveAmount;
 use payments_core::payments::{
-    StepCommand, StepError, authorize, cancel, capture, create_payment, lock_key, register_merchant,
+    StepCommand, StepError, cancel, create_payment, lock_key, register_merchant,
 };
 use payments_core::requests::{
     Ask, Conflict, RecordRequest, Refusal, RequestError, RequestKind, RequestOutcome,
@@ -65,25 +64,27 @@ async fn created(
     Ok(command.id)
 }
 
-/// Payment `n`, authorized for [`AUTHORIZED`] by phase 3's step.
+/// Payment `n`, authorized for [`AUTHORIZED`] by the PSP.
 async fn authorized(
+    psp: &mut PspSide,
     me: Tenant<'_>,
     merchant: MerchantId,
     n: u32,
 ) -> Result<PaymentId, Box<dyn Error>> {
     let payment = created(me, merchant, n).await?;
-    authorize(me, &authorize_command(n, payment)).await?;
+    psp.authorized(me, payment).await;
     Ok(payment)
 }
 
-/// Payment `n`, captured for [`AUTHORIZED`], all of which is refundable.
+/// Payment `n`, captured for [`AUTHORIZED`] by the PSP, all of which is refundable.
 async fn captured(
+    psp: &mut PspSide,
     me: Tenant<'_>,
     merchant: MerchantId,
     n: u32,
 ) -> Result<PaymentId, Box<dyn Error>> {
-    let payment = authorized(me, merchant, n).await?;
-    capture(me, &capture_command(n, payment)).await?;
+    let payment = authorized(psp, me, merchant, n).await?;
+    psp.captured(me, payment).await;
     Ok(payment)
 }
 
@@ -155,48 +156,24 @@ async fn requests_stored(pool: &PgPool) -> sqlx::Result<Vec<Stored>> {
         .collect())
 }
 
-/// The PSP's first fact about this payment, which refuses request `n`, written by the
-/// system role as the catch-up will write it (ADR-0037). A refusal makes no step.
-async fn first_fact_refuses(
-    pool: &PgPool,
-    payment: PaymentId,
-    n: u32,
-    kind: RequestKind,
-) -> TestResult {
-    let fact_kind = format!("{kind}_refused");
-    let mut tx = runtime_transaction(pool).await?;
-    sqlx::query!(
-        "INSERT INTO payment_facts (payment_id, position, prev_position, psp, psp_fact_id, kind, amount)
-         VALUES ($1, 1, 1, $2, $3, $4, 0)",
-        payment.get(),
-        "mock",
-        format!("fct_{n}"),
-        fact_kind
-    )
-    .execute(&mut *tx)
-    .await?;
-    sqlx::query!(
-        "INSERT INTO payment_request_decisions (request_id, payment_id, request_kind, position, fact_kind)
-         VALUES ($1, $2, $3, 1, $4)",
-        request_id(n).get(),
-        payment.get(),
-        kind.as_str(),
-        fact_kind
-    )
-    .execute(&mut *tx)
-    .await?;
-    commit(tx).await?;
-    Ok(())
+/// The requests recorded since `before` was read, in the order of their IDs: the test's
+/// own, without those that took its payments to where they start.
+async fn recorded_since(pool: &PgPool, before: &[Stored]) -> sqlx::Result<Vec<Stored>> {
+    let mut stored = requests_stored(pool).await?;
+    stored.retain(|request| !before.contains(request));
+    Ok(stored)
 }
 
 #[sqlx::test]
 async fn a_request_of_each_kind_is_recorded_and_moves_nothing(pool: PgPool) -> TestResult {
     let (tenant, merchant, _) = two_merchants(&pool).await?;
+    let mut psp = PspSide::start(&pool).await?;
     let me = Tenant::new(&tenant, merchant);
     let new = created(me, merchant, 1).await?;
-    let held = authorized(me, merchant, 2).await?;
-    let unwanted = authorized(me, merchant, 3).await?;
-    let paid = captured(me, merchant, 4).await?;
+    let held = authorized(&mut psp, me, merchant, 2).await?;
+    let unwanted = authorized(&mut psp, me, merchant, 3).await?;
+    let paid = captured(&mut psp, me, merchant, 4).await?;
+    let before = requests_stored(&pool).await?;
 
     for (n, payment, ask) in [
         (1, new, Ask::Authorize(amount(REQUESTED))),
@@ -219,11 +196,12 @@ async fn a_request_of_each_kind_is_recorded_and_moves_nothing(pool: PgPool) -> T
     .map(|(n, payment, kind, amount)| {
         (request_id(n).get(), payment.get(), kind.to_owned(), amount)
     });
-    assert_eq!(requests_stored(&pool).await?, expected);
+    assert_eq!(recorded_since(&pool, &before).await?, expected);
     // Only a fact of the PSP's makes a step (ADR-0028).
     for (payment, count) in [(new, 1), (held, 2), (unwanted, 2), (paid, 3)] {
         assert_eq!(steps(&pool, payment).await?, count);
     }
+    psp.close().await;
     tenant.close().await;
     Ok(())
 }
@@ -232,10 +210,12 @@ async fn a_request_of_each_kind_is_recorded_and_moves_nothing(pool: PgPool) -> T
 async fn a_move_that_the_table_or_a_limit_refuses_records_nothing(pool: PgPool) -> TestResult {
     use PaymentStatus as S;
     let (tenant, merchant, _) = two_merchants(&pool).await?;
+    let mut psp = PspSide::start(&pool).await?;
     let me = Tenant::new(&tenant, merchant);
     let new = created(me, merchant, 1).await?;
-    let held = authorized(me, merchant, 2).await?;
-    let paid = captured(me, merchant, 3).await?;
+    let held = authorized(&mut psp, me, merchant, 2).await?;
+    let paid = captured(&mut psp, me, merchant, 3).await?;
+    let before = requests_stored(&pool).await?;
 
     for (n, payment, ask, expected) in [
         (
@@ -284,7 +264,8 @@ async fn a_move_that_the_table_or_a_limit_refuses_records_nothing(pool: PgPool) 
             "request {n}"
         );
     }
-    assert_eq!(requests_stored(&pool).await?, Vec::<Stored>::new());
+    assert_eq!(requests_stored(&pool).await?, before);
+    psp.close().await;
     tenant.close().await;
     Ok(())
 }
@@ -292,22 +273,27 @@ async fn a_move_that_the_table_or_a_limit_refuses_records_nothing(pool: PgPool) 
 #[sqlx::test]
 async fn a_payment_gets_one_authorization_request(pool: PgPool) -> TestResult {
     let (tenant, merchant, _) = two_merchants(&pool).await?;
+    let mut psp = PspSide::start(&pool).await?;
     let me = Tenant::new(&tenant, merchant);
     let payment = created(me, merchant, 1).await?;
-    record_request(me, &request(1, payment, Ask::Authorize(amount(REQUESTED)))).await?;
+    let first = request(1, payment, Ask::Authorize(amount(REQUESTED)));
+    psp.sent(me, &first).await;
 
     // Whatever its amount, a second one conflicts while the first waits for the PSP.
     assert_eq!(
         refusal(me, &request(2, payment, Ask::Authorize(amount(1)))).await,
         Conflict::AuthorizationRequested.into()
     );
-    // Once the payment is authorized, the status refuses it, as it refuses the step.
-    authorize(me, &authorize_command(1, payment)).await?;
+    // Once the PSP has authorized the payment, the status refuses another, as it refuses
+    // the step.
+    psp.fake.approve(first.request.get());
+    psp.caught_up(payment).await;
     assert_eq!(
         refusal(me, &request(3, payment, Ask::Authorize(amount(1)))).await,
         illegal(PaymentStatus::Authorized, Event::Authorize)
     );
     assert_eq!(requests_stored(&pool).await?.len(), 1);
+    psp.close().await;
     tenant.close().await;
     Ok(())
 }
@@ -357,9 +343,12 @@ async fn the_database_refuses_a_second_authorization_request_that_skipped_the_lo
 #[sqlx::test]
 async fn a_capture_or_a_void_waits_for_the_one_in_flight(pool: PgPool) -> TestResult {
     let (tenant, merchant, _) = two_merchants(&pool).await?;
+    let mut psp = PspSide::start(&pool).await?;
     let me = Tenant::new(&tenant, merchant);
-    let payment = authorized(me, merchant, 1).await?;
-    record_request(me, &request(1, payment, Ask::Capture(amount(AUTHORIZED)))).await?;
+    let payment = authorized(&mut psp, me, merchant, 1).await?;
+    let before = requests_stored(&pool).await?;
+    psp.sent(me, &request(1, payment, Ask::Capture(amount(AUTHORIZED))))
+        .await;
 
     assert_eq!(
         refusal(me, &request(2, payment, Ask::Capture(amount(1)))).await,
@@ -370,7 +359,8 @@ async fn a_capture_or_a_void_waits_for_the_one_in_flight(pool: PgPool) -> TestRe
         pending(RequestKind::Capture)
     );
     // The PSP refuses the capture: the payment stays authorized, with nothing in flight.
-    first_fact_refuses(&pool, payment, 1, RequestKind::Capture).await?;
+    psp.fake.refuse(request_id(1).get());
+    psp.caught_up(payment).await;
     assert_eq!(
         record_request(me, &request(4, payment, Ask::Void)).await?,
         recorded(4, payment)
@@ -379,7 +369,8 @@ async fn a_capture_or_a_void_waits_for_the_one_in_flight(pool: PgPool) -> TestRe
         refusal(me, &request(5, payment, Ask::Capture(amount(1)))).await,
         pending(RequestKind::Void)
     );
-    assert_eq!(requests_stored(&pool).await?.len(), 2);
+    assert_eq!(recorded_since(&pool, &before).await?.len(), 2);
+    psp.close().await;
     tenant.close().await;
     Ok(())
 }
@@ -387,9 +378,12 @@ async fn a_capture_or_a_void_waits_for_the_one_in_flight(pool: PgPool) -> TestRe
 #[sqlx::test]
 async fn a_refund_counts_the_refunds_in_flight(pool: PgPool) -> TestResult {
     let (tenant, merchant, _) = two_merchants(&pool).await?;
+    let mut psp = PspSide::start(&pool).await?;
     let me = Tenant::new(&tenant, merchant);
-    let payment = captured(me, merchant, 1).await?;
-    record_request(me, &request(1, payment, Ask::Refund(amount(5_000)))).await?;
+    let payment = captured(&mut psp, me, merchant, 1).await?;
+    let before = requests_stored(&pool).await?;
+    psp.sent(me, &request(1, payment, Ask::Refund(amount(5_000))))
+        .await;
 
     // 8000 refundable, of which 5000 are asked already.
     assert_eq!(
@@ -405,12 +399,14 @@ async fn a_refund_counts_the_refunds_in_flight(pool: PgPool) -> TestResult {
         above(1, 0)
     );
     // The PSP refuses the first, so what it asked can be asked again.
-    first_fact_refuses(&pool, payment, 1, RequestKind::Refund).await?;
+    psp.fake.refuse(request_id(1).get());
+    psp.caught_up(payment).await;
     assert_eq!(
         record_request(me, &request(5, payment, Ask::Refund(amount(5_000)))).await?,
         recorded(5, payment)
     );
-    assert_eq!(requests_stored(&pool).await?.len(), 3);
+    assert_eq!(recorded_since(&pool, &before).await?.len(), 3);
+    psp.close().await;
     tenant.close().await;
     Ok(())
 }
@@ -418,13 +414,15 @@ async fn a_refund_counts_the_refunds_in_flight(pool: PgPool) -> TestResult {
 #[sqlx::test]
 async fn a_stopped_payment_takes_no_request(pool: PgPool) -> TestResult {
     let (tenant, merchant, _) = two_merchants(&pool).await?;
+    let mut psp = PspSide::start(&pool).await?;
     let me = Tenant::new(&tenant, merchant);
     let created = created(me, merchant, 1).await?;
-    let authorized = authorized(me, merchant, 2).await?;
-    let captured = captured(me, merchant, 3).await?;
+    let authorized = authorized(&mut psp, me, merchant, 2).await?;
+    let captured = captured(&mut psp, me, merchant, 3).await?;
     for payment in [created, authorized, captured] {
         stop(&pool, payment).await?;
     }
+    let before = requests_stored(&pool).await?;
 
     // What each status would take, and a refund that the status would refuse: the stop
     // decides first (ADR-0042).
@@ -469,7 +467,8 @@ async fn a_stopped_payment_takes_no_request(pool: PgPool) -> TestResult {
             r#"{"type":"conflict","conflict":"this payment is stopped until an operator looks at it"}"#
         )
     );
-    assert_eq!(requests_stored(&pool).await?, Vec::<Stored>::new());
+    assert_eq!(requests_stored(&pool).await?, before);
+    psp.close().await;
     tenant.close().await;
     Ok(())
 }
@@ -664,8 +663,10 @@ async fn copies_of_one_request_racing_record_it_once(pool: PgPool) -> TestResult
     // Each copy has a fresh ID, and each would be recorded on its own, because a refund of
     // 1 fits many times over: only the key can stop them (ADR-0026).
     let (tenant, merchant, _) = two_merchants(&pool).await?;
+    let mut psp = PspSide::start(&pool).await?;
     let me = Tenant::new(&tenant, merchant);
-    let payment = captured(me, merchant, 1).await?;
+    let payment = captured(&mut psp, me, merchant, 1).await?;
+    let before = requests_stored(&pool).await?;
     let k = key("refund");
     let seal = Seal {
         key: &k,
@@ -695,13 +696,14 @@ async fn copies_of_one_request_racing_record_it_once(pool: PgPool) -> TestResult
         panic!("{winners:?}")
     };
     assert_eq!(
-        requests_stored(&pool).await?,
+        recorded_since(&pool, &before).await?,
         [(winner, payment.get(), "refund".to_owned(), 1)]
     );
     assert_eq!(
         recall(me, &k, print(1)).await?,
         answered(202, &format!(r#"{{"request":"{winner}"}}"#))
     );
+    psp.close().await;
     tenant.close().await;
     Ok(())
 }
@@ -711,8 +713,10 @@ async fn a_request_waits_for_the_payments_lock_and_reads_what_its_holder_committ
     pool: PgPool,
 ) -> TestResult {
     let (tenant, merchant, _) = two_merchants(&pool).await?;
+    let mut psp = PspSide::start(&pool).await?;
     let me = Tenant::new(&tenant, merchant);
-    let payment = authorized(me, merchant, 1).await?;
+    let payment = authorized(&mut psp, me, merchant, 1).await?;
+    let before = requests_stored(&pool).await?;
     // The holder takes the payment's lock and records a capture, as the command would.
     let mut holder = tenant_transaction(&pool, merchant.get()).await?;
     sqlx::query!("SELECT pg_advisory_xact_lock($1)", lock_key(payment))
@@ -746,7 +750,8 @@ async fn a_request_waits_for_the_payments_lock_and_reads_what_its_holder_committ
         ),
         "{result:?}"
     );
-    assert_eq!(requests_stored(&pool).await?.len(), 1);
+    assert_eq!(recorded_since(&pool, &before).await?.len(), 1);
+    psp.close().await;
     tenant.close().await;
     Ok(())
 }
@@ -756,10 +761,12 @@ async fn a_cancel_is_refused_once_an_authorization_is_requested(pool: PgPool) ->
     // A cancellation is a step of our own, which the PSP never hears of: once it may hold
     // an authorization, only a void releases it (ADR-0039).
     let (tenant, merchant, _) = two_merchants(&pool).await?;
+    let mut psp = PspSide::start(&pool).await?;
     let me = Tenant::new(&tenant, merchant);
     let asked = created(me, merchant, 1).await?;
     let unasked = created(me, merchant, 2).await?;
-    record_request(me, &request(1, asked, Ask::Authorize(amount(REQUESTED)))).await?;
+    psp.sent(me, &request(1, asked, Ask::Authorize(amount(REQUESTED))))
+        .await;
     let cancel_of = |n, payment| StepCommand {
         step: transition_id(n),
         payment,
@@ -786,8 +793,10 @@ async fn a_cancel_is_refused_once_an_authorization_is_requested(pool: PgPool) ->
             r#"{"type":"conflict","conflict":"an authorization of this payment was requested already"}"#
         )
     );
-    // Once the payment is authorized, the status refuses the cancel first, as before.
-    authorize(me, &authorize_command(1, asked)).await?;
+    // Once the PSP has authorized the payment, the status refuses the cancel first, as
+    // before.
+    psp.fake.approve(request_id(1).get());
+    psp.caught_up(asked).await;
     let err = cancel(me, &cancel_of(103, asked)).await.unwrap_err();
     assert!(
         matches!(
@@ -802,6 +811,7 @@ async fn a_cancel_is_refused_once_an_authorization_is_requested(pool: PgPool) ->
     // A payment with no request is still cancelled.
     cancel(me, &cancel_of(104, unasked)).await?;
     assert_eq!(steps(&pool, unasked).await?, 2);
+    psp.close().await;
     tenant.close().await;
     Ok(())
 }
