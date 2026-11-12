@@ -18,7 +18,7 @@ publication: its title, authors, year and link.
 | [Idempotency and messaging](idempotency-and-messaging.md) | Idempotency keys, retries, transactional messaging and webhooks. | 34 |
 | [Authentication and tenant isolation](authentication-and-tenancy.md) | API keys, signed messages, least privilege, object-level authorization and row-level security. | 16 |
 | [Payments lifecycle](payments-lifecycle.md) | Payment statuses and state machines, authorization and settlement, compensation and reconciliation. | 12 |
-| [Testing for correctness](testing.md) | Property-based testing, mutation testing, failure injection and testing database guarantees. | 15 |
+| [Testing for correctness](testing.md) | Property-based testing, mutation testing, failure injection and testing database guarantees. | 16 |
 | [Modelling the domain in Rust](rust.md) | Types that carry their invariants, and making illegal states unrepresentable. | 7 |
 | [Benchmarking](benchmarking.md) | Measuring latency and throughput without fooling yourself. | 8 |
 | [Engineering practice](engineering-practice.md) | Continuous integration, the software supply chain, code scanning and recording decisions. | 18 |
