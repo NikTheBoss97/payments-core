@@ -152,6 +152,7 @@ async fn a_new_payment_has_its_terms_its_first_step_and_its_accounts(pool: PgPoo
             fee_rate: BasisPoints::new(250)?,
             status: PaymentStatus::Created,
             refundable: 0,
+            authorization: None,
         })
     );
     let step = sqlx::query!(

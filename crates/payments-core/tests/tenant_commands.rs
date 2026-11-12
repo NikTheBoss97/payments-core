@@ -14,7 +14,8 @@ use std::error::Error;
 
 use common::payments::{
     AUTHORIZED, FEE, Step, authorize_command, balance_of, books, capture_command, committed_at,
-    create_command, eur, fee_rate, refund_command, steps, unbalanced_currencies, uncaused_postings,
+    create_command, deadline, eur, fee_rate, refund_command, steps, unbalanced_currencies,
+    uncaused_postings,
 };
 use common::{
     merchant_id, runtime_pool, runtime_transaction, tenant_pool, tenant_pool_of_one, transition_id,
@@ -27,9 +28,9 @@ use payments_core::ids::{MerchantId, PaymentId};
 use payments_core::lifecycle::PaymentStatus;
 use payments_core::money::{BasisPoints, PositiveAmount};
 use payments_core::payments::{
-    AuthorizeError, CaptureError, CreateError, CreatePayment, Outcome, Payment, Recorded,
-    RefundError, StepCommand, StepError, authorize, cancel, capture, create_payment, decline,
-    expire, find_payment, merchant_fee_rate, refund, register_merchant, settle, void,
+    Authorization, AuthorizeError, CaptureError, CreateError, CreatePayment, Outcome, Payment,
+    Recorded, RefundError, StepCommand, StepError, authorize, cancel, capture, create_payment,
+    decline, expire, find_payment, merchant_fee_rate, refund, register_merchant, settle, void,
 };
 use payments_core::tenancy::Tenant;
 use sqlx::PgPool;
@@ -167,6 +168,10 @@ async fn a_merchant_runs_a_payment_through_its_life(pool: PgPool) -> TestResult 
             fee_rate: fee_rate(),
             status: PaymentStatus::Captured,
             refundable: 5_000,
+            authorization: Some(Authorization {
+                amount: PositiveAmount::new(AUTHORIZED)?,
+                expires_at: deadline(),
+            }),
         })
     );
 

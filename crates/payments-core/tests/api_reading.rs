@@ -16,14 +16,21 @@ use axum::http::{Method, Request, StatusCode};
 use common::api::{
     Pools, a_merchant, a_payment, bearer, get, get_with_authorization, send, unused_webhooks,
 };
-use common::payment_id;
-use common::payments::{authorize_command, capture_command};
+use common::payments::{AUTHORIZED, REQUESTED, authorize_command, capture_command};
+use common::psp::{caught_up, decided, hand_over_and_step, sender_of};
+use common::{payment_id, request_id};
+use mock_psp::MockPsp;
+use mock_psp::wire::Detail;
 use payments_core::api::problem::Problem;
 use payments_core::api::{AppState, router};
 use payments_core::credentials::ApiKeySecret;
+use payments_core::money::PositiveAmount;
 use payments_core::payments::{authorize, capture, find_payment};
+use payments_core::requests::{Ask, RecordRequest, record_request};
 use payments_core::tenancy::Tenant;
+use serde_json::Value;
 use sqlx::PgPool;
+use sqlx::types::chrono::{DateTime, Utc};
 use uuid::Uuid;
 
 type TestResult = Result<(), Box<dyn Error>>;
@@ -46,9 +53,63 @@ async fn a_merchant_reads_its_own_payment(pool: PgPool) -> TestResult {
     assert_eq!(
         reply.body,
         format!(
-            r#"{{"payment_id":"{payment}","psp":"mock","currency":"EUR","amount":10000,"fee_bps":250,"status":"created","refundable":0}}"#
+            r#"{{"payment_id":"{payment}","psp":"mock","currency":"EUR","amount":10000,"fee_bps":250,"status":"created","refundable":0,"authorization":null}}"#
         )
     );
+    pools.close().await;
+    Ok(())
+}
+
+#[sqlx::test]
+async fn a_read_shows_the_authorization_once_the_psp_gives_one(pool: PgPool) -> TestResult {
+    let pools = Pools::login(&pool).await?;
+    let (merchant, secret) = a_merchant(&pools, 1).await?;
+    let payment = a_payment(&pools, merchant, 1).await?;
+    let reply = send(router(pools.state()), read(payment, &secret)).await;
+    let body: Value = serde_json::from_str(&reply.body)?;
+    assert_eq!(body["authorization"], Value::Null, "{reply:?}");
+
+    // The PSP authorizes less than asked, and a catch-up applies it (ADR-0016, ADR-0031).
+    let fake = MockPsp::start().await?;
+    let mut sender = sender_of(&fake);
+    let command = RecordRequest {
+        request: request_id(10),
+        payment,
+        ask: Ask::Authorize(PositiveAmount::new(REQUESTED)?),
+    };
+    record_request(Tenant::new(&pools.tenant, merchant), &command).await?;
+    hand_over_and_step(&mut sender, &pools.system, &command.request).await;
+    fake.approve_for(command.request.get(), AUTHORIZED);
+    caught_up(&pools.system, &fake, payment).await;
+    let Detail::Authorized { expires_at, .. } = decided(&fake, payment, &command.request) else {
+        panic!("the fake authorized it");
+    };
+
+    let reply = send(router(pools.state()), read(payment, &secret)).await;
+    assert_eq!(reply.status, StatusCode::OK, "{reply:?}");
+    let body: Value = serde_json::from_str(&reply.body)?;
+    assert_eq!(body["status"], "authorized");
+    assert_eq!(body["authorization"]["amount"], AUTHORIZED);
+    let written = body["authorization"]["expires_at"]
+        .as_str()
+        .expect("a time is a string");
+    assert!(written.ends_with('Z'), "{written}");
+    assert_eq!(
+        DateTime::parse_from_rfc3339(written)?.with_timezone(&Utc),
+        expires_at
+    );
+    assert_eq!(
+        body["authorization"]
+            .as_object()
+            .map(|authorization| authorization.len()),
+        Some(2)
+    );
+
+    // Another payment of the merchant has none: an authorization is its own payment's.
+    let unauthorized = a_payment(&pools, merchant, 2).await?;
+    let reply = send(router(pools.state()), read(unauthorized, &secret)).await;
+    let body: Value = serde_json::from_str(&reply.body)?;
+    assert_eq!(body["authorization"], Value::Null, "{reply:?}");
     pools.close().await;
     Ok(())
 }

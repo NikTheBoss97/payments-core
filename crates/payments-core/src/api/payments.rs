@@ -377,8 +377,8 @@ async fn attempt_cancel(own: &OwnPayment, request: &KeyedRequest) -> Result<Atte
     after_step(commands::cancel(own.merchant.tenant().sealed(&seal), &command).await)
 }
 
-/// A payment as `GET /payments/{id}` shows it: its terms, its status and what can still be
-/// refunded (ADR-0023).
+/// A payment as `GET /payments/{id}` shows it: its terms, its status, what can still be
+/// refunded (ADR-0023), and its authorization (ADR-0033).
 #[derive(Serialize)]
 struct PaymentView<'a> {
     payment_id: String,
@@ -388,6 +388,15 @@ struct PaymentView<'a> {
     fee_bps: u16,
     status: &'a str,
     refundable: i64,
+    /// `None` until the payment has one.
+    authorization: Option<AuthorizationView>,
+}
+
+/// A payment's authorization: the amount authorized and when it lapses (ADR-0033).
+#[derive(Serialize)]
+struct AuthorizationView {
+    amount: i64,
+    expires_at: String,
 }
 
 /// `GET /payments/{id}`.
@@ -403,6 +412,12 @@ pub(super) async fn read_payment(own: OwnPayment) -> Response {
             fee_bps: payment.fee_rate.get(),
             status: payment.status.as_str(),
             refundable: payment.refundable,
+            authorization: payment
+                .authorization
+                .map(|authorization| AuthorizationView {
+                    amount: authorization.amount.get(),
+                    expires_at: written(authorization.expires_at),
+                }),
         },
     )
 }

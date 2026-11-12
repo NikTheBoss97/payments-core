@@ -91,7 +91,7 @@ async fn a_new_payment_has_the_amount_asked_for_and_the_rate_the_operator_set(
     assert_eq!(
         read.body,
         format!(
-            r#"{{"payment_id":"{payment}","psp":"mock","currency":"USD","amount":1234,"fee_bps":300,"status":"created","refundable":0}}"#
+            r#"{{"payment_id":"{payment}","psp":"mock","currency":"USD","amount":1234,"fee_bps":300,"status":"created","refundable":0,"authorization":null}}"#
         )
     );
     pools.close().await;
