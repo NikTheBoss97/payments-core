@@ -5,7 +5,7 @@
 //!
 //! Each wait is bounded. A step makes its first attempt at a request that it finds after
 //! a jittered delay of up to two seconds, since only a request handed over is sent at
-//! once, and nothing hands one over yet (ADR-0042).
+//! once (ADR-0042).
 
 mod common;
 
@@ -17,9 +17,9 @@ use common::payments::{AUTHORIZED, REQUESTED, create_command, fee_rate, status_o
 use common::psp::{client_of, send};
 use common::{merchant_id, request_id, runtime_pool, tenant_pool};
 use mock_psp::MockPsp;
-use payments_core::background::{Cadence, run};
+use payments_core::background::{Cadence, HANDOVERS, run};
 use payments_core::catch_up::{CaughtUp, catch_up};
-use payments_core::ids::PaymentId;
+use payments_core::ids::{PaymentId, RequestId};
 use payments_core::lifecycle::PaymentStatus;
 use payments_core::money::PositiveAmount;
 use payments_core::payments::{create_payment, register_merchant};
@@ -28,6 +28,7 @@ use payments_core::sender::Sender;
 use payments_core::tenancy::Tenant;
 use sqlx::PgPool;
 use sqlx::types::chrono::Utc;
+use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio::time::sleep;
 use uuid::Uuid;
@@ -82,10 +83,18 @@ impl World {
         Ok(request.request.get())
     }
 
-    /// The task, on this world's system pool and fake, at this cadence.
+    /// The task, on this world's system pool and fake, at this cadence, with no route to
+    /// hand it a request.
     fn task(&self, cadence: Cadence) -> JoinHandle<Infallible> {
+        self.handing_over(cadence).0
+    }
+
+    /// The task, and the routes' end of its handovers.
+    fn handing_over(&self, cadence: Cadence) -> (JoinHandle<Infallible>, mpsc::Sender<RequestId>) {
         let sender = Sender::new(client_of(&self.fake), Utc::now());
-        tokio::spawn(run(self.system.clone(), sender, cadence))
+        let (handovers, handed_over) = mpsc::channel(HANDOVERS);
+        let task = tokio::spawn(run(self.system.clone(), sender, cadence, handed_over));
+        (task, handovers)
     }
 
     async fn close(self, task: JoinHandle<Infallible>) {
@@ -190,6 +199,33 @@ async fn passes_follow_one_another_at_their_cadence(pool: PgPool) -> TestResult 
     sleep(5 * SHORT).await;
     world.fake.approve_for(authorize.request.get(), AUTHORIZED);
     until_status(&world.system, payment, PaymentStatus::Authorized).await?;
+    world.close(task).await;
+    Ok(())
+}
+
+#[sqlx::test]
+async fn a_handover_takes_a_step_between_ticks(pool: PgPool) -> TestResult {
+    // Steps an hour apart: once the first has run, with nothing to find, only a handover can
+    // make another (ADR-0043).
+    let world = World::new(&pool).await?;
+    let (task, handovers) = world.handing_over(Cadence {
+        step: HOUR,
+        pass: HOUR,
+    });
+    sleep(Duration::from_secs(1)).await;
+    let (_, request) = world.requested(1).await?;
+    handovers.send(request_id(1)).await?;
+
+    // Sent at once, and its answer recorded, an hour before the next tick.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while answer_of(&world.system, request.request.get())
+        .await?
+        .as_deref()
+        != Some("acknowledged")
+    {
+        assert!(Instant::now() < deadline, "the handover made no step");
+        sleep(SHORT).await;
+    }
     world.close(task).await;
     Ok(())
 }

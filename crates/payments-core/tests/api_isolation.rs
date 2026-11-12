@@ -16,20 +16,24 @@ use axum::extract::Path;
 use axum::http::{Request, StatusCode};
 use axum::routing::post as post_route;
 use common::api::{
-    Pools, Reply, a_merchant, a_payment, bearer, get_with_authorization, post, records, send,
+    Pools, Reply, a_merchant, a_payment, accepted, bearer, get_with_authorization, post, records,
+    send,
 };
 use common::crashes::balances;
 use common::merchant_id;
-use common::payments::{authorize_command, capture_command, refund_command, steps};
+use common::payments::{AUTHORIZED, requests_of, steps};
+use common::psp::{applied, sender_of};
+use mock_psp::MockPsp;
 use payments_core::api::problem::Problem;
 use payments_core::api::{Merchant, router};
 use payments_core::credentials::ApiKeySecret;
-use payments_core::ids::{MerchantId, PaymentId, TransitionId};
-use payments_core::money::BasisPoints;
+use payments_core::ids::{MerchantId, PaymentId, RequestId, TransitionId};
+use payments_core::money::{BasisPoints, PositiveAmount};
 use payments_core::payments::{
-    AuthorizeError, CaptureError, RefundError, StepCommand, StepError, authorize, cancel, capture,
-    find_payment, merchant_fee_rate, refund, register_merchant, void,
+    StepCommand, StepError, cancel, find_payment, merchant_fee_rate, register_merchant,
 };
+use payments_core::requests::{Ask, RecordRequest, RequestError, record_request};
+use payments_core::sender::Sender;
 use payments_core::tenancy::Tenant;
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -37,9 +41,13 @@ use uuid::Uuid;
 type TestResult = Result<(), Box<dyn Error>>;
 
 const CREATE: &str = r#"{"currency":"EUR","amount":10000}"#;
-const AUTHORIZE: &str = r#"{"amount":8000,"expires_at":"2027-01-01T00:00:00Z"}"#;
-const CAPTURE: &str = r#"{"amount":8000,"captured_at":"2026-12-01T00:00:00Z"}"#;
-const REFUND: &str = r#"{"amount":1,"refunded_at":"2026-12-02T00:00:00Z"}"#;
+const AUTHORIZE: &str = r#"{"amount":8000}"#;
+const CAPTURE: &str = r#"{"amount":8000}"#;
+const REFUND: &str = r#"{"amount":1}"#;
+
+fn amount(minor: i64) -> PositiveAmount {
+    PositiveAmount::new(minor).expect("a positive amount")
+}
 
 /// Turns off row-level security on every table that has it, as the owner, and returns how many
 /// it was. The tenant role keeps its grants, so only the comparison in Rust is left.
@@ -73,7 +81,7 @@ fn command_on(payment: PaymentId, verb: &str, body: &str, secret: &ApiKeySecret)
     post(&path, secret, &format!("{verb}-{payment}"), body.to_owned())
 }
 
-/// Every route that takes a payment's ID, each with a request that would apply.
+/// Every route that takes a payment's ID, each with a request that would take effect.
 fn every_route(payment: PaymentId, secret: &ApiKeySecret) -> Vec<(&'static str, Request<Body>)> {
     vec![
         (
@@ -113,6 +121,7 @@ async fn without_row_level_security_the_comparison_alone_refuses_a_stranger_on_e
         assert_eq!(reply.body, Problem::NotFound.body(), "{route}");
     }
     assert_eq!(steps(&pool, payment).await?, 1);
+    assert_eq!(requests_of(&pool, payment).await?, 0);
     assert_eq!(records(&pool).await?, before);
 
     // The control: the owner gets through the same routes.
@@ -124,7 +133,7 @@ async fn without_row_level_security_the_comparison_alone_refuses_a_stranger_on_e
         command_on(payment, "authorize", AUTHORIZE, &mine),
     )
     .await;
-    assert_eq!(reply.status, StatusCode::OK, "{reply:?}");
+    accepted(&reply, payment);
     pools.close().await;
     Ok(())
 }
@@ -160,7 +169,6 @@ async fn without_row_level_security_two_merchants_still_keep_their_own_keys_and_
     }
     assert_ne!(payments[0], payments[1]);
     assert_eq!(records(&pool).await?, 2);
-
     let me = Tenant::new(&pools.tenant, first);
     assert_eq!(merchant_fee_rate(me).await?, Some(BasisPoints::new(250)?));
     pools.close().await;
@@ -177,39 +185,45 @@ fn outcome<T, E>(result: Result<T, E>, not_found: impl Fn(&E) -> bool) -> &'stat
 }
 
 /// A route that has forgotten the comparison: it takes its merchant from the credential, as it
-/// must, and the payment's ID straight from the path, and runs the library's command. Only
-/// row-level security is left between a stranger and the payment.
+/// must, and the payment's ID straight from the path, and runs the library's command, as the
+/// routes do. Only row-level security is left between a stranger and the payment.
 async fn forgetful(merchant: Merchant, Path((verb, id)): Path<(String, String)>) -> String {
     let id = Uuid::parse_str(&id).expect("a UUID");
     let payment = PaymentId::try_from(id).expect("a payment's ID");
     let me = merchant.tenant();
-    let step = StepCommand {
-        step: TransitionId::now_v7(),
-        payment,
-    };
-    match verb.as_str() {
-        "read" => match find_payment(me, payment).await {
-            Ok(Some(_)) => "applied",
-            Ok(None) => "nothing",
-            Err(_) => "failed",
-        },
-        "authorize" => outcome(authorize(me, &authorize_command(7, payment)).await, |err| {
-            matches!(err, AuthorizeError::NotFound { .. })
-        }),
-        "capture" => outcome(capture(me, &capture_command(7, payment)).await, |err| {
-            matches!(err, CaptureError::NotFound { .. })
-        }),
-        "refund" => outcome(refund(me, &refund_command(7, payment, 1)).await, |err| {
-            matches!(err, RefundError::NotFound { .. })
-        }),
-        "void" => outcome(void(me, &step).await, |err| {
-            matches!(err, StepError::NotFound { .. })
-        }),
-        "cancel" => outcome(cancel(me, &step).await, |err| {
-            matches!(err, StepError::NotFound { .. })
-        }),
+    let ask = match verb.as_str() {
+        "read" => {
+            return match find_payment(me, payment).await {
+                Ok(Some(_)) => "applied",
+                Ok(None) => "nothing",
+                Err(_) => "failed",
+            }
+            .to_owned();
+        }
+        "cancel" => {
+            let step = StepCommand {
+                step: TransitionId::now_v7(),
+                payment,
+            };
+            return outcome(cancel(me, &step).await, |err| {
+                matches!(err, StepError::NotFound { .. })
+            })
+            .to_owned();
+        }
+        "authorize" => Ask::Authorize(amount(AUTHORIZED)),
+        "capture" => Ask::Capture(amount(AUTHORIZED)),
+        "refund" => Ask::Refund(amount(1)),
+        "void" => Ask::Void,
         other => panic!("no such verb: {other}"),
-    }
+    };
+    let command = RecordRequest {
+        request: RequestId::now_v7(),
+        payment,
+        ask,
+    };
+    outcome(record_request(me, &command).await, |err| {
+        matches!(err, RequestError::NotFound { .. })
+    })
     .to_owned()
 }
 
@@ -232,20 +246,25 @@ async fn through_forgetful(
     send(route, request).await
 }
 
-/// A payment of this merchant at the status where each verb would apply.
+/// A payment of this merchant at the status where each verb would take effect, reached
+/// through the fake.
 async fn ready_for(
     pools: &Pools,
+    fake: &MockPsp,
+    sender: &mut Sender,
     merchant: MerchantId,
     verb: &str,
     n: u32,
 ) -> Result<PaymentId, Box<dyn Error>> {
-    let me = Tenant::new(&pools.tenant, merchant);
+    let me = || Tenant::new(&pools.tenant, merchant);
     let payment = a_payment(pools, merchant, n).await?;
     if matches!(verb, "capture" | "refund" | "void") {
-        authorize(me, &authorize_command(n, payment)).await?;
+        let ask = Ask::Authorize(amount(AUTHORIZED));
+        applied(fake, sender, me(), &pools.system, payment, ask).await;
     }
     if verb == "refund" {
-        capture(me, &capture_command(n, payment)).await?;
+        let ask = Ask::Capture(amount(AUTHORIZED));
+        applied(fake, sender, me(), &pools.system, payment, ask).await;
     }
     Ok(payment)
 }
@@ -257,16 +276,25 @@ async fn with_the_comparison_forgotten_row_level_security_alone_refuses_a_strang
     let pools = Pools::login(&pool).await?;
     let (owner, mine) = a_merchant(&pools, 1).await?;
     let (_, theirs) = a_merchant(&pools, 2).await?;
+    let fake = MockPsp::start().await?;
+    let mut sender = sender_of(&fake);
 
     for (n, verb) in (1_u32..).zip(["read", "authorize", "capture", "refund", "void", "cancel"]) {
-        let payment = ready_for(&pools, owner, verb, n).await?;
-        let before = steps(&pool, payment).await?;
+        let payment = ready_for(&pools, &fake, &mut sender, owner, verb, n).await?;
+        let before = (
+            steps(&pool, payment).await?,
+            requests_of(&pool, payment).await?,
+        );
         let money = balances(&pool, owner).await?;
 
         let reply = through_forgetful(&pools, &theirs, verb, payment).await;
         assert_eq!(reply.status, StatusCode::OK, "{verb}: {reply:?}");
         assert_eq!(reply.body, "nothing", "{verb}");
-        assert_eq!(steps(&pool, payment).await?, before, "{verb}");
+        let after = (
+            steps(&pool, payment).await?,
+            requests_of(&pool, payment).await?,
+        );
+        assert_eq!(after, before, "{verb}");
         assert_eq!(balances(&pool, owner).await?, money, "{verb}");
 
         // The control: the route does reach a payment, for the merchant that owns it.

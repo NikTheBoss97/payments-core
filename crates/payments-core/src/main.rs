@@ -19,6 +19,7 @@ use payments_core::sender::Sender;
 use sqlx::PgPool;
 use sqlx::types::chrono::Utc;
 use tokio::net::TcpListener;
+use tokio::sync::mpsc;
 
 /// How long each call to the PSP waits for its answer (ADR-0036, ADR-0042).
 const PSP_TIMEOUT: Duration = Duration::from_secs(10);
@@ -56,9 +57,21 @@ async fn run() -> Result<(), Box<dyn Error>> {
     let system = PgPool::connect(&system_url).await?;
     let listener = TcpListener::bind(&address).await?;
     let sender = Sender::new(sender, Utc::now());
-    let work = tokio::spawn(background::run(system.clone(), sender, Cadence::STANDARD));
+    let (handovers, handed_over) = mpsc::channel(background::HANDOVERS);
+    let work = tokio::spawn(background::run(
+        system.clone(),
+        sender,
+        Cadence::STANDARD,
+        handed_over,
+    ));
     tracing::info!("listening on {}", listener.local_addr()?);
-    let state = AppState::new(tenant, system, operator, Webhooks::new(psp, keys));
+    let state = AppState::new(
+        tenant,
+        system,
+        operator,
+        Webhooks::new(psp, keys),
+        handovers,
+    );
     // The task never returns, so if it ends, it panicked. The server then stops, as from
     // a crash, rather than serve requests that nothing sends (ADR-0044).
     tokio::select! {

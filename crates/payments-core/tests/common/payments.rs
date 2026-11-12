@@ -634,6 +634,16 @@ pub async fn committed_at(
     Ok(step)
 }
 
+/// How many requests to the PSP a payment has recorded.
+pub async fn requests_of(pool: &PgPool, payment: PaymentId) -> sqlx::Result<i64> {
+    sqlx::query_scalar!(
+        r#"SELECT count(*) AS "count!" FROM payment_requests WHERE payment_id = $1"#,
+        payment.get()
+    )
+    .fetch_one(pool)
+    .await
+}
+
 /// How many steps a payment has.
 pub async fn steps(pool: &PgPool, payment: PaymentId) -> sqlx::Result<i64> {
     sqlx::query_scalar!(

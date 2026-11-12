@@ -831,6 +831,7 @@ async fn killed_then_retried(
         system.clone(),
         pools.operator.digest(),
         unused_webhooks(),
+        common::api::unused_handovers(),
     );
     let before = stored(pool).await?;
     plan_death(system, "die_before operator_idempotency_records").await?;

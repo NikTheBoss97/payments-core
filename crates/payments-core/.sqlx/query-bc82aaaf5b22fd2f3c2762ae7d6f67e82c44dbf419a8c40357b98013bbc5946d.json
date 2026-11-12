@@ -1,0 +1,49 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT (SELECT count(*) FROM merchants) AS \"merchants!\",\n                  (SELECT count(*) FROM api_keys) AS \"api_keys!\",\n                  (SELECT count(*) FROM api_key_revocations) AS \"revocations!\",\n                  (SELECT count(*) FROM operator_idempotency_records) AS \"answers!\",\n                  (SELECT count(*) FROM payment_requests) AS \"requests!\"",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "merchants!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 1,
+        "name": "api_keys!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 2,
+        "name": "revocations!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 3,
+        "name": "answers!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 4,
+        "name": "requests!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      null,
+      null,
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "bc82aaaf5b22fd2f3c2762ae7d6f67e82c44dbf419a8c40357b98013bbc5946d"
+}
