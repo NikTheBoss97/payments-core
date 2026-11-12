@@ -163,7 +163,7 @@ a merchant cannot claim them. They arrive with the provider's webhooks.
 
 ### `GET /payments/{id}`
 
-The payment's terms, its status and what can still be refunded.
+The payment's terms, its status, what can still be refunded, and its authorization.
 
 ```json
 {
@@ -172,10 +172,16 @@ The payment's terms, its status and what can still be refunded.
   "currency": "EUR",
   "amount": 10000,
   "fee_bps": 250,
-  "status": "created",
-  "refundable": 0
+  "status": "authorized",
+  "refundable": 0,
+  "authorization": { "amount": 8000, "expires_at": "2026-11-19T10:00:00.123456Z" }
 }
 ```
+
+`authorization` is `null` until the payment has one, and then holds the amount authorized,
+which may be less than the amount asked for, and when the authorization lapses
+([ADR-0033](adr/0033-following-a-request.md)). It is read with the status, so the two
+always agree.
 
 Amounts are integers in minor units. An ID has one spelling, lower case with hyphens,
 and any other is a [`not-found`](#not-found). So are another merchant's payment and no

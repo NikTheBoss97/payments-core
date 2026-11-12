@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT p.merchant_id, p.psp, p.currency AS \"currency!\", p.amount, p.fee_bps,\n                  newest.to_status, newest.refundable\n             FROM payments p\n            CROSS JOIN LATERAL (\n                  SELECT t.to_status, t.refundable\n                    FROM payment_transitions t\n                   WHERE t.payment_id = p.id\n                   ORDER BY t.seq DESC\n                   LIMIT 1\n                  ) newest\n            WHERE p.id = $1",
+  "query": "SELECT p.merchant_id, p.psp, p.currency AS \"currency!\", p.amount, p.fee_bps,\n                  newest.to_status, newest.refundable,\n                  a.amount AS \"authorized?\", a.expires_at AS \"expires_at?\"\n             FROM payments p\n            CROSS JOIN LATERAL (\n                  SELECT t.to_status, t.refundable\n                    FROM payment_transitions t\n                   WHERE t.payment_id = p.id\n                   ORDER BY t.seq DESC\n                   LIMIT 1\n                  ) newest\n             LEFT JOIN payment_authorizations a ON a.payment_id = p.id\n            WHERE p.id = $1",
   "describe": {
     "columns": [
       {
@@ -79,6 +79,28 @@
             "name": "refundable"
           }
         }
+      },
+      {
+        "ordinal": 7,
+        "name": "authorized?",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "payment_authorizations",
+            "name": "amount"
+          }
+        }
+      },
+      {
+        "ordinal": 8,
+        "name": "expires_at?",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "payment_authorizations",
+            "name": "expires_at"
+          }
+        }
       }
     ],
     "parameters": {
@@ -93,8 +115,10 @@
       false,
       false,
       false,
-      false
+      false,
+      true,
+      true
     ]
   },
-  "hash": "9e2cdbfb5d2ab3fba0cfa611a9ff8869e37ec3accd799e18e49c425ba90c118d"
+  "hash": "1628dc5e72e47cce0778cf09434a5e15101569d92a43b78e8d4969c972852d45"
 }

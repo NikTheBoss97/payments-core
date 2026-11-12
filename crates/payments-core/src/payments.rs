@@ -174,6 +174,16 @@ pub struct Payment {
     pub status: PaymentStatus,
     /// What can still be refunded.
     pub refundable: i64,
+    /// Its authorization, once it has one.
+    pub authorization: Option<Authorization>,
+}
+
+/// A payment's authorization: the amount authorized, which may be less than the amount
+/// asked for, and when it lapses (ADR-0016, ADR-0033).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Authorization {
+    pub amount: PositiveAmount,
+    pub expires_at: BusinessTime,
 }
 
 /// Why a payment could not be read.
@@ -203,10 +213,13 @@ pub async fn find_payment<'a>(
         source,
     };
     let mut tx = scope.into().begin().await.map_err(failure)?;
-    // One statement, so the terms and the newest step come from one snapshot.
+    // One statement, so the terms, the newest step and the authorization come from one
+    // snapshot, and a status never shows without its authorization. A payment has at most
+    // one authorization (ADR-0016).
     let row = sqlx::query!(
         r#"SELECT p.merchant_id, p.psp, p.currency AS "currency!", p.amount, p.fee_bps,
-                  newest.to_status, newest.refundable
+                  newest.to_status, newest.refundable,
+                  a.amount AS "authorized?", a.expires_at AS "expires_at?"
              FROM payments p
             CROSS JOIN LATERAL (
                   SELECT t.to_status, t.refundable
@@ -215,6 +228,7 @@ pub async fn find_payment<'a>(
                    ORDER BY t.seq DESC
                    LIMIT 1
                   ) newest
+             LEFT JOIN payment_authorizations a ON a.payment_id = p.id
             WHERE p.id = $1"#,
         id.get()
     )
@@ -234,6 +248,14 @@ pub async fn find_payment<'a>(
             fee_rate: BasisPoints::new(fee_bps).expect("payments_fee_bps_check keeps it in range"),
             status: parse_status(&row.to_status),
             refundable: row.refundable,
+            authorization: row.authorized.map(|amount| Authorization {
+                amount: PositiveAmount::new(amount)
+                    .expect("an authorization is at least 1 and at most the request"),
+                expires_at: stored_time(
+                    row.expires_at
+                        .expect("payment_authorizations.expires_at is NOT NULL"),
+                ),
+            }),
         }
     }))
 }
