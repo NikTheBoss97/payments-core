@@ -16,8 +16,8 @@ use axum::http::{Method, Request, StatusCode};
 use common::api::{
     Pools, a_merchant, a_payment, bearer, get, get_with_authorization, send, unused_webhooks,
 };
-use common::payments::{AUTHORIZED, REQUESTED, authorize_command, capture_command};
-use common::psp::{caught_up, decided, hand_over_and_step, sender_of};
+use common::payments::{AUTHORIZED, REQUESTED};
+use common::psp::{applied, caught_up, decided, hand_over_and_step, sender_of};
 use common::{payment_id, request_id};
 use mock_psp::MockPsp;
 use mock_psp::wire::Detail;
@@ -25,7 +25,7 @@ use payments_core::api::problem::Problem;
 use payments_core::api::{AppState, router};
 use payments_core::credentials::ApiKeySecret;
 use payments_core::money::PositiveAmount;
-use payments_core::payments::{authorize, capture, find_payment};
+use payments_core::payments::find_payment;
 use payments_core::requests::{Ask, RecordRequest, record_request};
 use payments_core::tenancy::Tenant;
 use serde_json::Value;
@@ -120,8 +120,13 @@ async fn a_read_shows_where_a_payment_stands_now(pool: PgPool) -> TestResult {
     let (merchant, secret) = a_merchant(&pools, 1).await?;
     let payment = a_payment(&pools, merchant, 1).await?;
     let me = Tenant::new(&pools.tenant, merchant);
-    authorize(me, &authorize_command(1, payment)).await?;
-    capture(me, &capture_command(1, payment)).await?;
+    // The PSP authorizes and captures it, as the server takes it there (ADR-0043).
+    let fake = MockPsp::start().await?;
+    let mut sender = sender_of(&fake);
+    let amount = PositiveAmount::new(AUTHORIZED)?;
+    for ask in [Ask::Authorize(amount), Ask::Capture(amount)] {
+        applied(&fake, &mut sender, me, &pools.system, payment, ask).await;
+    }
 
     let reply = send(router(pools.state()), read(payment, &secret)).await;
 
