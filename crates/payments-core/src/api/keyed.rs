@@ -9,9 +9,10 @@
 
 use axum::body::Bytes;
 use axum::extract::{FromRequest, Request};
-use axum::http::{HeaderMap, StatusCode, header};
+use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 
 use super::problem::Problem;
@@ -23,6 +24,20 @@ use crate::tenancy::Tenant;
 
 /// How a command's final answer is rendered, for its seal and for this response.
 pub(super) type Render = dyn Fn(Decided<'_>) -> Answer + Sync;
+
+/// What a 202 says: the request that it recorded, and its payment (ADR-0033).
+#[derive(Serialize, Deserialize)]
+pub(super) struct Accepted {
+    pub(super) request_id: String,
+    pub(super) payment_id: String,
+}
+
+impl Accepted {
+    /// Where the merchant follows the request.
+    fn location(&self) -> String {
+        format!("/payments/{}/requests/{}", self.payment_id, self.request_id)
+    }
+}
 
 /// A request's key, what the key would be used for, and its raw body, which the
 /// fingerprint needs as exact bytes. The body is parsed only once the key is free.
@@ -173,10 +188,68 @@ fn respond(answer: &Answer) -> Response {
     } else {
         "application/problem+json"
     };
-    (
+    let mut response = (
         status,
         [(header::CONTENT_TYPE, content_type)],
         answer.body.clone(),
     )
-        .into_response()
+        .into_response();
+    if status == StatusCode::ACCEPTED {
+        // A recorded request: where to follow it comes from the stored body, so that a
+        // replay carries the same headers as the first answer (ADR-0046).
+        let accepted: Accepted = serde_json::from_str(&answer.body)
+            .expect("a stored 202 is the JSON of a recorded request");
+        let headers = response.headers_mut();
+        headers.insert(
+            header::LOCATION,
+            HeaderValue::from_str(&accepted.location())
+                .expect("two hyphenated UUIDs and slashes make a header"),
+        );
+        headers.insert(header::RETRY_AFTER, HeaderValue::from_static("1"));
+    }
+    response
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const ACCEPTED: &str = r#"{"request_id":"019b76da-a800-7000-8000-00000000000a","payment_id":"019b76da-a800-7000-8000-000000000001"}"#;
+
+    #[test]
+    fn a_recorded_requests_answer_says_where_to_follow_it_each_time() {
+        let answer = Answer {
+            status: 202,
+            body: ACCEPTED.to_owned(),
+        };
+        // The first answer and its replay are rendered by the same function.
+        for response in [respond(&answer), respond(&answer)] {
+            assert_eq!(response.status(), StatusCode::ACCEPTED);
+            let headers = response.headers();
+            assert_eq!(
+                headers[header::LOCATION],
+                "/payments/019b76da-a800-7000-8000-000000000001/requests/019b76da-a800-7000-8000-00000000000a"
+            );
+            assert_eq!(headers[header::RETRY_AFTER], "1");
+            assert_eq!(headers[header::CONTENT_TYPE], "application/json");
+        }
+    }
+
+    #[test]
+    fn no_other_answer_names_a_request() {
+        for answer in [
+            Answer {
+                status: 200,
+                body: "{}".to_owned(),
+            },
+            Answer {
+                status: 409,
+                body: "{}".to_owned(),
+            },
+        ] {
+            let response = respond(&answer);
+            assert!(response.headers().get(header::LOCATION).is_none());
+            assert!(response.headers().get(header::RETRY_AFTER).is_none());
+        }
+    }
 }
