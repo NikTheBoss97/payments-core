@@ -228,6 +228,7 @@ async fn a_key_that_cannot_be_looked_up_is_a_503_and_never_a_401(pool: PgPool) -
         pools.tenant.clone(),
         pools.operator.digest(),
         unused_webhooks(),
+        common::api::unused_handovers(),
     );
     let closed = pools.system.clone();
     closed.close().await;
@@ -236,6 +237,7 @@ async fn a_key_that_cannot_be_looked_up_is_a_503_and_never_a_401(pool: PgPool) -
         closed,
         pools.operator.digest(),
         unused_webhooks(),
+        common::api::unused_handovers(),
     );
     for (what, state) in [("broken grant", broken_grant), ("pool gone", gone)] {
         let reply = send(who_route(state), get_with_authorization("/who", &value)).await;

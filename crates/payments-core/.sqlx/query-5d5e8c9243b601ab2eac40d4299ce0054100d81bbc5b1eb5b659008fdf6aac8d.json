@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "ALTER TABLE payment_requests DROP CONSTRAINT refuses_all",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "5d5e8c9243b601ab2eac40d4299ce0054100d81bbc5b1eb5b659008fdf6aac8d"
+}

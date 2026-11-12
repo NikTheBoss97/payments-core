@@ -42,6 +42,10 @@ pub const OPERATOR_KEY_POINTS: [&str; 2] = [
 pub const OPERATOR_AT_COMMIT: &str = "zz_die_at_commit operator_idempotency_records";
 /// During `COMMIT` of a notification's record, which writes no step either.
 pub const NOTIFICATION_AT_COMMIT: &str = "zz_die_at_commit psp_notifications";
+/// The points around a request's own row (ADR-0046).
+pub const REQUEST_POINTS: [&str; 2] = ["die_before payment_requests", "die_after payment_requests"];
+/// During `COMMIT` of a recorded request, which writes no step.
+pub const REQUEST_AT_COMMIT: &str = "zz_die_at_commit payment_requests";
 
 /// Adds the triggers to the test's own database, as the owner. The function runs
 /// as its owner too, the superuser, which may end a session that it opened.
@@ -65,7 +69,8 @@ pub async fn install_crash_points(pool: &PgPool) -> sqlx::Result<()> {
              FOREACH target IN ARRAY ARRAY['accounts', 'payments', 'payment_transitions', \
                  'ledger_transactions', 'ledger_entries', 'payment_authorizations', \
                  'payment_captures', 'payment_refunds', 'idempotency_records', 'merchants', \
-                 'api_keys', 'api_key_revocations', 'operator_idempotency_records'] LOOP \
+                 'api_keys', 'api_key_revocations', 'operator_idempotency_records', \
+                 'payment_requests'] LOOP \
                  EXECUTE format('CREATE TRIGGER die_before BEFORE INSERT ON %I \
                      FOR EACH ROW EXECUTE FUNCTION die_if_planned()', target); \
                  EXECUTE format('CREATE TRIGGER die_after AFTER INSERT ON %I \
@@ -89,6 +94,12 @@ pub async fn install_crash_points(pool: &PgPool) -> sqlx::Result<()> {
     .await?;
     sqlx::query!(
         "CREATE CONSTRAINT TRIGGER zz_die_at_commit AFTER INSERT ON psp_notifications \
+         DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION die_if_planned()"
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query!(
+        "CREATE CONSTRAINT TRIGGER zz_die_at_commit AFTER INSERT ON payment_requests \
          DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION die_if_planned()"
     )
     .execute(pool)

@@ -411,6 +411,7 @@ async fn a_command_that_cannot_be_confirmed_is_a_503_and_the_retry_settles_it(
         pools.system.clone(),
         pools.operator.digest(),
         unused_webhooks(),
+        common::api::unused_handovers(),
     );
     plan_death(&tenant, "die_before idempotency_records").await?;
 

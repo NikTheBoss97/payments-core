@@ -20,13 +20,18 @@ use axum::extract::{Request, State};
 use axum::http::StatusCode;
 use axum::middleware::{self, Next};
 use axum::response::Response;
-use common::api::{Pools, a_merchant, a_payment, bearer, payments_stored, post, records, send};
+use common::api::{
+    Pools, a_merchant, a_payment, accepted, bearer, payments_stored, post, records, send,
+};
 use common::crashes::balances;
-use common::payments::{AUTHORIZED, FEE, authorize_command, steps, take_lock};
+use common::payments::{AUTHORIZED, FEE, requests_of, take_lock};
+use common::psp::{applied, caught_up, sender_of, step};
 use common::{tenant_transaction, wait_for_lock_wait};
+use mock_psp::MockPsp;
 use payments_core::api::router;
 use payments_core::idempotency::Fingerprint;
-use payments_core::payments::authorize;
+use payments_core::money::PositiveAmount;
+use payments_core::requests::Ask;
 use payments_core::tenancy::Tenant;
 use sqlx::PgPool;
 use tokio::io::AsyncWriteExt;
@@ -94,10 +99,13 @@ async fn a_capture_whose_client_hangs_up_still_lands_once_and_a_retry_gets_its_a
     let pools = Pools::login(&pool).await?;
     let (merchant, secret) = a_merchant(&pools, 1).await?;
     let payment = a_payment(&pools, merchant, 1).await?;
+    let fake = MockPsp::start().await?;
+    let mut sender = sender_of(&fake);
     let me = Tenant::new(&pools.tenant, merchant);
-    authorize(me, &authorize_command(1, payment)).await?;
+    let ask = Ask::Authorize(PositiveAmount::new(AUTHORIZED)?);
+    applied(&fake, &mut sender, me, &pools.system, payment, ask).await;
     let path = format!("/payments/{payment}/capture");
-    let body = r#"{"amount":8000,"captured_at":"2026-12-01T00:00:00Z"}"#;
+    let body = r#"{"amount":8000}"#;
 
     let hung_up = Arc::new(Notify::new());
     let address = serve(router(pools.state()), &hung_up).await?;
@@ -118,31 +126,33 @@ async fn a_capture_whose_client_hangs_up_still_lands_once_and_a_retry_gets_its_a
 
     drop(client);
     within("hyper noticing the hang-up", hung_up.notified()).await;
-    assert_eq!(steps(&pool, payment).await?, 2, "it ran before the lock");
+    assert_eq!(
+        requests_of(&pool, payment).await?,
+        1,
+        "it ran before the lock"
+    );
 
     // Only now can the command go on, with nobody left to answer.
     holder.rollback().await?;
     until("the capture landing", || async {
-        Ok(steps(&pool, payment).await? == 3)
+        Ok(requests_of(&pool, payment).await? == 2)
     })
     .await?;
-    assert_eq!(
-        balances(&pools.system, merchant).await?,
-        [AUTHORIZED, FEE - AUTHORIZED, -FEE]
-    );
 
-    // The client's retry finds the answer that nobody received, and moves no more money.
+    // The client's retry finds the answer that nobody received, and records nothing more.
     let reply = send(
         router(pools.state()),
         post(&path, &secret, "k", body.to_owned()),
     )
     .await;
-    assert_eq!(reply.status, StatusCode::OK, "{reply:?}");
-    assert_eq!(
-        reply.body,
-        format!(r#"{{"seq":2,"from":"authorized","to":"captured","refundable":{AUTHORIZED}}}"#)
-    );
-    assert_eq!(steps(&pool, payment).await?, 3);
+    assert_eq!(reply.status, StatusCode::ACCEPTED, "{reply:?}");
+    let capture = accepted(&reply, payment);
+    assert_eq!(requests_of(&pool, payment).await?, 2);
+
+    // Through the PSP, the one capture moves the money once.
+    step(&mut sender, &pools.system).await;
+    fake.approve(capture);
+    caught_up(&pools.system, &fake, payment).await;
     assert_eq!(
         balances(&pools.system, merchant).await?,
         [AUTHORIZED, FEE - AUTHORIZED, -FEE]

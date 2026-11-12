@@ -118,6 +118,7 @@ impl World {
             system,
             self.pools.operator.digest(),
             self.webhooks.clone(),
+            common::api::unused_handovers(),
         );
         let address = serve(router(state)).await;
         self.fake
@@ -281,6 +282,7 @@ async fn every_refusal_is_the_same_problem_and_records_nothing(pool: PgPool) -> 
         pools.system.clone(),
         pools.operator.digest(),
         webhooks_for(&key),
+        common::api::unused_handovers(),
     );
     let body = body_naming(test_uuid(1));
     let mut unsigned = signed(&key, "msg_1", &body);
@@ -335,6 +337,7 @@ async fn a_notification_that_cannot_be_recorded_is_a_503_that_asks_for_it_again(
         closed,
         pools.operator.digest(),
         webhooks_for(&key),
+        common::api::unused_handovers(),
     );
     let body = body_naming(test_uuid(1));
     let reply = send(router(state), signed(&key, "msg_1", &body)).await;
@@ -381,6 +384,7 @@ async fn the_route_records_as_the_system_role_without_the_merchants_pool(
         pools.system.clone(),
         pools.operator.digest(),
         webhooks_for(&key),
+        common::api::unused_handovers(),
     );
     let payment = held_payment(&pools.system, 1).await?;
     let reply = send(

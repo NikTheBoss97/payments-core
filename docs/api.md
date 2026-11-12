@@ -89,15 +89,35 @@ long answers [`unavailable`](#unavailable).
 A body is JSON, whatever its `Content-Type` says, and at most 2 MB. Unknown fields are
 refused, so a misspelt or forbidden one is never silently ignored. Amounts are integers in
 minor units: a fraction or an exponent is refused, even `100.0`. A currency is an ISO 4217
-code in upper case. A time is an RFC 3339 string that names its offset, and it is kept to
-whole microseconds in UTC.
+code in upper case. No body takes a time: the provider's business times come from its own
+history ([ADR-0046](adr/0046-the-four-routes-record-requests.md)).
 
-A command on a payment answers `200` with where the payment now stands: the step's `seq`, the
+A create and a cancel answer with where the payment now stands: the step's `seq`, the
 statuses it moved between, and what can still be refunded.
 
 ```json
-{ "seq": 1, "from": "created", "to": "authorized", "refundable": 0 }
+{ "seq": 1, "from": "created", "to": "voided", "refundable": 0 }
 ```
+
+`authorize`, `capture`, `refund` and `void` ask the provider, so each records a request and
+answers `202` with the request's ID and its payment's
+([ADR-0033](adr/0033-following-a-request.md)). `Location` says where to follow the request,
+and `Retry-After` when to look. A replay under the same key gets the same status, headers
+and bytes. The request goes to the provider once its record has committed, and the payment
+moves only when the provider's history applies it.
+
+```http
+HTTP/1.1 202 Accepted
+Content-Type: application/json
+Location: /payments/019b76da-a800-7000-8000-000000000001/requests/019b76da-a800-7000-8000-00000000000a
+Retry-After: 1
+
+{"request_id":"019b76da-a800-7000-8000-00000000000a","payment_id":"019b76da-a800-7000-8000-000000000001"}
+```
+
+A command that is refused at once records no request: an illegal move, an amount above its
+limit, an authorization already requested, a capture or a void in flight, and a stopped
+payment are each a stored `409` or `422`, as listed under [Problems](#problems).
 
 ### `POST /payments`
 
@@ -122,33 +142,35 @@ operator set, and the provider is the mock until there are others.
 
 ### `POST /payments/{id}/authorize`
 
-Records that the provider authorized the payment, for at most the amount requested. Until
-the provider's webhooks exist, this is the merchant's word for it.
+Asks the provider to authorize the payment, for at most the amount requested. The provider
+may authorize less, and sets when the authorization lapses: the request route and
+[`GET /payments/{id}`](#get-paymentsid) show both once the request applies.
 
 ```json
-{ "amount": 8000, "expires_at": "2027-01-01T00:00:00Z" }
+{ "amount": 8000 }
 ```
 
 ### `POST /payments/{id}/capture`
 
-Records a capture, for at most the amount authorized, and posts it to the ledger.
+Asks the provider to capture, for at most the amount authorized. Once the provider's history
+applies the capture, it is posted to the ledger.
 
 ```json
-{ "amount": 8000, "captured_at": "2026-12-01T00:00:00Z" }
+{ "amount": 8000 }
 ```
 
 ### `POST /payments/{id}/refund`
 
-Records a refund and posts it to the ledger. Below what can still be refunded it is partial,
-and at that amount it is final.
+Asks the provider to refund, for at most what stays refundable once the refunds in flight
+are counted. Below what can still be refunded it is partial, and at that amount it is final.
 
 ```json
-{ "amount": 3000, "refunded_at": "2026-12-02T00:00:00Z" }
+{ "amount": 3000 }
 ```
 
 ### `POST /payments/{id}/void`
 
-Records that an authorization was voided. It takes no body, not even `{}`.
+Asks the provider to void the authorization. It takes no body, not even `{}`.
 
 ### `POST /payments/{id}/cancel`
 
@@ -224,8 +246,7 @@ need.
 
 Another payment's request, another merchant's, none at all and an ID in another spelling
 all read as a [`not-found`](#not-found), and the credential is checked first, as for the
-payment. The four commands above still apply their steps directly, so no route records a
-request yet, and this route finds none until they do.
+payment.
 
 ## The operator's routes
 

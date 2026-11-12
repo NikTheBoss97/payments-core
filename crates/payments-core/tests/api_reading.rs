@@ -165,6 +165,7 @@ async fn the_comparison_in_rust_holds_with_no_row_level_security(pool: PgPool) -
         pools.system.clone(),
         pools.operator.digest(),
         unused_webhooks(),
+        common::api::unused_handovers(),
     );
     assert!(find_payment(&pools.system, payment).await?.is_some());
 

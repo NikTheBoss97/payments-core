@@ -17,7 +17,7 @@ use common::api::{Pools, written};
 use common::crashes::{assert_books_are_whole, balances};
 use common::keys::issued_key;
 use common::payments::{
-    AUTHORIZED, FEE, REQUESTED, create_command, fee_rate, status_of, steps, take_lock,
+    AUTHORIZED, FEE, REQUESTED, create_command, fee_rate, requests_of, status_of, take_lock,
 };
 use common::psp::{client_of, send};
 use common::{merchant_id, request_id, test_uuid, wait_for_lock_waits};
@@ -49,12 +49,13 @@ const BINARY: &str = env!("CARGO_BIN_EXE_payments-core");
 
 const CREATED: &str = "HTTP/1.1 201 Created";
 const OK: &str = "HTTP/1.1 200 OK";
+const ACCEPTED: &str = "HTTP/1.1 202 Accepted";
 const UNAUTHORIZED: &str = "HTTP/1.1 401 Unauthorized";
 
 const REGISTER: &str = r#"{"fee_bps":250}"#;
 const CREATE: &str = r#"{"currency":"EUR","amount":10000}"#;
-const AUTHORIZE: &str = r#"{"amount":8000,"expires_at":"2027-01-01T00:00:00Z"}"#;
-const CAPTURE: &str = r#"{"amount":8000,"captured_at":"2026-12-01T00:00:00Z"}"#;
+const AUTHORIZE: &str = r#"{"amount":8000}"#;
+const CAPTURE: &str = r#"{"amount":8000}"#;
 
 /// How many copies of a request race. The server's pools hold 10 connections, and a copy
 /// waiting on a lock holds one, so all of these can wait at once.
@@ -108,10 +109,27 @@ struct Killed {
 }
 
 impl Killed {
-    /// The binary started again, on another port, under the same operator's digest.
-    async fn restart(self, pool: &PgPool) -> Result<Server, Box<dyn Error>> {
-        Server::launched(pool, self.operator, self.log).await
+    /// The binary started again next to this fake, which delivers to it from then on.
+    async fn restart_next_to(
+        self,
+        pool: &PgPool,
+        fake: &MockPsp,
+    ) -> Result<Server, Box<dyn Error>> {
+        let command = next_to(configured(pool, &self.operator), fake);
+        let server = Server::spawned(command, self.operator, self.log).await?;
+        fake.deliver_to(&format!("http://{}/webhooks/mock", server.address));
+        Ok(server)
     }
+}
+
+/// The binary's configuration with this fake as its PSP: it reads the fake's histories with
+/// the fake's API key, and verifies notifications with the fake's keys.
+fn next_to(mut command: Command, fake: &MockPsp) -> Command {
+    command
+        .env("MOCK_PSP_URL", fake.url())
+        .env("MOCK_PSP_API_KEY", fake.api_key())
+        .env("MOCK_PSP_SIGNING_KEYS", fake.signing_keys().join(" "));
+    command
 }
 
 /// Keeps a stream's lines in the log, so that the process never blocks on a full pipe.
@@ -142,11 +160,7 @@ impl Server {
     /// API key, and verifies notifications with the fake's keys.
     async fn start_next_to(pool: &PgPool, fake: &MockPsp) -> Result<Self, Box<dyn Error>> {
         let operator = ApiKeySecret::generate();
-        let mut command = configured(pool, &operator);
-        command
-            .env("MOCK_PSP_URL", fake.url())
-            .env("MOCK_PSP_API_KEY", fake.api_key())
-            .env("MOCK_PSP_SIGNING_KEYS", fake.signing_keys().join(" "));
+        let command = next_to(configured(pool, &operator), fake);
         let log = Arc::new(Mutex::new(String::new()));
         Self::spawned(command, operator, log).await
     }
@@ -478,9 +492,52 @@ async fn stored_answers(pool: &PgPool) -> sqlx::Result<Vec<String>> {
     .await
 }
 
+/// The binary next to a fake that holds what the binary sends and delivers its notifications
+/// to the binary.
+async fn next_to_a_fake(pool: &PgPool) -> Result<(Server, MockPsp), Box<dyn Error>> {
+    let fake = MockPsp::start().await?;
+    let server = Server::start_next_to(pool, &fake).await?;
+    fake.deliver_to(&format!("http://{}/webhooks/mock", server.address));
+    Ok((server, fake))
+}
+
+/// Takes the request that a 202 named through the fake, as the PSP would: waits, at most 10
+/// seconds, until the fake holds what the binary's task sent, approves it whole, delivers the
+/// notification to the binary, and waits, at most 10 seconds, until the binary's own request
+/// route reads it applied.
+async fn applied_on(server: &Server, fake: &MockPsp, secret: &str, accepted: &str) -> TestResult {
+    let payment = member(accepted, "payment_id");
+    let request = member(accepted, "request_id");
+    let id = Uuid::parse_str(&request)?;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while fake.times_taken(id) == 0 {
+        assert!(
+            Instant::now() < deadline,
+            "the binary never sent request {request}"
+        );
+        sleep(Duration::from_millis(10)).await;
+    }
+    fake.approve(id);
+    delivered_last(fake).await?;
+    let path = format!("/payments/{payment}/requests/{request}");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let (status, body) = server.get(&path, secret).await?;
+        assert_eq!(status, OK, "{body}");
+        if member(&body, "state") == "applied" {
+            return Ok(());
+        }
+        assert!(
+            Instant::now() < deadline,
+            "request {request} never applied: {body}"
+        );
+        sleep(Duration::from_millis(20)).await;
+    }
+}
+
 #[sqlx::test]
 async fn the_whole_flow_runs_on_the_binary_and_moves_the_money_once(pool: PgPool) -> TestResult {
-    let server = Server::start(&pool).await?;
+    let (server, fake) = next_to_a_fake(&pool).await?;
     let operator = server.operator.expose().to_owned();
 
     // The operator takes a merchant on.
@@ -496,37 +553,23 @@ async fn the_whole_flow_runs_on_the_binary_and_moves_the_money_once(pool: PgPool
     assert_eq!(status, CREATED, "{second}");
     assert_eq!(second, format!(r#"{{"api_key_id":"{api_key}"}}"#));
 
-    // The merchant takes a payment through its life, each step sent twice.
+    // The merchant takes a payment through its life, each command sent twice, and the PSP
+    // applies each request (ADR-0046).
     let body = server
         .applied(CREATED, "/payments", &secret, "create", CREATE)
         .await?;
     let payment = member(&body, "payment_id");
     let at = |verb: &str| format!("/payments/{payment}/{verb}");
-    let authorize = at("authorize");
-    let body = server
-        .applied(OK, &authorize, &secret, "authorize", AUTHORIZE)
-        .await?;
-    assert_eq!(
-        body,
-        r#"{"seq":1,"from":"created","to":"authorized","refundable":0}"#
-    );
-    let capture = at("capture");
-    let body = server
-        .applied(OK, &capture, &secret, "capture", CAPTURE)
-        .await?;
-    assert_eq!(
-        body,
-        r#"{"seq":2,"from":"authorized","to":"captured","refundable":8000}"#
-    );
-    let refund = at("refund");
-    let partial = r#"{"amount":3000,"refunded_at":"2026-12-02T00:00:00Z"}"#;
-    let body = server
-        .applied(OK, &refund, &secret, "refund", partial)
-        .await?;
-    assert_eq!(
-        body,
-        r#"{"seq":3,"from":"captured","to":"captured","refundable":5000}"#
-    );
+    for (verb, body) in [
+        ("authorize", AUTHORIZE),
+        ("capture", CAPTURE),
+        ("refund", r#"{"amount":3000}"#),
+    ] {
+        let answer = server
+            .applied(ACCEPTED, &at(verb), &secret, verb, body)
+            .await?;
+        applied_on(&server, &fake, &secret, &answer).await?;
+    }
 
     // The money moved once, whatever was sent twice.
     assert_eq!(
@@ -567,7 +610,7 @@ async fn the_whole_flow_runs_on_the_binary_and_moves_the_money_once(pool: PgPool
 async fn copies_of_every_command_racing_on_the_binary_give_one_effect(pool: PgPool) -> TestResult {
     // On the server's own threads, as far as timing lets them overlap. The two tests below
     // make certain that they do.
-    let server = Server::start(&pool).await?;
+    let (server, fake) = next_to_a_fake(&pool).await?;
     let operator = server.operator.expose().to_owned();
 
     let bodies = server
@@ -595,29 +638,20 @@ async fn copies_of_every_command_racing_on_the_binary_give_one_effect(pool: PgPo
     let id = PaymentId::try_from(Uuid::parse_str(&payment)?)?;
     let at = |verb: &str| format!("/payments/{payment}/{verb}");
 
-    let authorize = at("authorize");
-    let bodies = server
-        .raced(OK, &authorize, &secret, "authorize", AUTHORIZE)
-        .await?;
-    one_answer(&bodies);
-    assert_eq!(steps(&pool, id).await?, 2);
-
-    let capture = at("capture");
-    let bodies = server
-        .raced(OK, &capture, &secret, "capture", CAPTURE)
-        .await?;
-    one_answer(&bodies);
-    assert_eq!(steps(&pool, id).await?, 3);
-
-    // The sharpest: a partial refund still fits after it applies, so without the key each
-    // copy would move the money again.
-    let refund = at("refund");
-    let partial = r#"{"amount":1000,"refunded_at":"2026-12-02T00:00:00Z"}"#;
-    let bodies = server
-        .raced(OK, &refund, &secret, "refund", partial)
-        .await?;
-    one_answer(&bodies);
-    assert_eq!(steps(&pool, id).await?, 4);
+    // The sharpest is the partial refund: it still fits after it is recorded, so without the
+    // key each copy would record another.
+    for (n, (verb, body)) in (1_i64..).zip([
+        ("authorize", AUTHORIZE),
+        ("capture", CAPTURE),
+        ("refund", r#"{"amount":1000}"#),
+    ]) {
+        let bodies = server
+            .raced(ACCEPTED, &at(verb), &secret, verb, body)
+            .await?;
+        let answer = one_answer(&bodies).to_owned();
+        assert_eq!(requests_of(&pool, id).await?, n, "{verb}");
+        applied_on(&server, &fake, &secret, &answer).await?;
+    }
     assert_eq!(
         balances(&pool, merchant_of(&merchant)?).await?,
         [7_000, FEE - 7_000, -FEE]
@@ -674,20 +708,21 @@ async fn copies_held_behind_a_key_at_once_on_the_binary_register_one_merchant(
 }
 
 #[sqlx::test]
-async fn copies_held_behind_a_payments_lock_at_once_on_the_binary_move_the_money_once(
+async fn copies_held_behind_a_payments_lock_at_once_on_the_binary_record_one_request(
     pool: PgPool,
 ) -> TestResult {
     // The test counts every copy of a capture waiting on the payment's lock at the same moment.
-    // The first to get it applies. Each of the others then finds a payment already captured,
-    // loses the race for the key, and rolls back whole, so it gets the first answer and not
-    // a refusal.
+    // The first to get it records the request. Each of the others then finds a capture that
+    // waits for the PSP, loses the race for the key, and rolls back whole, so it gets the
+    // first answer and not a refusal.
     let (secret, payment) = seeded(&pool).await?;
-    let server = Server::start(&pool).await?;
+    let (server, fake) = next_to_a_fake(&pool).await?;
     let authorize = format!("/payments/{payment}/authorize");
     let (status, body) = server
         .post(&authorize, secret.expose(), "authorize", AUTHORIZE)
         .await?;
-    assert_eq!(status, OK, "{body}");
+    assert_eq!(status, ACCEPTED, "{body}");
+    applied_on(&server, &fake, secret.expose(), &body).await?;
     let capture = format!("/payments/{payment}/capture");
     let mut holder = pool.begin().await?;
     take_lock(&mut holder, payment).await?;
@@ -702,12 +737,10 @@ async fn copies_held_behind_a_payments_lock_at_once_on_the_binary_move_the_money
     .await;
 
     released?;
-    let bodies = check_copies(OK, &capture, replies)?;
-    assert_eq!(
-        one_answer(&bodies),
-        r#"{"seq":2,"from":"authorized","to":"captured","refundable":8000}"#
-    );
-    assert_eq!(steps(&pool, payment).await?, 3);
+    let bodies = check_copies(ACCEPTED, &capture, replies)?;
+    let answer = one_answer(&bodies).to_owned();
+    assert_eq!(requests_of(&pool, payment).await?, 2);
+    applied_on(&server, &fake, secret.expose(), &answer).await?;
     assert_eq!(
         balances(&pool, merchant_id(1)).await?,
         [AUTHORIZED, FEE - AUTHORIZED, -FEE]
@@ -751,13 +784,14 @@ async fn what_waits_when_the_server_is_killed_is_gone_and_applies_once_after_a_r
     // neither can have reached its COMMIT when the process goes. Its sessions then roll back,
     // however they end, and the server that comes up next has nothing to clean up.
     let (secret, payment) = seeded(&pool).await?;
-    let server = Server::start(&pool).await?;
+    let (server, fake) = next_to_a_fake(&pool).await?;
     let operator = server.operator.expose().to_owned();
     let authorize = format!("/payments/{payment}/authorize");
     let (status, body) = server
         .post(&authorize, secret.expose(), "authorize", AUTHORIZE)
         .await?;
-    assert_eq!(status, OK, "{body}");
+    assert_eq!(status, ACCEPTED, "{body}");
+    applied_on(&server, &fake, secret.expose(), &body).await?;
     let capture = format!("/payments/{payment}/capture");
 
     let mut holder = pool.begin().await?;
@@ -792,20 +826,17 @@ async fn what_waits_when_the_server_is_killed_is_gone_and_applies_once_after_a_r
     wait_for_sessions_to_end(&pool).await?;
     drop((capturing, registering));
 
-    assert_eq!(steps(&pool, payment).await?, 2);
+    assert_eq!(requests_of(&pool, payment).await?, 1);
     assert_eq!(merchants(&pool).await?, 1);
     assert_eq!(balances(&pool, merchant_id(1)).await?, [0, 0, 0]);
     assert_eq!(stored_answers(&pool).await?.len(), answers);
 
-    let server = killed.restart(&pool).await?;
+    let server = killed.restart_next_to(&pool, &fake).await?;
     let body = server
-        .applied(OK, &capture, secret.expose(), "capture", CAPTURE)
+        .applied(ACCEPTED, &capture, secret.expose(), "capture", CAPTURE)
         .await?;
-    assert_eq!(
-        body,
-        r#"{"seq":2,"from":"authorized","to":"captured","refundable":8000}"#
-    );
-    assert_eq!(steps(&pool, payment).await?, 3);
+    assert_eq!(requests_of(&pool, payment).await?, 2);
+    applied_on(&server, &fake, secret.expose(), &body).await?;
     assert_eq!(
         balances(&pool, merchant_id(1)).await?,
         [AUTHORIZED, FEE - AUTHORIZED, -FEE]
@@ -827,39 +858,45 @@ async fn what_waits_when_the_server_is_killed_is_gone_and_applies_once_after_a_r
 async fn an_answer_that_nobody_received_outlives_the_server_that_gave_it(
     pool: PgPool,
 ) -> TestResult {
-    // The other side of a crash: the capture committed, and the process went before anyone read
-    // its answer. Only the key's record knows, and it needs nothing from the process.
+    // The other side of a crash: the capture's request committed, and the process went before
+    // anyone read its answer. Only the key's record knows, and it needs nothing from the
+    // process. Whether that process sent the request or its handover was lost, the next one
+    // looks the request up before it sends it, so the PSP takes it once (ADR-0042).
     let (secret, payment) = seeded(&pool).await?;
-    let server = Server::start(&pool).await?;
+    let (server, fake) = next_to_a_fake(&pool).await?;
     let authorize = format!("/payments/{payment}/authorize");
     let (status, body) = server
         .post(&authorize, secret.expose(), "authorize", AUTHORIZE)
         .await?;
-    assert_eq!(status, OK, "{body}");
+    assert_eq!(status, ACCEPTED, "{body}");
+    applied_on(&server, &fake, secret.expose(), &body).await?;
     let capture = format!("/payments/{payment}/capture");
 
     let capturing = server
         .sent(&capture, secret.expose(), "capture", CAPTURE)
         .await?;
     let deadline = Instant::now() + Duration::from_secs(10);
-    while steps(&pool, payment).await? < 3 {
-        assert!(Instant::now() < deadline, "the capture did not land");
+    while requests_of(&pool, payment).await? < 2 {
+        assert!(Instant::now() < deadline, "the capture was not recorded");
         sleep(Duration::from_millis(10)).await;
     }
     let killed = server.kill().await?;
     wait_for_sessions_to_end(&pool).await?;
     drop(capturing);
 
-    let server = killed.restart(&pool).await?;
+    let server = killed.restart_next_to(&pool, &fake).await?;
     let (status, body) = server
         .post(&capture, secret.expose(), "capture", CAPTURE)
         .await?;
-    assert_eq!(status, OK, "{body}");
+    assert_eq!(status, ACCEPTED, "{body}");
+    assert_eq!(requests_of(&pool, payment).await?, 2);
+    applied_on(&server, &fake, secret.expose(), &body).await?;
+    let request = Uuid::parse_str(&member(&body, "request_id"))?;
     assert_eq!(
-        body,
-        r#"{"seq":2,"from":"authorized","to":"captured","refundable":8000}"#
+        fake.times_taken(request),
+        1,
+        "the PSP took the capture once"
     );
-    assert_eq!(steps(&pool, payment).await?, 3);
     assert_eq!(
         balances(&pool, merchant_id(1)).await?,
         [AUTHORIZED, FEE - AUTHORIZED, -FEE]
@@ -1356,5 +1393,31 @@ async fn a_login_that_fails_stops_the_binary_and_shows_no_password(pool: PgPool)
     assert!(!succeeded, "{written}");
     assert!(!written.is_empty(), "it stopped without saying why");
     assert!(!written.contains("not-the-password"), "{written}");
+    Ok(())
+}
+
+#[sqlx::test]
+async fn the_binary_sends_a_request_at_its_handover_without_a_lookup(pool: PgPool) -> TestResult {
+    // A request that a step's search finds is looked up before it is sent (ADR-0042), and
+    // here every lookup fails. A request handed over is sent at once, without one, so only
+    // the route's handover can bring this one to the PSP (ADR-0043, ADR-0046).
+    let (secret, payment) = seeded(&pool).await?;
+    let (server, fake) = next_to_a_fake(&pool).await?;
+    fake.fail_next(Route::History, [Failure::InternalError; 100]);
+    let authorize = format!("/payments/{payment}/authorize");
+    let (status, body) = server
+        .post(&authorize, secret.expose(), "authorize", AUTHORIZE)
+        .await?;
+    assert_eq!(status, ACCEPTED, "{body}");
+    let request = Uuid::parse_str(&member(&body, "request_id"))?;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while fake.times_taken(request) == 0 {
+        assert!(
+            Instant::now() < deadline,
+            "the binary never sent the request that its route handed over"
+        );
+        sleep(Duration::from_millis(10)).await;
+    }
+    server.stop().await?;
     Ok(())
 }

@@ -16,8 +16,10 @@ use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use sqlx::PgPool;
+use tokio::sync::mpsc;
 
 use crate::credentials::SecretDigest;
+use crate::ids::RequestId;
 pub use credential::Merchant;
 pub use keyed::KeyedRequest;
 pub use payments::OwnPayment;
@@ -25,29 +27,44 @@ use problem::Problem;
 pub use webhooks::Webhooks;
 
 /// What a request can reach: the two login roles' pools (ADR-0025), what the operator's
-/// secret hashes to, which is all that the server holds of it (ADR-0024), and what the
-/// PSP's route holds (ADR-0043).
+/// secret hashes to, which is all that the server holds of it (ADR-0024), what the PSP's
+/// route holds, and the routes' end of the handover to the sender's task (ADR-0043).
 #[derive(Debug, Clone)]
 pub struct AppState {
     tenant: PgPool,
     system: PgPool,
     operator: SecretDigest,
     webhooks: Webhooks,
+    handovers: mpsc::Sender<RequestId>,
 }
 
 impl AppState {
     /// The pool that merchant routes hold, whose role sees nothing until a transaction
     /// names its merchant, the system role's, for looking a key up, for the operator's
-    /// commands and for the PSP's notifications, the digest of the operator's secret, and
-    /// what the PSP's route holds.
+    /// commands and for the PSP's notifications, the digest of the operator's secret, what
+    /// the PSP's route holds, and where the routes hand a recorded request over.
     #[must_use]
-    pub fn new(tenant: PgPool, system: PgPool, operator: SecretDigest, webhooks: Webhooks) -> Self {
+    pub fn new(
+        tenant: PgPool,
+        system: PgPool,
+        operator: SecretDigest,
+        webhooks: Webhooks,
+        handovers: mpsc::Sender<RequestId>,
+    ) -> Self {
         Self {
             tenant,
             system,
             operator,
             webhooks,
+            handovers,
         }
+    }
+
+    /// Hands a request that this attempt recorded and committed over to the sender's task,
+    /// which sends it at once (ADR-0043). A full or closed channel drops it, and the task's
+    /// search finds the request, which it looks up before it sends (ADR-0042).
+    fn hand_over(&self, request: RequestId) {
+        let _dropped = self.handovers.try_send(request);
     }
 }
 

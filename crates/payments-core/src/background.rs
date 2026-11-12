@@ -16,14 +16,19 @@ use std::time::Duration;
 
 use sqlx::PgPool;
 use sqlx::types::chrono::Utc;
+use tokio::sync::mpsc;
 use tokio::time::{self, MissedTickBehavior};
 use tracing::Level;
 use uuid::Uuid;
 
 use crate::api::problem::chain;
 use crate::catch_up::{CatchUpError, CaughtUp, SweepError, Swept};
-use crate::ids::PaymentId;
+use crate::ids::{PaymentId, RequestId};
 use crate::sender::{Attempt, Report, SearchError, Sender, os_random};
+
+/// How many request IDs the routes can hand over before the task takes them (ADR-0043).
+/// Beyond it, a handover is dropped, and the task's search finds the request.
+pub const HANDOVERS: usize = 1_024;
 
 /// How often the task works (ADR-0043).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -43,10 +48,15 @@ impl Cadence {
 }
 
 /// Runs the sender for as long as the process lives (ADR-0043, ADR-0044): a step every
-/// `cadence.step` and a pass of the sweep every `cadence.pass`, the first of each at
-/// once, and logs what changed. It never returns, so a task that ends has panicked,
-/// which the server reads as a crash.
-pub async fn run(pool: PgPool, mut sender: Sender, cadence: Cadence) -> Infallible {
+/// `cadence.step` and at each handover of `handovers`, a pass of the sweep every
+/// `cadence.pass`, the first step and pass at once, and logs what changed. It never
+/// returns, so a task that ends has panicked, which the server reads as a crash.
+pub async fn run(
+    pool: PgPool,
+    mut sender: Sender,
+    cadence: Cadence,
+    mut handovers: mpsc::Receiver<RequestId>,
+) -> Infallible {
     // A late step delays the next one by a whole period, rather than running the missed
     // ones in a burst (ADR-0044).
     let mut steps = time::interval(cadence.step);
@@ -60,9 +70,19 @@ pub async fn run(pool: PgPool, mut sender: Sender, cadence: Cadence) -> Infallib
         let event = tokio::select! {
             _ = steps.tick() => Event::Step,
             _ = passes.tick() => Event::Pass,
+            Some(request) = handovers.recv() => Event::Handover(request),
         };
         let now = Utc::now();
         let lines = match event {
+            Event::Handover(request) => {
+                // Every ID already queued goes into this one step, so that a burst of
+                // handovers costs one search (ADR-0046).
+                sender.hand_over(&request);
+                while let Ok(request) = handovers.try_recv() {
+                    sender.hand_over(&request);
+                }
+                watch.step(&sender.send_due(&pool, now, &mut os_random).await)
+            }
             Event::Step => watch.step(&sender.send_due(&pool, now, &mut os_random).await),
             Event::Pass => pass(&sender.sweep(&pool, now).await),
         };
@@ -77,10 +97,12 @@ pub async fn run(pool: PgPool, mut sender: Sender, cadence: Cadence) -> Infallib
 }
 
 /// The task's next piece of work.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug)]
 enum Event {
     Step,
     Pass,
+    /// A route recorded this request and committed it.
+    Handover(RequestId),
 }
 
 /// One line of the task's log, and its level: a warning is something that failed, or

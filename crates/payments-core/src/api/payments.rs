@@ -3,12 +3,11 @@
 //! A merchant's routes (ADR-0023), and the one extractor that gives every
 //! `/payments/{id}` route its ID (ADR-0025).
 
-use axum::extract::FromRequestParts;
+use axum::extract::{FromRequestParts, State};
 use axum::http::request::Parts;
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use serde::{Deserialize, Serialize};
-use sqlx::types::chrono::{DateTime, Utc};
 
 use super::keyed::{Accepted, Attempt, KeyedRequest};
 use super::path_id::{PathId, PathRequestId};
@@ -16,15 +15,17 @@ use super::problem::Problem;
 use super::{AppState, Merchant};
 use crate::accounts::Psp;
 use crate::idempotency::{Answer, Decided};
-use crate::ids::{AccountId, PaymentId, RequestId, TransactionId, TransitionId};
+use crate::ids::{AccountId, PaymentId, RequestId, TransitionId};
 use crate::lifecycle::Refused;
 use crate::money::{Currency, PositiveAmount};
 use crate::payments::{
-    self as commands, AccountCandidates, Authorize, AuthorizeError, Capture, CaptureError,
-    CreateError, CreatePayment, Outcome, Payment, Recorded, Refund, RefundError, StepCommand,
-    StepError, create_payment, find_payment, merchant_fee_rate,
+    self as commands, AccountCandidates, CreateError, CreatePayment, Outcome, Payment, Recorded,
+    StepCommand, StepError, create_payment, find_payment, merchant_fee_rate,
 };
-use crate::requests::{Applied, Conflict, Followed, Refusal, Standing, find_request};
+use crate::requests::{
+    Applied, Ask, Conflict, Followed, RecordRequest, Refusal, RequestError, RequestOutcome,
+    Standing, find_request, record_request,
+};
 use crate::times::BusinessTime;
 
 /// A payment of the merchant that asked. A route that takes one cannot reach another
@@ -205,128 +206,96 @@ fn amount_of(minor: i64) -> Result<PositiveAmount, Problem> {
     PositiveAmount::new(minor).map_err(|_| Problem::MalformedBody)
 }
 
-/// An RFC 3339 string as a business time, which proves that it can be stored (ADR-0022).
-/// It has to name its offset.
-fn time_of(text: &str) -> Result<BusinessTime, Problem> {
-    let time = DateTime::parse_from_rfc3339(text).map_err(|_| Problem::MalformedBody)?;
-    BusinessTime::new(time.with_timezone(&Utc)).map_err(|_| Problem::MalformedBody)
-}
-
-/// The body of `POST /payments/{id}/authorize`.
+/// The body of a request that asks the PSP for an amount: `authorize`, `capture` and
+/// `refund`. The PSP's business times come from its facts, so a body that still names one is
+/// refused, as any unknown field is (ADR-0046).
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct AuthorizeBody {
+struct AmountBody {
     amount: i64,
-    expires_at: String,
 }
 
-/// `POST /payments/{id}/authorize`, the merchant's stand-in for the PSP's answer until
-/// phase 4 (ADR-0023).
-pub(super) async fn authorize(own: OwnPayment, request: KeyedRequest) -> Response {
+/// `POST /payments/{id}/authorize`: records a request to authorize the payment (ADR-0028).
+pub(super) async fn authorize(
+    State(state): State<AppState>,
+    own: OwnPayment,
+    request: KeyedRequest,
+) -> Response {
     request
-        .answer(own.merchant.tenant(), || attempt_authorize(&own, &request))
+        .answer(own.merchant.tenant(), || {
+            attempt_with_amount(&state, &own, &request, Ask::Authorize)
+        })
         .await
 }
 
-async fn attempt_authorize(own: &OwnPayment, request: &KeyedRequest) -> Result<Attempt, Problem> {
-    let body: AuthorizeBody = request.body_as()?;
-    let command = Authorize {
-        step: TransitionId::now_v7(),
+/// `POST /payments/{id}/capture`: records a request to capture it.
+pub(super) async fn capture(
+    State(state): State<AppState>,
+    own: OwnPayment,
+    request: KeyedRequest,
+) -> Response {
+    request
+        .answer(own.merchant.tenant(), || {
+            attempt_with_amount(&state, &own, &request, Ask::Capture)
+        })
+        .await
+}
+
+/// `POST /payments/{id}/refund`: records a request to refund it.
+pub(super) async fn refund(
+    State(state): State<AppState>,
+    own: OwnPayment,
+    request: KeyedRequest,
+) -> Response {
+    request
+        .answer(own.merchant.tenant(), || {
+            attempt_with_amount(&state, &own, &request, Ask::Refund)
+        })
+        .await
+}
+
+/// A request whose body names its amount.
+async fn attempt_with_amount(
+    state: &AppState,
+    own: &OwnPayment,
+    request: &KeyedRequest,
+    ask: fn(PositiveAmount) -> Ask,
+) -> Result<Attempt, Problem> {
+    let body: AmountBody = request.body_as()?;
+    attempt_request(state, own, request, ask(amount_of(body.amount)?)).await
+}
+
+/// Records a request to the PSP, under the payment's lock and the key's seal, and once it has
+/// committed hands it over to the sender's task, only if this attempt recorded it (ADR-0028,
+/// ADR-0043, ADR-0046). Each attempt has a fresh ID, so `AlreadyRecorded` is never reached
+/// through HTTP, and it would hold the same answer.
+async fn attempt_request(
+    state: &AppState,
+    own: &OwnPayment,
+    request: &KeyedRequest,
+    ask: Ask,
+) -> Result<Attempt, Problem> {
+    let command = RecordRequest {
+        request: RequestId::now_v7(),
         payment: own.id,
-        amount: amount_of(body.amount)?,
-        expires_at: time_of(&body.expires_at)?,
+        ask,
     };
     let seal = request.seal(&decided);
-    let scope = own.merchant.tenant().sealed(&seal);
-    match commands::authorize(scope, &command).await {
-        Ok(outcome) => Ok(applied(outcome)),
-        Err(AuthorizeError::Refused(refusal)) => Ok(refused(refusal)),
-        Err(AuthorizeError::KeyTaken) => Ok(Attempt::KeyTaken),
-        Err(AuthorizeError::NotFound { .. }) => Err(Problem::NotFound),
-        Err(err @ AuthorizeError::NotConfirmed { .. }) => Err(Problem::Unavailable.because(&err)),
-        Err(err @ (AuthorizeError::Mismatch { .. } | AuthorizeError::Invariant { .. })) => {
+    match record_request(own.merchant.tenant().sealed(&seal), &command).await {
+        Ok(RequestOutcome::Recorded(recorded)) => {
+            state.hand_over(command.request);
+            Ok(Attempt::Answered(decided(Decided::Requested(&recorded))))
+        }
+        Ok(RequestOutcome::AlreadyRecorded(recorded)) => {
+            Ok(Attempt::Answered(decided(Decided::Requested(&recorded))))
+        }
+        Err(RequestError::Refused(refusal)) => Ok(refused(refusal)),
+        Err(RequestError::KeyTaken) => Ok(Attempt::KeyTaken),
+        Err(RequestError::NotFound { .. }) => Err(Problem::NotFound),
+        Err(err @ RequestError::NotConfirmed { .. }) => Err(Problem::Unavailable.because(&err)),
+        Err(err @ (RequestError::Mismatch { .. } | RequestError::Invariant { .. })) => {
             Err(Problem::Internal.because(&err))
         }
-    }
-}
-
-/// The body of `POST /payments/{id}/capture`.
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct CaptureBody {
-    amount: i64,
-    captured_at: String,
-}
-
-/// `POST /payments/{id}/capture`.
-pub(super) async fn capture(own: OwnPayment, request: KeyedRequest) -> Response {
-    request
-        .answer(own.merchant.tenant(), || attempt_capture(&own, &request))
-        .await
-}
-
-async fn attempt_capture(own: &OwnPayment, request: &KeyedRequest) -> Result<Attempt, Problem> {
-    let body: CaptureBody = request.body_as()?;
-    let command = Capture {
-        step: TransitionId::now_v7(),
-        posting: TransactionId::now_v7(),
-        payment: own.id,
-        amount: amount_of(body.amount)?,
-        captured_at: time_of(&body.captured_at)?,
-    };
-    let seal = request.seal(&decided);
-    let scope = own.merchant.tenant().sealed(&seal);
-    match commands::capture(scope, &command).await {
-        Ok(outcome) => Ok(applied(outcome)),
-        Err(CaptureError::Refused(refusal)) => Ok(refused(refusal)),
-        Err(CaptureError::KeyTaken) => Ok(Attempt::KeyTaken),
-        Err(CaptureError::NotFound { .. }) => Err(Problem::NotFound),
-        Err(err @ CaptureError::NotConfirmed { .. }) => Err(Problem::Unavailable.because(&err)),
-        Err(
-            err @ (CaptureError::MissingAccount { .. }
-            | CaptureError::Mismatch { .. }
-            | CaptureError::Invariant { .. }),
-        ) => Err(Problem::Internal.because(&err)),
-    }
-}
-
-/// The body of `POST /payments/{id}/refund`.
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RefundBody {
-    amount: i64,
-    refunded_at: String,
-}
-
-/// `POST /payments/{id}/refund`.
-pub(super) async fn refund(own: OwnPayment, request: KeyedRequest) -> Response {
-    request
-        .answer(own.merchant.tenant(), || attempt_refund(&own, &request))
-        .await
-}
-
-async fn attempt_refund(own: &OwnPayment, request: &KeyedRequest) -> Result<Attempt, Problem> {
-    let body: RefundBody = request.body_as()?;
-    let command = Refund {
-        step: TransitionId::now_v7(),
-        posting: TransactionId::now_v7(),
-        payment: own.id,
-        amount: amount_of(body.amount)?,
-        refunded_at: time_of(&body.refunded_at)?,
-    };
-    let seal = request.seal(&decided);
-    let scope = own.merchant.tenant().sealed(&seal);
-    match commands::refund(scope, &command).await {
-        Ok(outcome) => Ok(applied(outcome)),
-        Err(RefundError::Refused(refusal)) => Ok(refused(refusal)),
-        Err(RefundError::KeyTaken) => Ok(Attempt::KeyTaken),
-        Err(RefundError::NotFound { .. }) => Err(Problem::NotFound),
-        Err(err @ RefundError::NotConfirmed { .. }) => Err(Problem::Unavailable.because(&err)),
-        Err(
-            err @ (RefundError::MissingAccount { .. }
-            | RefundError::Mismatch { .. }
-            | RefundError::Invariant { .. }),
-        ) => Err(Problem::Internal.because(&err)),
     }
 }
 
@@ -355,17 +324,19 @@ fn after_step(result: Result<Outcome, StepError>) -> Result<Attempt, Problem> {
     }
 }
 
-/// `POST /payments/{id}/void`.
-pub(super) async fn void(own: OwnPayment, request: KeyedRequest) -> Response {
+/// `POST /payments/{id}/void`: records a request to void the authorization. It takes no
+/// body, as before.
+pub(super) async fn void(
+    State(state): State<AppState>,
+    own: OwnPayment,
+    request: KeyedRequest,
+) -> Response {
     request
-        .answer(own.merchant.tenant(), || attempt_void(&own, &request))
+        .answer(own.merchant.tenant(), || async {
+            request.no_body()?;
+            attempt_request(&state, &own, &request, Ask::Void).await
+        })
         .await
-}
-
-async fn attempt_void(own: &OwnPayment, request: &KeyedRequest) -> Result<Attempt, Problem> {
-    let command = step_command(own, request)?;
-    let seal = request.seal(&decided);
-    after_step(commands::void(own.merchant.tenant().sealed(&seal), &command).await)
 }
 
 /// `POST /payments/{id}/cancel`.
@@ -528,6 +499,8 @@ pub(super) fn json_text(value: &impl Serialize) -> String {
 
 #[cfg(test)]
 mod tests {
+    use sqlx::types::chrono::DateTime;
+
     use super::*;
     use crate::requests::RequestKind;
 

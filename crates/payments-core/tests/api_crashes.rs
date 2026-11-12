@@ -4,8 +4,10 @@
 //!
 //! The library's crash tests show what a command leaves behind. These show what a client is
 //! told. At every point its answer is a 503 that says nothing of the cause, nothing written in
-//! the transaction stays, and sending the request again under its key applies it once. A late
-//! copy then gets that answer and changes nothing.
+//! the transaction stays, and sending the request again under its key takes effect once: a
+//! step for a create or a cancel, a recorded request for the four commands that ask the PSP
+//! (ADR-0046). A late copy then gets that answer and changes nothing. Payments reach where a
+//! command starts from through the fake (ADR-0043).
 
 mod common;
 
@@ -13,36 +15,40 @@ use std::error::Error;
 
 use axum::http::StatusCode;
 use common::api::{
-    Pools, Reply, a_merchant, a_payment, bearer, get_with_authorization, post, send,
+    Pools, Reply, a_merchant, a_payment, accepted, bearer, get_with_authorization, post, send,
     unused_webhooks,
 };
 use common::crashes::{
-    AT_COMMIT, ATTEMPTS, OPERATOR_AT_COMMIT, OPERATOR_KEY_POINTS, POSTING_POINTS, Role,
-    STEP_POINTS, assert_books_are_whole, balances, install_crash_points, kill_during_commit,
-    plan_death, slow_commit_pool, stored,
+    AT_COMMIT, ATTEMPTS, OPERATOR_AT_COMMIT, OPERATOR_KEY_POINTS, REQUEST_AT_COMMIT,
+    REQUEST_POINTS, Role, STEP_POINTS, assert_books_are_whole, balances, install_crash_points,
+    kill_during_commit, plan_death, slow_commit_pool, stored,
 };
 use common::keys::issued_key;
-use common::payments::{AUTHORIZED, FEE, authorize_command, capture_command, steps, take_lock};
+use common::payments::{AUTHORIZED, FEE, requests_of, take_lock};
+use common::psp::{applied, sender_of};
 use common::{
     api_key_id, merchant_id, payment_id, runtime_pool_of_one, tenant_pool_of_one,
     tenant_transaction, wait_for_lock_wait,
 };
 use futures_util::future::join;
+use mock_psp::MockPsp;
 use payments_core::api::problem::Problem;
 use payments_core::api::{AppState, router};
 use payments_core::credentials::ApiKeySecret;
 use payments_core::idempotency::Fingerprint;
 use payments_core::ids::{MerchantId, PaymentId};
-use payments_core::payments::{authorize, capture};
+use payments_core::money::PositiveAmount;
+use payments_core::requests::Ask;
+use payments_core::sender::Sender;
 use payments_core::tenancy::Tenant;
 use sqlx::PgPool;
 
 type TestResult = Result<(), Box<dyn Error>>;
 
 const CREATE: &str = r#"{"currency":"EUR","amount":10000}"#;
-const AUTHORIZE: &str = r#"{"amount":8000,"expires_at":"2027-01-01T00:00:00Z"}"#;
-const CAPTURE: &str = r#"{"amount":8000,"captured_at":"2026-12-01T00:00:00Z"}"#;
-const REFUND: &str = r#"{"amount":3000,"refunded_at":"2026-12-02T00:00:00Z"}"#;
+const AUTHORIZE: &str = r#"{"amount":8000}"#;
+const CAPTURE: &str = r#"{"amount":8000}"#;
+const REFUND: &str = r#"{"amount":3000}"#;
 const REGISTER: &str = r#"{"fee_bps":250}"#;
 
 /// The points around a merchant's key's own row.
@@ -51,22 +57,29 @@ const KEY_POINTS: [&str; 2] = [
     "die_after idempotency_records",
 ];
 
-/// How many rows hold what a merchant's request and an operator's write in their transactions.
-/// A request that died must leave these as they were.
-type Rows = ([i64; 8], [i64; 4]);
+/// How many rows hold what a merchant's request and an operator's write in their transactions,
+/// a request to the PSP among them. A request that died must leave these as they were.
+type Rows = ([i64; 8], [i64; 5]);
 
 async fn rows(pool: &PgPool) -> sqlx::Result<Rows> {
     let row = sqlx::query!(
         r#"SELECT (SELECT count(*) FROM merchants) AS "merchants!",
                   (SELECT count(*) FROM api_keys) AS "api_keys!",
                   (SELECT count(*) FROM api_key_revocations) AS "revocations!",
-                  (SELECT count(*) FROM operator_idempotency_records) AS "answers!""#
+                  (SELECT count(*) FROM operator_idempotency_records) AS "answers!",
+                  (SELECT count(*) FROM payment_requests) AS "requests!""#
     )
     .fetch_one(pool)
     .await?;
     Ok((
         stored(pool).await?,
-        [row.merchants, row.api_keys, row.revocations, row.answers],
+        [
+            row.merchants,
+            row.api_keys,
+            row.revocations,
+            row.answers,
+            row.requests,
+        ],
     ))
 }
 
@@ -167,38 +180,93 @@ enum Start {
     Captured,
 }
 
-impl Start {
-    /// Payment `n` of this merchant, there through the library.
-    async fn payment(
-        self,
-        pools: &Pools,
-        merchant: MerchantId,
-        n: u32,
-    ) -> Result<PaymentId, Box<dyn Error>> {
-        let me = Tenant::new(&pools.tenant, merchant);
-        let payment = a_payment(pools, merchant, n).await?;
-        if matches!(self, Self::Authorized | Self::Captured) {
-            authorize(me, &authorize_command(n, payment)).await?;
-        }
-        if matches!(self, Self::Captured) {
-            capture(me, &capture_command(n, payment)).await?;
-        }
-        Ok(payment)
+/// A fake PSP and the sender that the server's task would hold.
+struct Psp {
+    fake: MockPsp,
+    sender: Sender,
+}
+
+impl Psp {
+    async fn start() -> Result<Self, Box<dyn Error>> {
+        let fake = MockPsp::start().await?;
+        Ok(Self {
+            sender: sender_of(&fake),
+            fake,
+        })
     }
 }
 
+impl Start {
+    /// Payment `n` of this merchant, there through the fake.
+    async fn payment(
+        self,
+        pools: &Pools,
+        psp: &mut Psp,
+        merchant: MerchantId,
+        n: u32,
+    ) -> Result<PaymentId, Box<dyn Error>> {
+        let me = || Tenant::new(&pools.tenant, merchant);
+        let payment = a_payment(pools, merchant, n).await?;
+        let amount = PositiveAmount::new(AUTHORIZED)?;
+        if matches!(self, Self::Authorized | Self::Captured) {
+            let ask = Ask::Authorize(amount);
+            applied(
+                &psp.fake,
+                &mut psp.sender,
+                me(),
+                &pools.system,
+                payment,
+                ask,
+            )
+            .await;
+        }
+        if matches!(self, Self::Captured) {
+            let ask = Ask::Capture(amount);
+            applied(
+                &psp.fake,
+                &mut psp.sender,
+                me(),
+                &pools.system,
+                payment,
+                ask,
+            )
+            .await;
+        }
+        Ok(payment)
+    }
+
+    /// How many requests the payment has recorded at this start.
+    fn requests(self) -> i64 {
+        match self {
+            Self::Created => 0,
+            Self::Authorized => 1,
+            Self::Captured => 2,
+        }
+    }
+}
+
+/// What a command answers once it settles.
+#[derive(Clone, Copy)]
+enum Answer<'a> {
+    /// A recorded request's 202, whose IDs are fresh on each attempt (ADR-0046).
+    Accepted,
+    /// A step of our own, with this body.
+    Step(&'a str),
+}
+
 /// Kills this command at each point, each on a payment of its own, and checks its answer. It
-/// returns how many applied.
+/// returns how many settled.
 async fn killed_at_every_point(
     pool: &PgPool,
     start: Start,
     verb: &str,
     body: &str,
     points: &[&str],
-    answer: &str,
+    answer: Answer<'_>,
 ) -> Result<i64, Box<dyn Error>> {
     let (pools, tenant) = merchant_side(pool).await?;
     let (merchant, secret) = a_merchant(&pools, 1).await?;
+    let mut psp = Psp::start().await?;
     let kills = Kills {
         pool,
         session: &tenant,
@@ -207,30 +275,55 @@ async fn killed_at_every_point(
             pools.system.clone(),
             pools.operator.digest(),
             unused_webhooks(),
+            common::api::unused_handovers(),
         ),
     };
-    let mut applied = 0;
+    let mut settled_count = 0;
     for (n, point) in (1_u32..).zip(points) {
-        let payment = start.payment(&pools, merchant, n).await?;
+        let payment = start.payment(&pools, &mut psp, merchant, n).await?;
         let path = format!("/payments/{payment}/{verb}");
         let key = format!("{verb}-{n}");
         let settled = kills
             .killed_then_settled(point, &path, &secret, &key, body)
             .await?;
-        assert_eq!(
-            settled.first.status,
-            StatusCode::OK,
-            "{point}: {:?}",
-            settled.first
-        );
-        assert_eq!(settled.first.body, answer, "{point}");
-        assert_eq!(settled.late.body, answer, "{point}");
-        applied += 1;
+        match answer {
+            Answer::Accepted => {
+                accepted(&settled.first, payment);
+                assert_eq!(settled.late.body, settled.first.body, "{point}");
+                assert_eq!(settled.late.headers, settled.first.headers, "{point}");
+                assert_eq!(
+                    requests_of(pool, payment).await?,
+                    start.requests() + 1,
+                    "{point}"
+                );
+            }
+            Answer::Step(body) => {
+                assert_eq!(
+                    settled.first.status,
+                    StatusCode::OK,
+                    "{point}: {:?}",
+                    settled.first
+                );
+                assert_eq!(settled.first.body, body, "{point}");
+                assert_eq!(settled.late.body, body, "{point}");
+            }
+        }
+        settled_count += 1;
     }
     assert_books_are_whole(pool).await?;
     tenant.close().await;
     pools.close().await;
-    Ok(applied)
+    Ok(settled_count)
+}
+
+/// The points of a command that records a request: around the request's row and the key's,
+/// and in the commit.
+fn request_points() -> Vec<&'static str> {
+    REQUEST_POINTS
+        .into_iter()
+        .chain(KEY_POINTS)
+        .chain([REQUEST_AT_COMMIT])
+        .collect()
 }
 
 #[sqlx::test]
@@ -244,6 +337,7 @@ async fn a_create_killed_anywhere_is_a_503_and_the_retry_settles_it(pool: PgPool
             pools.system.clone(),
             pools.operator.digest(),
             unused_webhooks(),
+            common::api::unused_handovers(),
         ),
     };
     let points = [
@@ -281,22 +375,13 @@ async fn a_create_killed_anywhere_is_a_503_and_the_retry_settles_it(pool: PgPool
 async fn an_authorization_killed_anywhere_is_a_503_and_the_retry_settles_it(
     pool: PgPool,
 ) -> TestResult {
-    let points: Vec<&str> = STEP_POINTS
-        .into_iter()
-        .chain([
-            "die_before payment_authorizations",
-            "die_after payment_authorizations",
-        ])
-        .chain(KEY_POINTS)
-        .chain([AT_COMMIT])
-        .collect();
     killed_at_every_point(
         &pool,
         Start::Created,
         "authorize",
         AUTHORIZE,
-        &points,
-        r#"{"seq":1,"from":"created","to":"authorized","refundable":0}"#,
+        &request_points(),
+        Answer::Accepted,
     )
     .await?;
     Ok(())
@@ -306,30 +391,17 @@ async fn an_authorization_killed_anywhere_is_a_503_and_the_retry_settles_it(
 async fn a_capture_killed_anywhere_is_a_503_moves_no_money_and_the_retry_settles_it(
     pool: PgPool,
 ) -> TestResult {
-    let points: Vec<&str> = STEP_POINTS
-        .into_iter()
-        .chain(POSTING_POINTS)
-        .chain(["die_before payment_captures", "die_after payment_captures"])
-        .chain(KEY_POINTS)
-        .chain([AT_COMMIT])
-        .collect();
-    let captures = killed_at_every_point(
+    // A recorded capture moves no money: only the PSP's history does (ADR-0031).
+    killed_at_every_point(
         &pool,
         Start::Authorized,
         "capture",
         CAPTURE,
-        &points,
-        r#"{"seq":2,"from":"authorized","to":"captured","refundable":8000}"#,
+        &request_points(),
+        Answer::Accepted,
     )
     .await?;
-    assert_eq!(
-        balances(&pool, merchant_id(1)).await?,
-        [
-            captures * AUTHORIZED,
-            captures * (FEE - AUTHORIZED),
-            -captures * FEE
-        ]
-    );
+    assert_eq!(balances(&pool, merchant_id(1)).await?, [0, 0, 0]);
     Ok(())
 }
 
@@ -337,30 +409,23 @@ async fn a_capture_killed_anywhere_is_a_503_moves_no_money_and_the_retry_settles
 async fn a_refund_killed_anywhere_is_a_503_moves_no_money_and_the_retry_settles_it(
     pool: PgPool,
 ) -> TestResult {
-    // The sharpest case: a partial refund still fits after it applies, so a late copy would
-    // move the money twice if the key did not stop it.
-    let points: Vec<&str> = STEP_POINTS
-        .into_iter()
-        .chain(POSTING_POINTS)
-        .chain(["die_before payment_refunds", "die_after payment_refunds"])
-        .chain(KEY_POINTS)
-        .chain([AT_COMMIT])
-        .collect();
-    let refunds = killed_at_every_point(
+    // The sharpest case: a partial refund still fits after it is recorded, so a late copy
+    // would record a second if the key did not stop it. The money is the captures' alone.
+    let payments = killed_at_every_point(
         &pool,
         Start::Captured,
         "refund",
         REFUND,
-        &points,
-        r#"{"seq":3,"from":"captured","to":"captured","refundable":5000}"#,
+        &request_points(),
+        Answer::Accepted,
     )
     .await?;
     assert_eq!(
         balances(&pool, merchant_id(1)).await?,
         [
-            refunds * (AUTHORIZED - 3_000),
-            refunds * (FEE - AUTHORIZED + 3_000),
-            -refunds * FEE
+            payments * AUTHORIZED,
+            payments * (FEE - AUTHORIZED),
+            -payments * FEE
         ]
     );
     Ok(())
@@ -368,18 +433,13 @@ async fn a_refund_killed_anywhere_is_a_503_moves_no_money_and_the_retry_settles_
 
 #[sqlx::test]
 async fn a_void_killed_anywhere_is_a_503_and_the_retry_settles_it(pool: PgPool) -> TestResult {
-    let points: Vec<&str> = STEP_POINTS
-        .into_iter()
-        .chain(KEY_POINTS)
-        .chain([AT_COMMIT])
-        .collect();
     killed_at_every_point(
         &pool,
         Start::Authorized,
         "void",
         "",
-        &points,
-        r#"{"seq":2,"from":"authorized","to":"voided","refundable":0}"#,
+        &request_points(),
+        Answer::Accepted,
     )
     .await?;
     Ok(())
@@ -398,7 +458,7 @@ async fn a_cancel_killed_anywhere_is_a_503_and_the_retry_settles_it(pool: PgPool
         "cancel",
         "",
         &points,
-        r#"{"seq":1,"from":"created","to":"voided","refundable":0}"#,
+        Answer::Step(r#"{"seq":1,"from":"created","to":"voided","refundable":0}"#),
     )
     .await?;
     Ok(())
@@ -408,9 +468,10 @@ async fn a_cancel_killed_anywhere_is_a_503_and_the_retry_settles_it(pool: PgPool
 async fn a_refusal_killed_as_it_is_stored_is_decided_again(pool: PgPool) -> TestResult {
     // A client that was never answered has been told nothing, so deciding again is right, and
     // it is only a stored refusal that is final. Here the payment moves on in between, so the
-    // same request now applies.
+    // same request is now recorded.
     let (pools, tenant) = merchant_side(&pool).await?;
     let (merchant, secret) = a_merchant(&pools, 1).await?;
+    let mut psp = Psp::start().await?;
     let kills = Kills {
         pool: &pool,
         session: &tenant,
@@ -419,25 +480,24 @@ async fn a_refusal_killed_as_it_is_stored_is_decided_again(pool: PgPool) -> Test
             pools.system.clone(),
             pools.operator.digest(),
             unused_webhooks(),
+            common::api::unused_handovers(),
         ),
     };
     for (n, point) in (1_u32..).zip(KEY_POINTS) {
-        let payment = Start::Created.payment(&pools, merchant, n).await?;
+        let payment = Start::Created
+            .payment(&pools, &mut psp, merchant, n)
+            .await?;
         let path = format!("/payments/{payment}/capture");
         let key = format!("capture-{n}");
         kills.killed(point, &path, &secret, &key, CAPTURE).await?;
 
         let me = Tenant::new(&pools.tenant, merchant);
-        authorize(me, &authorize_command(n, payment)).await?;
+        let ask = Ask::Authorize(PositiveAmount::new(AUTHORIZED)?);
+        applied(&psp.fake, &mut psp.sender, me, &pools.system, payment, ask).await;
 
         let settled = kills.settled(point, &path, &secret, &key, CAPTURE).await?;
-        assert_eq!(
-            settled.first.status,
-            StatusCode::OK,
-            "{point}: {:?}",
-            settled.first
-        );
-        assert_eq!(steps(&pool, payment).await?, 3, "{point}");
+        accepted(&settled.first, payment);
+        assert_eq!(requests_of(&pool, payment).await?, 2, "{point}");
     }
     assert_books_are_whole(&pool).await?;
     tenant.close().await;
@@ -466,7 +526,10 @@ async fn a_capture_killed_while_it_waits_for_the_lock_can_be_sent_again(
 ) -> TestResult {
     let pools = Pools::login(&pool).await?;
     let (merchant, secret) = a_merchant(&pools, 1).await?;
-    let payment = Start::Authorized.payment(&pools, merchant, 1).await?;
+    let mut psp = Psp::start().await?;
+    let payment = Start::Authorized
+        .payment(&pools, &mut psp, merchant, 1)
+        .await?;
     let path = format!("/payments/{payment}/capture");
     let mut holder = pool.begin().await?;
     take_lock(&mut holder, payment).await?;
@@ -481,14 +544,11 @@ async fn a_capture_killed_while_it_waits_for_the_lock_can_be_sent_again(
     assert_eq!(reply.status, StatusCode::SERVICE_UNAVAILABLE, "{reply:?}");
     assert_eq!(reply.body, Problem::Unavailable.body());
     holder.rollback().await?;
-    assert_eq!(steps(&pool, payment).await?, 2);
+    assert_eq!(requests_of(&pool, payment).await?, 1);
 
     let reply = send(router(pools.state()), post(&path, &secret, "k", CAPTURE)).await;
-    assert_eq!(reply.status, StatusCode::OK, "{reply:?}");
-    assert_eq!(
-        balances(&pool, merchant).await?,
-        [AUTHORIZED, FEE - AUTHORIZED, -FEE]
-    );
+    accepted(&reply, payment);
+    assert_eq!(requests_of(&pool, payment).await?, 2);
     assert_books_are_whole(&pool).await?;
     pools.close().await;
     Ok(())
@@ -539,21 +599,24 @@ async fn a_capture_whose_commit_commits_and_loses_its_session_gets_its_answer(
 ) -> TestResult {
     // The hardest point. The server loses its session for a transaction that committed, so it
     // cannot tell, and it answers 503. Only the key's record says what happened: the retry
-    // finds the answer and moves nothing. A kill that lands too early leaves nothing, and the
-    // retry applies. Every attempt, hit or miss, must end with the money moved exactly once.
+    // finds the answer and records nothing. A kill that lands too early leaves nothing, and the
+    // retry records the request. Every attempt, hit or miss, must end with one request.
     let pools = Pools::login(&pool).await?;
     let (merchant, secret) = a_merchant(&pools, 1).await?;
+    let mut psp = Psp::start().await?;
     let app = slow_commit_pool(&pool, Role::Tenant).await?;
     let state = AppState::new(
         app.clone(),
         pools.system.clone(),
         pools.operator.digest(),
         unused_webhooks(),
+        common::api::unused_handovers(),
     );
-    let answer = r#"{"seq":2,"from":"authorized","to":"captured","refundable":8000}"#;
     let mut hits = 0;
     for n in 1..=ATTEMPTS {
-        let payment = Start::Authorized.payment(&pools, merchant, n).await?;
+        let payment = Start::Authorized
+            .payment(&pools, &mut psp, merchant, n)
+            .await?;
         let path = format!("/payments/{payment}/capture");
         let key = format!("capture-{n}");
         // The last kill may have ended the session, and a new one has a new ID.
@@ -568,31 +631,22 @@ async fn a_capture_whose_commit_commits_and_loses_its_session_gets_its_answer(
         .await;
         killed?;
         if reply.status == StatusCode::SERVICE_UNAVAILABLE {
-            if steps(&pool, payment).await? == 3 {
+            if requests_of(&pool, payment).await? == 2 {
                 hits += 1;
             }
             let reply = send(router(state.clone()), post(&path, &secret, &key, CAPTURE)).await;
-            assert_eq!(reply.status, StatusCode::OK, "attempt {n}: {reply:?}");
-            assert_eq!(reply.body, answer, "attempt {n}");
+            accepted(&reply, payment);
         } else {
-            assert_eq!(reply.status, StatusCode::OK, "attempt {n}: {reply:?}");
-            assert_eq!(reply.body, answer, "attempt {n}");
+            accepted(&reply, payment);
         }
-        assert_eq!(steps(&pool, payment).await?, 3, "attempt {n}");
+        assert_eq!(requests_of(&pool, payment).await?, 2, "attempt {n}");
     }
     assert!(
         hits > 0,
         "no kill landed inside a commit in {ATTEMPTS} attempts"
     );
-    let attempts = i64::from(ATTEMPTS);
-    assert_eq!(
-        balances(&pool, merchant).await?,
-        [
-            attempts * AUTHORIZED,
-            attempts * (FEE - AUTHORIZED),
-            -attempts * FEE
-        ]
-    );
+    // The requests moved no money: only the PSP's history does (ADR-0031).
+    assert_eq!(balances(&pool, merchant).await?, [0, 0, 0]);
     assert_books_are_whole(&pool).await?;
     app.close().await;
     pools.close().await;
@@ -620,6 +674,7 @@ async fn a_registration_killed_anywhere_is_a_503_and_the_retry_settles_it(
             system.clone(),
             pools.operator.digest(),
             unused_webhooks(),
+            common::api::unused_handovers(),
         ),
     };
     let points = ["die_before merchants", "die_after merchants"]
@@ -641,7 +696,7 @@ async fn a_registration_killed_anywhere_is_a_503_and_the_retry_settles_it(
         assert_eq!(settled.late.body, settled.first.body, "{point}");
         registered += 1;
     }
-    assert_eq!(rows(&pool).await?.1, [registered, 0, 0, registered]);
+    assert_eq!(rows(&pool).await?.1, [registered, 0, 0, registered, 0]);
     system.close().await;
     pools.close().await;
     Ok(())
@@ -669,6 +724,7 @@ async fn an_issue_killed_anywhere_is_a_503_and_the_retry_shows_the_secret_once(
             system.clone(),
             pools.operator.digest(),
             unused_webhooks(),
+            common::api::unused_handovers(),
         ),
     };
     let path = format!("/merchants/{merchant}/api-keys");
@@ -712,6 +768,7 @@ async fn a_revocation_killed_anywhere_is_a_503_that_leaves_the_key_working_and_t
             system.clone(),
             pools.operator.digest(),
             unused_webhooks(),
+            common::api::unused_handovers(),
         ),
     };
     let points = [
@@ -760,6 +817,7 @@ async fn a_registration_whose_commit_commits_and_loses_its_session_gets_its_answ
         app.clone(),
         pools.operator.digest(),
         unused_webhooks(),
+        common::api::unused_handovers(),
     );
     let mut hits = 0;
     for n in 1..=ATTEMPTS {
@@ -790,7 +848,7 @@ async fn a_registration_whose_commit_commits_and_loses_its_session_gets_its_answ
         assert_eq!(again.body, first.body, "attempt {n}");
         assert_eq!(
             rows(&pool).await?.1,
-            [before[0] + 1, 0, 0, before[3] + 1],
+            [before[0] + 1, 0, 0, before[3] + 1, before[4]],
             "attempt {n}"
         );
     }

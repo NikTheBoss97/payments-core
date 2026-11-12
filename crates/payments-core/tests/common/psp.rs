@@ -24,8 +24,9 @@ use payments_core::catch_up::{CaughtUp, catch_up};
 use payments_core::ids::{PaymentId, RequestId};
 use payments_core::money::Currency;
 use payments_core::psp::{Outgoing, PspClient};
-use payments_core::requests::{Ask, RecordRequest, RequestKind};
+use payments_core::requests::{Ask, RecordRequest, RequestKind, record_request};
 use payments_core::sender::{Report, Sender};
+use payments_core::tenancy::Tenant;
 use serde_json::json;
 use sqlx::PgPool;
 use sqlx::types::chrono::Utc;
@@ -61,6 +62,16 @@ pub async fn hand_over_and_step(
         .expect("the requests that wait for the PSP can be listed")
 }
 
+/// Takes a step of `sender` now, which finds the requests that wait, looks each up and
+/// sends it, as the server's task does for a request whose handover was lost (ADR-0042).
+/// Every jitter is drawn as zero, so nothing waits.
+pub async fn step(sender: &mut Sender, system: &PgPool) -> Report {
+    sender
+        .send_due(system, Utc::now(), &mut || 0)
+        .await
+        .expect("the requests that wait for the PSP can be listed")
+}
+
 /// Catches `payment` up with what this fake decided, as the catch-up after a notification
 /// does (ADR-0031), and checks that it applied something.
 pub async fn caught_up(system: &PgPool, psp: &MockPsp, payment: PaymentId) {
@@ -71,6 +82,29 @@ pub async fn caught_up(system: &PgPool, psp: &MockPsp, payment: PaymentId) {
         matches!(caught_up, CaughtUp::Current { applied: 1.. }),
         "{caught_up:?}"
     );
+}
+
+/// Records `ask` on `payment` as the merchant of `tenant`, and takes it through this fake as
+/// the server does: handed over and sent, approved whole, and caught up (ADR-0043).
+pub async fn applied(
+    psp: &MockPsp,
+    sender: &mut Sender,
+    tenant: Tenant<'_>,
+    system: &PgPool,
+    payment: PaymentId,
+    ask: Ask,
+) {
+    let command = RecordRequest {
+        request: RequestId::now_v7(),
+        payment,
+        ask,
+    };
+    record_request(tenant, &command)
+        .await
+        .expect("the request can be recorded");
+    hand_over_and_step(sender, system, &command.request).await;
+    psp.approve(command.request.get());
+    caught_up(system, psp, payment).await;
 }
 
 /// What this fake decided about `request`: the PSP's word, to compare with ours.

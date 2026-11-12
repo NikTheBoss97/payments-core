@@ -13,13 +13,15 @@ use mock_psp::signing::SigningKey;
 use payments_core::accounts::Psp;
 use payments_core::api::{AppState, Webhooks};
 use payments_core::credentials::{ApiKeySecret, SecretDigest};
-use payments_core::ids::{MerchantId, PaymentId};
+use payments_core::ids::{MerchantId, PaymentId, RequestId};
 use payments_core::notifications::SigningKeys;
 use payments_core::payments::{create_payment, register_merchant};
 use payments_core::psp::PspClient;
 use payments_core::tenancy::Tenant;
 use sqlx::PgPool;
+use tokio::sync::mpsc;
 use tower::ServiceExt;
+use uuid::Uuid;
 
 use super::keys::issued_key;
 use super::payments::{create_command, fee_rate};
@@ -172,6 +174,36 @@ pub fn unused_webhooks() -> Webhooks {
     )
 }
 
+/// A recorded request's answer (ADR-0033, ADR-0046): a 202 with the request's ID and its
+/// payment's, where to follow the request, and when to look. Returns the request's ID.
+#[track_caller]
+pub fn accepted(reply: &Reply, payment: PaymentId) -> Uuid {
+    assert_eq!(reply.status, StatusCode::ACCEPTED, "{reply:?}");
+    assert_eq!(reply.header("content-type"), "application/json");
+    let body: serde_json::Value = serde_json::from_str(&reply.body).expect("a JSON body");
+    let request = body["request_id"]
+        .as_str()
+        .expect("the request's ID")
+        .to_owned();
+    assert_eq!(
+        reply.body,
+        format!(r#"{{"request_id":"{request}","payment_id":"{payment}"}}"#)
+    );
+    assert_eq!(
+        reply.header("location"),
+        format!("/payments/{payment}/requests/{request}")
+    );
+    assert_eq!(reply.header("retry-after"), "1");
+    Uuid::parse_str(&request).expect("a UUID")
+}
+
+/// The routes' end of a handover whose task is gone, for a test that sends what the
+/// routes record through a step's search, or sends nothing: every handover is dropped, as
+/// from a full channel (ADR-0043).
+pub fn unused_handovers() -> mpsc::Sender<RequestId> {
+    mpsc::channel(1).0
+}
+
 /// The two login roles' pools, as the server holds them (ADR-0025), and the operator's
 /// secret, of which the server holds the digest (ADR-0024). The system role's connections
 /// act through `SET ROLE`, so close both before the test returns.
@@ -196,6 +228,7 @@ impl Pools {
             self.system.clone(),
             self.operator.digest(),
             unused_webhooks(),
+            unused_handovers(),
         )
     }
 
