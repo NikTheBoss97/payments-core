@@ -2,7 +2,7 @@
 
 # ADR-0043: The server's PSP routes and tasks
 
-- Status: accepted; partly superseded by ADR-0044
+- Status: accepted; partly superseded by ADR-0044 and ADR-0045
 - Date: 2026-11-10
 
 ## Context
@@ -140,6 +140,12 @@ How the catch-ups that notifications start are bounded:
   last, and in an outage each request that finds no token, so the task logs what
   changes, once: each attempt and catch-up that did something, and a request when it
   becomes held or overdue.
+- 2026-11-12: ADR-0045 supersedes "Three pull requests": the third is split in two.
+  The third adds the read side, the request route, the authorization in
+  `GET /payments/{id}` and the tests' helpers that take a request through the fake, and
+  a fourth switches the four routes and moves the API's document, the quickstart and
+  phase 3's HTTP tests onto the fake. Until the fourth, the four routes apply their steps
+  as in phase 3.
 
 ## References
 

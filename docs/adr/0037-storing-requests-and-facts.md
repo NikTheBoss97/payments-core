@@ -2,7 +2,7 @@
 
 # ADR-0037: Storing requests and facts
 
-- Status: accepted; partly superseded by ADR-0042
+- Status: accepted; partly superseded by ADR-0042 and ADR-0045
 - Date: 2026-11-08
 
 ## Context
@@ -99,6 +99,11 @@ The PSP's answer to a send:
   payment, under the payment's lock and as the merchant, so the merchant's role reads
   its own payments' stops, under a policy that tests `EXISTS` on `payments`. It still
   has no privilege on the notifications or the links of steps.
+- 2026-11-12: ADR-0045 supersedes, in "Who sees what", the links of steps among the
+  tables on which a merchant has no privilege. The request route shows an applied
+  request's business time, which only the link from its fact to a step reaches, so the
+  merchant's role reads its own payments' links, under a policy that tests `EXISTS` on
+  `payments`. It still has no privilege on the notifications.
 
 ## References
 
