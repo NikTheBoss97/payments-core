@@ -9,6 +9,7 @@ use axum::http::request::Parts;
 use uuid::Uuid;
 
 use super::problem::Problem;
+use crate::ids::RequestId;
 
 /// The ID that a request's path names `id`, in the one spelling that the API uses. Any other
 /// spelling of a real ID reads as no such thing, because one thing has one path: a retry that
@@ -21,6 +22,18 @@ impl<S: Send + Sync, T: TryFrom<Uuid>> FromRequestParts<S> for PathId<T> {
 
     async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Problem> {
         named(parts, state, "id").await.map(Self)
+    }
+}
+
+/// The ID that a request's path names `request_id`, read as [`PathId`] reads `id`.
+#[derive(Debug)]
+pub(super) struct PathRequestId(pub(super) RequestId);
+
+impl<S: Send + Sync> FromRequestParts<S> for PathRequestId {
+    type Rejection = Problem;
+
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Problem> {
+        named(parts, state, "request_id").await.map(Self)
     }
 }
 

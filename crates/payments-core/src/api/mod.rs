@@ -65,6 +65,10 @@ pub fn router(state: AppState) -> Router {
         .route("/payments/{id}/refund", post(payments::refund))
         .route("/payments/{id}/void", post(payments::void))
         .route("/payments/{id}/cancel", post(payments::cancel))
+        .route(
+            "/payments/{id}/requests/{request_id}",
+            get(payments::read_request),
+        )
         .route("/webhooks/mock", post(webhooks::receive))
         .fallback(no_such_route)
         .method_not_allowed_fallback(wrong_method)
