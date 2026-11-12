@@ -146,6 +146,9 @@ How the catch-ups that notifications start are bounded:
   a fourth switches the four routes and moves the API's document, the quickstart and
   phase 3's HTTP tests onto the fake. Until the fourth, the four routes apply their steps
   as in phase 3.
+- 2026-11-12: ADR-0046 clarifies "at each handover" in "The sender's task": on a handover,
+  the task takes every ID already queued and then one step, so that a burst of
+  handovers costs one search of the requests that wait.
 
 ## References
 
