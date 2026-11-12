@@ -1,0 +1,109 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT r.kind, r.amount,\n                  EXISTS (SELECT 1 FROM payment_request_answers a\n                           WHERE a.request_id = r.id AND a.answer = $3) AS \"acknowledged!\",\n                  d.fact_kind AS \"fact_kind?\",\n                  f.amount AS \"applied?\",\n                  au.expires_at AS \"expires_at?\",\n                  c.captured_at AS \"captured_at?\",\n                  rf.refunded_at AS \"refunded_at?\"\n             FROM payment_requests r\n             LEFT JOIN payment_request_decisions d ON d.request_id = r.id\n             LEFT JOIN payment_facts f\n                    ON f.payment_id = d.payment_id AND f.position = d.position\n             LEFT JOIN payment_transition_facts l\n                    ON l.payment_id = d.payment_id AND l.position = d.position\n             LEFT JOIN payment_authorizations au ON au.transition_id = l.transition_id\n             LEFT JOIN payment_captures c ON c.transition_id = l.transition_id\n             LEFT JOIN payment_refunds rf ON rf.transition_id = l.transition_id\n            WHERE r.id = $1 AND r.payment_id = $2",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "kind",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "payment_requests",
+            "name": "kind"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "amount",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "payment_requests",
+            "name": "amount"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "acknowledged!",
+        "type_info": "Bool",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 3,
+        "name": "fact_kind?",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "payment_request_decisions",
+            "name": "fact_kind"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "applied?",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "payment_facts",
+            "name": "amount"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "expires_at?",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "payment_authorizations",
+            "name": "expires_at"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "captured_at?",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "payment_captures",
+            "name": "captured_at"
+          }
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "refunded_at?",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "payment_refunds",
+            "name": "refunded_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      null,
+      true,
+      true,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "2967dd10d122f2feeb99734a41d4247cb79e23113ea9805b9b408676a0c3f46a"
+}

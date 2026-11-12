@@ -18,12 +18,17 @@ use http_body_util::Full;
 use hyper_util::client::legacy::Client;
 use hyper_util::rt::TokioExecutor;
 use mock_psp::MockPsp;
+use mock_psp::wire::Detail;
 use payments_core::accounts::Psp;
-use payments_core::ids::RequestId;
+use payments_core::catch_up::{CaughtUp, catch_up};
+use payments_core::ids::{PaymentId, RequestId};
 use payments_core::money::Currency;
 use payments_core::psp::{Outgoing, PspClient};
 use payments_core::requests::{Ask, RecordRequest, RequestKind};
+use payments_core::sender::{Report, Sender};
 use serde_json::json;
+use sqlx::PgPool;
+use sqlx::types::chrono::Utc;
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 
@@ -34,6 +39,61 @@ pub const TIMEOUT: Duration = Duration::from_secs(10);
 pub fn client_of(psp: &MockPsp) -> PspClient {
     PspClient::new(Psp::Mock, psp.url(), psp.api_key(), TIMEOUT)
         .expect("the fake's address and key make a client")
+}
+
+/// The sender of this fake, as the server's task holds it (ADR-0042), its budget full now.
+pub fn sender_of(psp: &MockPsp) -> Sender {
+    Sender::new(client_of(psp), Utc::now())
+}
+
+/// Hands `request` over to `sender` and takes a step, as the server does once a route has
+/// committed the request (ADR-0043): the step sends it at once and records the PSP's
+/// answer. Every jitter is drawn as zero.
+pub async fn hand_over_and_step(
+    sender: &mut Sender,
+    system: &PgPool,
+    request: &RequestId,
+) -> Report {
+    sender.hand_over(request);
+    sender
+        .send_due(system, Utc::now(), &mut || 0)
+        .await
+        .expect("the requests that wait for the PSP can be listed")
+}
+
+/// Catches `payment` up with what this fake decided, as the catch-up after a notification
+/// does (ADR-0031), and checks that it applied something.
+pub async fn caught_up(system: &PgPool, psp: &MockPsp, payment: PaymentId) {
+    let caught_up = catch_up(system, &client_of(psp), payment)
+        .await
+        .expect("the fake's history can be read and applied");
+    assert!(
+        matches!(caught_up, CaughtUp::Current { applied: 1.. }),
+        "{caught_up:?}"
+    );
+}
+
+/// What this fake decided about `request`: the PSP's word, to compare with ours.
+pub fn decided(psp: &MockPsp, payment: PaymentId, request: &RequestId) -> Detail {
+    let history = psp
+        .history(payment.get())
+        .expect("the fake holds the payment");
+    history
+        .facts
+        .into_iter()
+        .map(|fact| fact.detail)
+        .find(|detail| match detail {
+            Detail::Authorized { request_id, .. }
+            | Detail::Declined { request_id }
+            | Detail::Captured { request_id, .. }
+            | Detail::CaptureRefused { request_id }
+            | Detail::Voided { request_id }
+            | Detail::VoidRefused { request_id }
+            | Detail::Refunded { request_id, .. }
+            | Detail::RefundRefused { request_id } => *request_id == request.get(),
+            Detail::Expired | Detail::Settled => false,
+        })
+        .expect("the fake decided the request")
 }
 
 /// The kind and the amount that the wire gives a request (ADR-0038).

@@ -21,8 +21,11 @@ use crate::idempotency::Decided;
 use crate::ids::{PaymentId, RequestId};
 use crate::lifecycle::{self, Event, IllegalTransition, PaymentStatus, Refused};
 use crate::money::PositiveAmount;
-use crate::payments::{Failed, begin_locked, commit_unit, store_sealed};
+use crate::payments::{Failed, begin_locked, commit_unit, store_sealed, stored_time};
+use crate::psp::FactKind;
+use crate::sender::Answer;
 use crate::tenancy::Scope;
+use crate::times::BusinessTime;
 
 /// What a request asks the PSP to do: a closed set of labels, parsed once (ADR-0009).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -504,12 +507,202 @@ async fn insert(tx: &mut Transaction<'_, Postgres>, command: &RecordRequest) -> 
     Ok(())
 }
 
+/// Where a request stands, as its merchant follows it (ADR-0033, ADR-0045).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Followed {
+    pub kind: RequestKind,
+    /// The amount asked: `None` for a void, which asks for none.
+    pub amount: Option<PositiveAmount>,
+    pub standing: Standing,
+}
+
+/// A request's state, derived from rows and never stored (ADR-0033).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Standing {
+    /// Only the request is recorded. One that the PSP refused as malformed stays here
+    /// while an operator looks (ADR-0037).
+    Recorded,
+    /// The PSP holds it (ADR-0028).
+    Acknowledged,
+    /// The PSP's history applied it (ADR-0031).
+    Applied(Applied),
+    /// The PSP's history refused it.
+    Refused,
+}
+
+impl Standing {
+    /// The label that the API shows (ADR-0033).
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Recorded => "recorded",
+            Self::Acknowledged => "acknowledged",
+            Self::Applied(_) => "applied",
+            Self::Refused => "refused",
+        }
+    }
+}
+
+/// What an applied request did: the amount of the step that applied it, and the business
+/// time in that step's record (ADR-0045).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Applied {
+    /// An authorization, whose amount may be less than asked (ADR-0016).
+    Authorized {
+        amount: PositiveAmount,
+        expires_at: BusinessTime,
+    },
+    Captured {
+        amount: PositiveAmount,
+        captured_at: BusinessTime,
+    },
+    Refunded {
+        amount: PositiveAmount,
+        refunded_at: BusinessTime,
+    },
+    Voided,
+}
+
+/// Why a request could not be followed.
+#[derive(Debug, thiserror::Error)]
+#[error("request {request} of payment {payment} could not be read")]
+pub struct FollowError {
+    request: Uuid,
+    payment: PaymentId,
+    #[source]
+    source: sqlx::Error,
+}
+
+/// Why a decided request has its fact: `payment_request_decisions_fact_fkey`, under the
+/// same policy as the decision.
+const DECIDED_BY_A_FACT: &str = "payment_request_decisions_fact_fkey names an existing fact";
+
+/// Why an applying fact reaches its step's record: the catch-up links each fact that it
+/// applies to its step in the transaction that decides the request (ADR-0031), and LG004
+/// keeps the record of a step that carries data.
+const LINKED_TO_ITS_STEP: &str = "an applied fact is linked to its step, whose record LG004 keeps";
+
+/// Reads where request `request` of payment `payment` stands, or `None` when the payment
+/// has no such request, or when another merchant owns it and the scope is a merchant's
+/// (ADR-0025, ADR-0033).
+///
+/// # Errors
+///
+/// [`FollowError`] when the request cannot be read.
+pub async fn find_request<'a>(
+    scope: impl Into<Scope<'a>>,
+    payment: PaymentId,
+    request: &RequestId,
+) -> Result<Option<Followed>, FollowError> {
+    let failure = |source| FollowError {
+        request: request.get(),
+        payment,
+        source,
+    };
+    let mut tx = scope.into().begin().await.map_err(failure)?;
+    // One statement, so the request, its answer, its decision and the record of the step
+    // that applied it come from one snapshot. A request has at most one answer and one
+    // decision, a decision names one fact, a fact links to at most one step, and a step
+    // has at most one record.
+    let row = sqlx::query!(
+        r#"SELECT r.kind, r.amount,
+                  EXISTS (SELECT 1 FROM payment_request_answers a
+                           WHERE a.request_id = r.id AND a.answer = $3) AS "acknowledged!",
+                  d.fact_kind AS "fact_kind?",
+                  f.amount AS "applied?",
+                  au.expires_at AS "expires_at?",
+                  c.captured_at AS "captured_at?",
+                  rf.refunded_at AS "refunded_at?"
+             FROM payment_requests r
+             LEFT JOIN payment_request_decisions d ON d.request_id = r.id
+             LEFT JOIN payment_facts f
+                    ON f.payment_id = d.payment_id AND f.position = d.position
+             LEFT JOIN payment_transition_facts l
+                    ON l.payment_id = d.payment_id AND l.position = d.position
+             LEFT JOIN payment_authorizations au ON au.transition_id = l.transition_id
+             LEFT JOIN payment_captures c ON c.transition_id = l.transition_id
+             LEFT JOIN payment_refunds rf ON rf.transition_id = l.transition_id
+            WHERE r.id = $1 AND r.payment_id = $2"#,
+        request.get(),
+        payment.get(),
+        Answer::Acknowledged.as_str()
+    )
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(failure)?;
+    Ok(row.map(|row| {
+        let kind = RequestKind::parse(&row.kind)
+            .expect("payment_requests_kind_check allows only known kinds");
+        let amount = match kind {
+            RequestKind::Void => None,
+            RequestKind::Authorize | RequestKind::Capture | RequestKind::Refund => Some(
+                PositiveAmount::new(row.amount)
+                    .expect("payment_requests_amount_check keeps it between 1 and the cap"),
+            ),
+        };
+        let fact = row.fact_kind.as_deref().map(|label| {
+            FactKind::parse(label).expect("payment_facts_kind_check allows only known kinds")
+        });
+        let applied = || {
+            PositiveAmount::new(row.applied.expect(DECIDED_BY_A_FACT))
+                .expect("payment_facts_amount_check keeps an applying fact's amount positive")
+        };
+        let standing = match fact {
+            None if row.acknowledged => Standing::Acknowledged,
+            None => Standing::Recorded,
+            Some(FactKind::Authorize) => Standing::Applied(Applied::Authorized {
+                amount: applied(),
+                expires_at: stored_time(row.expires_at.expect(LINKED_TO_ITS_STEP)),
+            }),
+            Some(FactKind::Capture) => Standing::Applied(Applied::Captured {
+                amount: applied(),
+                captured_at: stored_time(row.captured_at.expect(LINKED_TO_ITS_STEP)),
+            }),
+            Some(FactKind::Refund) => Standing::Applied(Applied::Refunded {
+                amount: applied(),
+                refunded_at: stored_time(row.refunded_at.expect(LINKED_TO_ITS_STEP)),
+            }),
+            Some(FactKind::Void) => Standing::Applied(Applied::Voided),
+            Some(
+                FactKind::Decline
+                | FactKind::CaptureRefused
+                | FactKind::VoidRefused
+                | FactKind::RefundRefused,
+            ) => Standing::Refused,
+            Some(FactKind::Expire | FactKind::Settle) => {
+                unreachable!(
+                    "payment_request_decisions_kinds_check decides a request by its own kinds"
+                )
+            }
+        };
+        Followed {
+            kind,
+            amount,
+            standing,
+        }
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn amount(minor: i64) -> PositiveAmount {
         PositiveAmount::new(minor).expect("a positive amount")
+    }
+
+    #[test]
+    fn each_standing_is_shown_with_its_label() {
+        let standings = [
+            Standing::Recorded,
+            Standing::Acknowledged,
+            Standing::Applied(Applied::Voided),
+            Standing::Refused,
+        ];
+        assert_eq!(
+            standings.map(Standing::as_str),
+            ["recorded", "acknowledged", "applied", "refused"]
+        );
     }
 
     /// A payment of 100, authorized for 80 once it is past `created`, with the 80
