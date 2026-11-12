@@ -10,7 +10,7 @@ use axum::response::{IntoResponse, Response};
 use serde::{Deserialize, Serialize};
 use sqlx::types::chrono::{DateTime, Utc};
 
-use super::keyed::{Attempt, KeyedRequest};
+use super::keyed::{Accepted, Attempt, KeyedRequest};
 use super::path_id::{PathId, PathRequestId};
 use super::problem::Problem;
 use super::{AppState, Merchant};
@@ -168,9 +168,13 @@ fn decided(outcome: Decided<'_>) -> Answer {
             status: 200,
             body: json_text(&Reply::from(recorded)),
         },
-        Decided::Requested(requested) => {
-            unreachable!("a step's route records no request: {requested:?}")
-        }
+        Decided::Requested(requested) => Answer {
+            status: 202,
+            body: json_text(&Accepted {
+                request_id: requested.request.to_string(),
+                payment_id: requested.payment.to_string(),
+            }),
+        },
         Decided::Refused(Refusal::Refused(Refused::Illegal(_))) => Problem::IllegalMove.answer(),
         Decided::Refused(Refusal::Refused(Refused::AboveLimit { .. })) => {
             Problem::AmountAboveLimit.answer()
@@ -542,6 +546,22 @@ mod tests {
         assert_eq!(
             written_at(1_893_456_000_000_001),
             "2030-01-01T00:00:00.000001Z"
+        );
+    }
+
+    #[test]
+    fn a_recorded_request_is_answered_202_with_its_ids() {
+        let id = |text| uuid::Uuid::parse_str(text).expect("a UUID");
+        let recorded = crate::requests::RequestRecorded {
+            request: id("019b76da-a800-7000-8000-00000000000a"),
+            payment: PaymentId::try_from(id("019b76da-a800-7000-8000-000000000001"))
+                .expect("a UUIDv7"),
+        };
+        let answer = decided(Decided::Requested(&recorded));
+        assert_eq!(answer.status, 202);
+        assert_eq!(
+            answer.body,
+            r#"{"request_id":"019b76da-a800-7000-8000-00000000000a","payment_id":"019b76da-a800-7000-8000-000000000001"}"#
         );
     }
 
