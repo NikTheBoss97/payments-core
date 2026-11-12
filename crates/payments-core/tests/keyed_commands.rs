@@ -5,7 +5,9 @@
 //! A key's record holds the final answer and commits in the same transaction as the
 //! effect. Each attempt of a request has fresh IDs, so the fixtures' `n` differs
 //! between attempts, and only the key can tell two attempts apart from two requests:
-//! that is what these tests attack.
+//! that is what these tests attack. The effect is a payment created, a cancel, or a
+//! request to the PSP (ADR-0028), and the PSP's word moves the payments in between, as
+//! the server takes them (ADR-0043).
 
 mod common;
 
@@ -13,10 +15,12 @@ use std::error::Error;
 
 use common::keys::{answered, key, print, render};
 use common::payments::{
-    AUTHORIZED, FEE, REQUESTED, authorize_command, balance_of, capture_command, create_command,
-    eur, fee_rate, refund_command, steps, unbalanced_currencies, uncaused_postings,
+    AUTHORIZED, REQUESTED, balance_of, create_command, eur, fee_rate, requests_of, steps,
 };
-use common::{account_id, merchant_id, payment_id, runtime_pool, tenant_pool, transition_id};
+use common::psp::{PspSide, hand_over_and_step};
+use common::{
+    account_id, merchant_id, payment_id, request_id, runtime_pool, tenant_pool, transition_id,
+};
 use futures_util::future::{join, join_all};
 use payments_core::accounts::{AccountRef, Psp};
 use payments_core::idempotency::{Answer, Decided, IdempotencyKey, Recall, Seal, recall};
@@ -24,13 +28,12 @@ use payments_core::ids::{MerchantId, PaymentId};
 use payments_core::lifecycle::Refused;
 use payments_core::money::{Currency, PositiveAmount};
 use payments_core::payments::{
-    AccountCandidates, Authorize, AuthorizeError, Capture, CaptureError, CreateError,
-    CreatePayment, Outcome, Refund, RefundError, StepCommand, StepError, authorize, capture,
-    create_payment, find_payment, refund, register_merchant, void,
+    AccountCandidates, CreateError, CreatePayment, Outcome, StepCommand, cancel, create_payment,
+    find_payment, register_merchant,
 };
+use payments_core::requests::{Ask, RecordRequest, Refusal, RequestError, record_request};
 use payments_core::tenancy::Tenant;
 use sqlx::PgPool;
-use uuid::Uuid;
 
 type TestResult = Result<(), Box<dyn Error>>;
 
@@ -54,24 +57,46 @@ async fn created(
     Ok(command.id)
 }
 
+/// Payment `n`, authorized for [`AUTHORIZED`] by the PSP.
 async fn authorized(
+    psp: &mut PspSide,
     me: Tenant<'_>,
     merchant: MerchantId,
     n: u32,
 ) -> Result<PaymentId, Box<dyn Error>> {
     let payment = created(me, merchant, n).await?;
-    authorize(me, &authorize_command(n, payment)).await?;
+    psp.authorized(me, payment).await;
     Ok(payment)
 }
 
+/// Payment `n`, captured for [`AUTHORIZED`] by the PSP.
 async fn captured(
+    psp: &mut PspSide,
     me: Tenant<'_>,
     merchant: MerchantId,
     n: u32,
 ) -> Result<PaymentId, Box<dyn Error>> {
-    let payment = authorized(me, merchant, n).await?;
-    capture(me, &capture_command(n, payment)).await?;
+    let payment = authorized(psp, me, merchant, n).await?;
+    psp.captured(me, payment).await;
     Ok(payment)
+}
+
+fn amount(minor: i64) -> PositiveAmount {
+    PositiveAmount::new(minor).expect("a positive amount")
+}
+
+/// Request `n`, which asks this of this payment.
+fn request(n: u32, payment: PaymentId, ask: Ask) -> RecordRequest {
+    RecordRequest {
+        request: request_id(n),
+        payment,
+        ask,
+    }
+}
+
+/// The answer that a recorded request `n` stores.
+fn requested(n: u32) -> Recall {
+    answered(202, &format!(r#"{{"request":"{}"}}"#, request_id(n).get()))
 }
 
 /// How many answers are stored, whoever owns them.
@@ -84,6 +109,7 @@ async fn records(pool: &PgPool) -> sqlx::Result<i64> {
 #[sqlx::test]
 async fn an_applied_command_stores_its_answer_with_its_effect(pool: PgPool) -> TestResult {
     let (tenant, merchant, _) = two_merchants(&pool).await?;
+    let mut psp = PspSide::start(&pool).await?;
     let me = Tenant::new(&tenant, merchant);
 
     let create = create_command(1, merchant);
@@ -100,67 +126,67 @@ async fn an_applied_command_stores_its_answer_with_its_effect(pool: PgPool) -> T
         answered(200, r#"{"seq":0,"refundable":0}"#)
     );
 
-    let k = key("authorize");
-    let seal = Seal {
-        key: &k,
-        fingerprint: print(2),
-        answer: &render,
-    };
-    authorize(me.sealed(&seal), &authorize_command(1, payment)).await?;
-    assert_eq!(
-        recall(me, &k, print(2)).await?,
-        answered(200, r#"{"seq":1,"refundable":0}"#)
-    );
+    // Each request stores its 202 with it, and the PSP's word then moves the payment on
+    // to where the next one is taken.
+    for (n, name, ask) in [
+        (2, "authorize", Ask::Authorize(amount(REQUESTED))),
+        (3, "capture", Ask::Capture(amount(AUTHORIZED))),
+        (4, "refund", Ask::Refund(amount(3_000))),
+    ] {
+        let k = key(name);
+        let seal = Seal {
+            key: &k,
+            fingerprint: print(n),
+            answer: &render,
+        };
+        let command = request(n, payment, ask);
+        record_request(me.sealed(&seal), &command).await?;
+        assert_eq!(recall(me, &k, print(n)).await?, requested(n));
+        hand_over_and_step(&mut psp.sender, &psp.system, &command.request).await;
+        match ask {
+            Ask::Authorize(_) => psp.fake.approve_for(request_id(n).get(), AUTHORIZED),
+            _ => psp.fake.approve(request_id(n).get()),
+        }
+        psp.caught_up(payment).await;
+    }
 
-    let k = key("capture");
-    let seal = Seal {
-        key: &k,
-        fingerprint: print(3),
-        answer: &render,
-    };
-    capture(me.sealed(&seal), &capture_command(1, payment)).await?;
-    assert_eq!(
-        recall(me, &k, print(3)).await?,
-        answered(200, r#"{"seq":2,"refundable":8000}"#)
-    );
-
-    let k = key("refund");
-    let seal = Seal {
-        key: &k,
-        fingerprint: print(4),
-        answer: &render,
-    };
-    refund(me.sealed(&seal), &refund_command(1, payment, 3_000)).await?;
-    assert_eq!(
-        recall(me, &k, print(4)).await?,
-        answered(200, r#"{"seq":3,"refundable":5000}"#)
-    );
-
-    let other = authorized(me, merchant, 2).await?;
+    let other = authorized(&mut psp, me, merchant, 2).await?;
     let k = key("void");
     let seal = Seal {
         key: &k,
         fingerprint: print(5),
         answer: &render,
     };
+    record_request(me.sealed(&seal), &request(5, other, Ask::Void)).await?;
+    assert_eq!(recall(me, &k, print(5)).await?, requested(5));
+
+    let cancelled = created(me, merchant, 3).await?;
+    let k = key("cancel");
+    let seal = Seal {
+        key: &k,
+        fingerprint: print(6),
+        answer: &render,
+    };
     let command = StepCommand {
         step: transition_id(901),
-        payment: other,
+        payment: cancelled,
     };
-    void(me.sealed(&seal), &command).await?;
+    cancel(me.sealed(&seal), &command).await?;
     assert_eq!(
-        recall(me, &k, print(5)).await?,
-        answered(200, r#"{"seq":2,"refundable":0}"#)
+        recall(me, &k, print(6)).await?,
+        answered(200, r#"{"seq":1,"refundable":0}"#)
     );
 
     // The effects are there too, one each.
-    assert_eq!(steps(&pool, payment).await?, 4);
-    assert_eq!(steps(&pool, other).await?, 3);
-    assert_eq!(records(&pool).await?, 5);
+    assert_eq!(requests_of(&pool, payment).await?, 3);
+    assert_eq!(requests_of(&pool, other).await?, 2);
+    assert_eq!(steps(&pool, cancelled).await?, 2);
+    assert_eq!(records(&pool).await?, 6);
     let owners = sqlx::query_scalar!("SELECT DISTINCT merchant_id FROM idempotency_records")
         .fetch_all(&pool)
         .await?;
     assert_eq!(owners, [merchant.get()]);
+    psp.close().await;
     tenant.close().await;
     Ok(())
 }
@@ -171,18 +197,25 @@ async fn a_refusal_is_stored_and_changes_nothing_else(pool: PgPool) -> TestResul
     let me = Tenant::new(&tenant, merchant);
     let payment = created(me, merchant, 1).await?;
 
-    // An illegal move, for a command that posts and for one that does not.
+    // An illegal move, for a request whose decision would post and for one whose would
+    // not.
     let k = key("capture-too-early");
     let seal = Seal {
         key: &k,
         fingerprint: print(1),
         answer: &render,
     };
-    let err = capture(me.sealed(&seal), &capture_command(1, payment))
-        .await
-        .unwrap_err();
+    let err = record_request(
+        me.sealed(&seal),
+        &request(1, payment, Ask::Capture(amount(AUTHORIZED))),
+    )
+    .await
+    .unwrap_err();
     assert!(
-        matches!(err, CaptureError::Refused(Refused::Illegal(_))),
+        matches!(
+            err,
+            RequestError::Refused(Refusal::Refused(Refused::Illegal(_)))
+        ),
         "{err:?}"
     );
     assert_eq!(
@@ -196,12 +229,16 @@ async fn a_refusal_is_stored_and_changes_nothing_else(pool: PgPool) -> TestResul
         fingerprint: print(2),
         answer: &render,
     };
-    let command = StepCommand {
-        step: transition_id(901),
-        payment,
-    };
-    let err = void(me.sealed(&seal), &command).await.unwrap_err();
-    assert!(matches!(err, StepError::Illegal(_)), "{err:?}");
+    let err = record_request(me.sealed(&seal), &request(2, payment, Ask::Void))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            RequestError::Refused(Refusal::Refused(Refused::Illegal(_)))
+        ),
+        "{err:?}"
+    );
     assert_eq!(
         recall(me, &k, print(2)).await?,
         answered(409, r#"{"type":"illegal"}"#)
@@ -214,13 +251,17 @@ async fn a_refusal_is_stored_and_changes_nothing_else(pool: PgPool) -> TestResul
         fingerprint: print(3),
         answer: &render,
     };
-    let command = Authorize {
-        amount: PositiveAmount::new(REQUESTED + 1)?,
-        ..authorize_command(1, payment)
-    };
-    let err = authorize(me.sealed(&seal), &command).await.unwrap_err();
+    let err = record_request(
+        me.sealed(&seal),
+        &request(3, payment, Ask::Authorize(amount(REQUESTED + 1))),
+    )
+    .await
+    .unwrap_err();
     assert!(
-        matches!(err, AuthorizeError::Refused(Refused::AboveLimit { .. })),
+        matches!(
+            err,
+            RequestError::Refused(Refusal::Refused(Refused::AboveLimit { .. }))
+        ),
         "{err:?}"
     );
     assert_eq!(
@@ -229,6 +270,7 @@ async fn a_refusal_is_stored_and_changes_nothing_else(pool: PgPool) -> TestResul
     );
 
     assert_eq!(steps(&pool, payment).await?, 1);
+    assert_eq!(requests_of(&pool, payment).await?, 0);
     assert_eq!(records(&pool).await?, 3);
     tenant.close().await;
     Ok(())
@@ -239,6 +281,7 @@ async fn a_late_duplicate_of_a_refusal_cannot_become_an_effect(pool: PgPool) -> 
     // The hazard that storing refusals exists for: a client was told no, the payment
     // then moved on, and a delayed copy of its request arrives.
     let (tenant, merchant, _) = two_merchants(&pool).await?;
+    let mut psp = PspSide::start(&pool).await?;
     let me = Tenant::new(&tenant, merchant);
     let payment = created(me, merchant, 1).await?;
 
@@ -248,29 +291,33 @@ async fn a_late_duplicate_of_a_refusal_cannot_become_an_effect(pool: PgPool) -> 
         fingerprint: print(1),
         answer: &render,
     };
-    let err = capture(me.sealed(&seal), &capture_command(1, payment))
+    let capture = |n| request(n, payment, Ask::Capture(amount(AUTHORIZED)));
+    let err = record_request(me.sealed(&seal), &capture(1))
         .await
         .unwrap_err();
-    assert!(matches!(err, CaptureError::Refused(_)), "{err:?}");
+    assert!(matches!(err, RequestError::Refused(_)), "{err:?}");
 
-    // Now the same capture would be legal.
-    authorize(me, &authorize_command(1, payment)).await?;
+    // Now the same capture would be recorded.
+    psp.authorized(me, payment).await;
     assert_eq!(
         recall(me, &k, print(1)).await?,
         answered(409, r#"{"type":"illegal"}"#)
     );
 
-    // Even an attempt that looked the key up before the refusal committed cannot
-    // apply: fresh IDs, the same key, and it would otherwise succeed.
-    let err = capture(me.sealed(&seal), &capture_command(2, payment))
+    // Even an attempt that looked the key up before the refusal committed cannot be
+    // recorded: fresh IDs, the same key, and it would otherwise succeed.
+    let err = record_request(me.sealed(&seal), &capture(2))
         .await
         .unwrap_err();
-    assert!(matches!(err, CaptureError::KeyTaken), "{err:?}");
+    assert!(matches!(err, RequestError::KeyTaken), "{err:?}");
+    // The authorization's request alone, and no money moved.
+    assert_eq!(requests_of(&pool, payment).await?, 1);
     assert_eq!(steps(&pool, payment).await?, 2);
     assert_eq!(
         balance_of(&pool, AccountRef::PspReceivable(Psp::Mock, eur())).await?,
         0
     );
+    psp.close().await;
     tenant.close().await;
     Ok(())
 }
@@ -278,8 +325,9 @@ async fn a_late_duplicate_of_a_refusal_cannot_become_an_effect(pool: PgPool) -> 
 #[sqlx::test]
 async fn what_is_not_final_stores_nothing(pool: PgPool) -> TestResult {
     let (tenant, merchant, stranger) = two_merchants(&pool).await?;
+    let mut psp = PspSide::start(&pool).await?;
     let me = Tenant::new(&tenant, merchant);
-    let theirs = captured(Tenant::new(&tenant, stranger), stranger, 1).await?;
+    let theirs = captured(&mut psp, Tenant::new(&tenant, stranger), stranger, 1).await?;
     let k = key("k");
     let seal = Seal {
         key: &k,
@@ -288,19 +336,18 @@ async fn what_is_not_final_stores_nothing(pool: PgPool) -> TestResult {
     };
 
     // No such payment, or another merchant's: IDs are made by the server, so this
-    // cannot become true later.
-    let err = capture(me.sealed(&seal), &capture_command(2, theirs))
-        .await
-        .unwrap_err();
-    assert!(matches!(err, CaptureError::NotFound { .. }), "{err:?}");
-    let err = refund(me.sealed(&seal), &refund_command(2, payment_id(404), 1))
-        .await
-        .unwrap_err();
-    assert!(matches!(err, RefundError::NotFound { .. }), "{err:?}");
-    let err = authorize(me.sealed(&seal), &authorize_command(2, payment_id(404)))
-        .await
-        .unwrap_err();
-    assert!(matches!(err, AuthorizeError::NotFound { .. }), "{err:?}");
+    // cannot become true later. Were the stranger's payment mine, the refund would be
+    // recorded.
+    for (n, payment, ask) in [
+        (2, theirs, Ask::Refund(amount(1))),
+        (3, payment_id(404), Ask::Refund(amount(1))),
+        (4, payment_id(404), Ask::Authorize(amount(REQUESTED))),
+    ] {
+        let err = record_request(me.sealed(&seal), &request(n, payment, ask))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, RequestError::NotFound { .. }), "{err:?}");
+    }
 
     // A merchant the session cannot see, and a currency that changes only by migration.
     let err = create_payment(me.sealed(&seal), &create_command(2, stranger))
@@ -329,6 +376,7 @@ async fn what_is_not_final_stores_nothing(pool: PgPool) -> TestResult {
 
     assert_eq!(records(&pool).await?, 0);
     assert_eq!(recall(me, &k, print(1)).await?, Recall::Unused);
+    psp.close().await;
     tenant.close().await;
     Ok(())
 }
@@ -339,7 +387,7 @@ async fn an_answer_that_is_not_final_takes_the_effect_down_with_it(pool: PgPool)
     // since the record shares the effect's transaction, the effect goes too.
     let (tenant, merchant, _) = two_merchants(&pool).await?;
     let me = Tenant::new(&tenant, merchant);
-    let payment = authorized(me, merchant, 1).await?;
+    let payment = created(me, merchant, 1).await?;
     let unfinished = |_: Decided<'_>| Answer {
         status: 503,
         body: "{}".to_owned(),
@@ -350,16 +398,16 @@ async fn an_answer_that_is_not_final_takes_the_effect_down_with_it(pool: PgPool)
         fingerprint: print(1),
         answer: &unfinished,
     };
-    let err = capture(me.sealed(&seal), &capture_command(1, payment))
-        .await
-        .unwrap_err();
-    assert!(matches!(err, CaptureError::Invariant { .. }), "{err:?}");
-    assert_eq!(steps(&pool, payment).await?, 2);
+    // A request that would be recorded, so that there is an effect to take down.
+    let err = record_request(
+        me.sealed(&seal),
+        &request(1, payment, Ask::Authorize(amount(REQUESTED))),
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(err, RequestError::Invariant { .. }), "{err:?}");
+    assert_eq!(requests_of(&pool, payment).await?, 0);
     assert_eq!(records(&pool).await?, 0);
-    assert_eq!(
-        balance_of(&pool, AccountRef::PspReceivable(Psp::Mock, eur())).await?,
-        0
-    );
     tenant.close().await;
     Ok(())
 }
@@ -367,10 +415,12 @@ async fn an_answer_that_is_not_final_takes_the_effect_down_with_it(pool: PgPool)
 #[sqlx::test]
 async fn a_second_attempt_under_a_key_rolls_back_whole(pool: PgPool) -> TestResult {
     // The second refund fits what is left, and has fresh IDs, so nothing but the key
-    // stops it. An attempt that wrote its step and its posting must take them back.
+    // stops it. An attempt that recorded its request must take it back.
     let (tenant, merchant, _) = two_merchants(&pool).await?;
+    let mut psp = PspSide::start(&pool).await?;
     let me = Tenant::new(&tenant, merchant);
-    let payment = captured(me, merchant, 1).await?;
+    let payment = captured(&mut psp, me, merchant, 1).await?;
+    let before = requests_of(&pool, payment).await?;
     let k = key("refund");
     let seal = Seal {
         key: &k,
@@ -378,64 +428,16 @@ async fn a_second_attempt_under_a_key_rolls_back_whole(pool: PgPool) -> TestResu
         answer: &render,
     };
 
-    refund(me.sealed(&seal), &refund_command(1, payment, 1_000)).await?;
-    let err = refund(me.sealed(&seal), &refund_command(2, payment, 1_000))
+    let refund = |n| request(n, payment, Ask::Refund(amount(1_000)));
+    record_request(me.sealed(&seal), &refund(1)).await?;
+    let err = record_request(me.sealed(&seal), &refund(2))
         .await
         .unwrap_err();
-    assert!(matches!(err, RefundError::KeyTaken), "{err:?}");
+    assert!(matches!(err, RequestError::KeyTaken), "{err:?}");
 
-    assert_eq!(steps(&pool, payment).await?, 4);
-    assert_eq!(
-        balance_of(&pool, AccountRef::PspReceivable(Psp::Mock, eur())).await?,
-        AUTHORIZED - 1_000
-    );
-    assert_eq!(
-        balance_of(&pool, AccountRef::MerchantPayable(merchant, eur())).await?,
-        FEE - AUTHORIZED + 1_000
-    );
-    assert_eq!(uncaused_postings(&pool).await?, Vec::<Uuid>::new());
-    tenant.close().await;
-    Ok(())
-}
-
-#[sqlx::test]
-async fn copies_of_one_request_racing_give_one_effect(pool: PgPool) -> TestResult {
-    // I4's own test. Each copy has fresh IDs and each would apply on its own, because
-    // a partial refund of 1 fits many times over, so only the key can stop them.
-    let (tenant, merchant, _) = two_merchants(&pool).await?;
-    let me = Tenant::new(&tenant, merchant);
-    let payment = captured(me, merchant, 1).await?;
-    let k = key("refund");
-    let seal = Seal {
-        key: &k,
-        fingerprint: print(1),
-        answer: &render,
-    };
-    let commands: Vec<Refund> = (1..=8).map(|n| refund_command(n, payment, 1)).collect();
-    let sealed = me.sealed(&seal);
-    let results = join_all(commands.iter().map(|command| refund(sealed, command))).await;
-
-    let mut applied = 0;
-    for result in results {
-        match result {
-            Ok(Outcome::Applied(_)) => applied += 1,
-            Err(RefundError::KeyTaken) => {}
-            other => panic!("{other:?}"),
-        }
-    }
-    assert_eq!(applied, 1);
-    assert_eq!(steps(&pool, payment).await?, 4);
-    assert_eq!(records(&pool).await?, 1);
-    assert_eq!(
-        balance_of(&pool, AccountRef::PspReceivable(Psp::Mock, eur())).await?,
-        AUTHORIZED - 1
-    );
-    assert_eq!(unbalanced_currencies(&pool).await?, Vec::<String>::new());
-    assert_eq!(uncaused_postings(&pool).await?, Vec::<Uuid>::new());
-    assert_eq!(
-        recall(me, &k, print(1)).await?,
-        answered(200, r#"{"seq":3,"refundable":7999}"#)
-    );
+    assert_eq!(requests_of(&pool, payment).await?, before + 1);
+    assert_eq!(recall(me, &k, print(1)).await?, requested(1));
+    psp.close().await;
     tenant.close().await;
     Ok(())
 }
@@ -501,9 +503,10 @@ async fn one_key_on_two_payments_gives_one_effect(pool: PgPool) -> TestResult {
     // Two locks, so neither waits on the other until the key's index makes one wait.
     // The loser's request differs, so looking the key up says that it was reused.
     let (tenant, merchant, _) = two_merchants(&pool).await?;
+    let mut psp = PspSide::start(&pool).await?;
     let me = Tenant::new(&tenant, merchant);
-    let first = authorized(me, merchant, 1).await?;
-    let second = authorized(me, merchant, 2).await?;
+    let first = authorized(&mut psp, me, merchant, 1).await?;
+    let second = authorized(&mut psp, me, merchant, 2).await?;
     let k = key("k");
     let (first_seal, second_seal) = (
         Seal {
@@ -517,22 +520,24 @@ async fn one_key_on_two_payments_gives_one_effect(pool: PgPool) -> TestResult {
             answer: &render,
         },
     );
-    let (first_command, second_command): (Capture, Capture) =
-        (capture_command(1, first), capture_command(2, second));
+    let capture = |n, payment| request(n, payment, Ask::Capture(amount(AUTHORIZED)));
+    let (first_command, second_command) = (capture(1, first), capture(2, second));
 
     let (one, other) = join(
-        capture(me.sealed(&first_seal), &first_command),
-        capture(me.sealed(&second_seal), &second_command),
+        record_request(me.sealed(&first_seal), &first_command),
+        record_request(me.sealed(&second_seal), &second_command),
     )
     .await;
     let (won, lost, loser_print) = match (one, other) {
-        (Ok(_), Err(CaptureError::KeyTaken)) => (first, second, print(2)),
-        (Err(CaptureError::KeyTaken), Ok(_)) => (second, first, print(1)),
+        (Ok(_), Err(RequestError::KeyTaken)) => (first, second, print(2)),
+        (Err(RequestError::KeyTaken), Ok(_)) => (second, first, print(1)),
         other => panic!("{other:?}"),
     };
-    assert_eq!(steps(&pool, won).await?, 3);
-    assert_eq!(steps(&pool, lost).await?, 2);
+    // Each payment's authorization, and the winner's capture.
+    assert_eq!(requests_of(&pool, won).await?, 2);
+    assert_eq!(requests_of(&pool, lost).await?, 1);
     assert_eq!(recall(me, &k, loser_print).await?, Recall::Reused);
+    psp.close().await;
     tenant.close().await;
     Ok(())
 }
