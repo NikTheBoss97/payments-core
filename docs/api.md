@@ -182,6 +182,45 @@ and any other is a [`not-found`](#not-found). So are another merchant's payment 
 payment at all, which read exactly alike, so an ID's existence does not leak. The
 credential is checked first, so someone with no key learns nothing about an ID.
 
+### `GET /payments/{id}/requests/{request_id}`
+
+Where a request to the provider stands ([ADR-0033](adr/0033-following-a-request.md),
+[ADR-0045](adr/0045-following-a-request-and-the-switch-in-two.md)): its kind, the amount it
+asked, and its state, which is derived from what was recorded and never stored.
+
+```json
+{
+  "request_id": "019b76da-a800-7000-8000-00000000000a",
+  "payment_id": "019b76da-a800-7000-8000-000000000001",
+  "kind": "authorize",
+  "amount": 10000,
+  "state": "applied",
+  "applied": { "amount": 8000, "expires_at": "2026-11-19T10:00:00.123456Z" }
+}
+```
+
+| `state` | What it means |
+|---|---|
+| `recorded` | The request is recorded, and the provider has not acknowledged it. One that the provider refused as malformed stays here while an operator looks. |
+| `acknowledged` | The provider holds the request and has not decided it. |
+| `applied` | The provider's history applied it. |
+| `refused` | The provider's history refused it. |
+
+A request is decided only by the provider's history, once the service has read it: until
+then, a request that the provider has decided still reads `acknowledged`.
+
+`amount` is `null` for a void, which asks for none. `applied` is `null` until the state is
+`applied`, and then holds what the request's step applied, named as its record names it:
+`{amount, expires_at}` for an authorization, whose amount may be less than asked;
+`{amount, captured_at}` for a capture; `{amount, refunded_at}` for a refund; and `{}` for a
+void. Times are written in RFC 3339, in UTC with `Z`, with the fractional digits that they
+need.
+
+Another payment's request, another merchant's, none at all and an ID in another spelling
+all read as a [`not-found`](#not-found), and the credential is checked first, as for the
+payment. The four commands above still apply their steps directly, so no route records a
+request yet, and this route finds none until they do.
+
 ## The operator's routes
 
 These take the operator's secret, and an idempotency key like any other `POST`. An ID in their

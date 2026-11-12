@@ -11,12 +11,12 @@ use serde::{Deserialize, Serialize};
 use sqlx::types::chrono::{DateTime, Utc};
 
 use super::keyed::{Attempt, KeyedRequest};
-use super::path_id::PathId;
+use super::path_id::{PathId, PathRequestId};
 use super::problem::Problem;
 use super::{AppState, Merchant};
 use crate::accounts::Psp;
 use crate::idempotency::{Answer, Decided};
-use crate::ids::{AccountId, PaymentId, TransactionId, TransitionId};
+use crate::ids::{AccountId, PaymentId, RequestId, TransactionId, TransitionId};
 use crate::lifecycle::Refused;
 use crate::money::{Currency, PositiveAmount};
 use crate::payments::{
@@ -24,7 +24,7 @@ use crate::payments::{
     CreateError, CreatePayment, Outcome, Payment, Recorded, Refund, RefundError, StepCommand,
     StepError, create_payment, find_payment, merchant_fee_rate,
 };
-use crate::requests::{Conflict, Refusal};
+use crate::requests::{Applied, Conflict, Followed, Refusal, Standing, find_request};
 use crate::times::BusinessTime;
 
 /// A payment of the merchant that asked. A route that takes one cannot reach another
@@ -407,6 +407,92 @@ pub(super) async fn read_payment(own: OwnPayment) -> Response {
     )
 }
 
+/// What `GET /payments/{id}/requests/{request_id}` answers (ADR-0033, ADR-0045).
+#[derive(Serialize)]
+struct RequestView {
+    request_id: String,
+    payment_id: String,
+    kind: &'static str,
+    /// `None` for a void, which asks for no amount.
+    amount: Option<i64>,
+    state: &'static str,
+    /// `None` until the request applies.
+    applied: Option<AppliedView>,
+}
+
+/// What an applied request's step did, named as its record names it (ADR-0045).
+#[derive(Serialize)]
+#[serde(untagged)]
+enum AppliedView {
+    Authorized { amount: i64, expires_at: String },
+    Captured { amount: i64, captured_at: String },
+    Refunded { amount: i64, refunded_at: String },
+    Voided {},
+}
+
+impl RequestView {
+    fn new(request: &RequestId, payment: PaymentId, followed: Followed) -> Self {
+        let applied = match followed.standing {
+            Standing::Applied(applied) => Some(match applied {
+                Applied::Authorized { amount, expires_at } => AppliedView::Authorized {
+                    amount: amount.get(),
+                    expires_at: written(expires_at),
+                },
+                Applied::Captured {
+                    amount,
+                    captured_at,
+                } => AppliedView::Captured {
+                    amount: amount.get(),
+                    captured_at: written(captured_at),
+                },
+                Applied::Refunded {
+                    amount,
+                    refunded_at,
+                } => AppliedView::Refunded {
+                    amount: amount.get(),
+                    refunded_at: written(refunded_at),
+                },
+                Applied::Voided => AppliedView::Voided {},
+            }),
+            Standing::Recorded | Standing::Acknowledged | Standing::Refused => None,
+        };
+        Self {
+            request_id: request.get().to_string(),
+            payment_id: payment.to_string(),
+            kind: followed.kind.as_str(),
+            amount: followed.amount.map(PositiveAmount::get),
+            state: followed.standing.as_str(),
+            applied,
+        }
+    }
+}
+
+/// A time as the API writes it: RFC 3339 in UTC with `Z`, with the fractional digits that
+/// it needs (ADR-0045).
+fn written(time: BusinessTime) -> String {
+    // `%.f` writes no digits for a whole second, and otherwise 3, 6 or 9, as many
+    // as it takes; a business time has 6 at most (ADR-0022).
+    time.get().format("%Y-%m-%dT%H:%M:%S%.fZ").to_string()
+}
+
+/// `GET /payments/{id}/requests/{request_id}`: where a request of the payment stands
+/// (ADR-0033, ADR-0045). The payment's extractor checks the credential and the merchant
+/// first, so another merchant's request, another payment's and none read as one 404.
+pub(super) async fn read_request(
+    own: OwnPayment,
+    PathRequestId(request): PathRequestId,
+) -> Result<Response, Problem> {
+    let OwnPayment { merchant, id, .. } = own;
+    match find_request(merchant.tenant(), id, &request).await {
+        Ok(Some(followed)) => Ok(json(
+            StatusCode::OK,
+            &RequestView::new(&request, id, followed),
+        )),
+        Ok(None) => Err(Problem::NotFound),
+        Err(err) => Err(Problem::Unavailable.because(&err)),
+    }
+}
+
 /// A JSON answer.
 fn json(status: StatusCode, value: &impl Serialize) -> Response {
     (
@@ -425,6 +511,24 @@ pub(super) fn json_text(value: &impl Serialize) -> String {
 mod tests {
     use super::*;
     use crate::requests::RequestKind;
+
+    #[test]
+    fn a_time_is_written_in_utc_with_the_digits_that_it_needs() {
+        let written_at = |micros: i64| {
+            let time = DateTime::from_timestamp_micros(micros).expect("a time in range");
+            written(BusinessTime::new(time).expect("a time that PostgreSQL stores"))
+        };
+        // 2030-01-01T00:00:00Z, and 120 ms and 1 us after it.
+        assert_eq!(written_at(1_893_456_000_000_000), "2030-01-01T00:00:00Z");
+        assert_eq!(
+            written_at(1_893_456_000_120_000),
+            "2030-01-01T00:00:00.120Z"
+        );
+        assert_eq!(
+            written_at(1_893_456_000_000_001),
+            "2030-01-01T00:00:00.000001Z"
+        );
+    }
 
     #[test]
     fn each_conflict_is_answered_with_its_own_problem() {
