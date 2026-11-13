@@ -44,6 +44,16 @@ pub const OPERATOR_AT_COMMIT: &str = "zz_die_at_commit operator_idempotency_reco
 pub const NOTIFICATION_AT_COMMIT: &str = "zz_die_at_commit psp_notifications";
 /// The points around a request's own row (ADR-0046).
 pub const REQUEST_POINTS: [&str; 2] = ["die_before payment_requests", "die_after payment_requests"];
+/// The points around the rows that a catch-up writes with each fact that decides a
+/// request: the fact, the link of its step, and the request's decision (ADR-0041).
+pub const FACT_POINTS: [&str; 6] = [
+    "die_before payment_facts",
+    "die_after payment_facts",
+    "die_before payment_transition_facts",
+    "die_after payment_transition_facts",
+    "die_before payment_request_decisions",
+    "die_after payment_request_decisions",
+];
 /// During `COMMIT` of a recorded request, which writes no step.
 pub const REQUEST_AT_COMMIT: &str = "zz_die_at_commit payment_requests";
 
@@ -70,7 +80,8 @@ pub async fn install_crash_points(pool: &PgPool) -> sqlx::Result<()> {
                  'ledger_transactions', 'ledger_entries', 'payment_authorizations', \
                  'payment_captures', 'payment_refunds', 'idempotency_records', 'merchants', \
                  'api_keys', 'api_key_revocations', 'operator_idempotency_records', \
-                 'payment_requests'] LOOP \
+                 'payment_requests', 'payment_facts', 'payment_transition_facts', \
+                 'payment_request_decisions'] LOOP \
                  EXECUTE format('CREATE TRIGGER die_before BEFORE INSERT ON %I \
                      FOR EACH ROW EXECUTE FUNCTION die_if_planned()', target); \
                  EXECUTE format('CREATE TRIGGER die_after AFTER INSERT ON %I \
