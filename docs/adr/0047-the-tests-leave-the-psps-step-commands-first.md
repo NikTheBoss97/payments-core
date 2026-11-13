@@ -224,6 +224,17 @@ The 21 that retire:
 - The suite loses 21 tests. The path that every command shares keeps its tests, on `cancel`
   and `create`.
 
+## Amendments
+
+- 2026-11-13: The second pull request narrows "the PSP's steps that carry no money as facts
+  from every status" in `payment_steps::every_command_follows_the_table_from_every_status`,
+  renamed `each_move_without_money_follows_the_table`. A lapse and a settlement answer no
+  request, so they are tried as facts from every status, and `cancel` as before. A decline
+  and a void answer their request, which the catch-up checks before the table (ADR-0041),
+  and a payment has one request for its authorization (ADR-0039), so each is tried where
+  its request can wait: a decline from `created`, a void from `authorized`. From any other
+  status one is a contradiction, which `catching_up.rs` stops.
+
 ## References
 
 - Erik Kuefler, [Unit Testing](https://abseil.io/resources/swe-book/html/ch12.html), chapter

@@ -1,14 +1,15 @@
 // Author: Nicola Antonello
 
-//! The commands that carry no amount, through the library, as the runtime role:
-//! decline, cancel, void, expire and settle (ADR-0016, ADR-0019).
+//! The moves that carry no amount (ADR-0016, ADR-0019): the merchant's cancel, and the
+//! PSP's decline, void, lapse and settlement, which reach a payment as facts through a
+//! catch-up (ADR-0031, ADR-0041).
 //!
-//! Every later command shares their path, so this is also where that path is
-//! tried: the payment's lock (ADR-0018), identity before state, and what each
-//! failure proves. Payments reach each status through raw SQL, and a test that
-//! needs a "first attempt" writes it the same way, under the same lock. Faults
-//! that the types rule out are injected with triggers that the owner adds to the
-//! test's own database.
+//! Every command shares the cancel's path, so this is also where that path is tried: the
+//! payment's lock (ADR-0018), identity before state, and what each failure proves. Those
+//! tests reach each status through raw SQL that writes only the merchant's steps, and a
+//! test that needs a "first attempt" writes it the same way, under the same lock. Faults
+//! that the types rule out are injected with triggers that the owner adds to the test's
+//! own database.
 
 mod common;
 
@@ -17,44 +18,39 @@ use std::fs;
 use std::path::Path;
 
 use common::payments::{
-    AUTHORIZED, REQUESTED, Step, books, committed_at, insert_authorization, refund_step, status_of,
-    steps, take_lock,
+    AUTHORIZED, REQUESTED, Step, books, committed_at, create_command, fee_rate, status_of, steps,
+    take_lock,
 };
+use common::psp::{PspSide, client_of};
 use common::{
-    CHECK_VIOLATION, UNIQUE_VIOLATION, assert_guard, assert_violation, runtime_pool,
-    runtime_pool_of_one, runtime_pool_with_lock_timeout, runtime_transaction, sqlstate, test_uuid,
-    transition_id, wait_for_lock_wait,
+    CHECK_VIOLATION, UNIQUE_VIOLATION, assert_guard, assert_violation, merchant_id, request_id,
+    runtime_pool, runtime_pool_of_one, runtime_pool_with_lock_timeout, runtime_transaction,
+    sqlstate, tenant_pool, test_uuid, transition_id, wait_for_lock_wait,
 };
 use futures_util::future::{join, join_all};
+use mock_psp::wire::Detail;
+use payments_core::catch_up::{CaughtUp, Stop, StopReason, catch_up};
 use payments_core::db::commit;
-use payments_core::ids::PaymentId;
-use payments_core::lifecycle::{Event, IllegalTransition, PaymentStatus, next};
+use payments_core::ids::{MerchantId, PaymentId, TransitionId};
+use payments_core::lifecycle::{Event, IllegalTransition, PaymentStatus, Transition, next};
+use payments_core::money::PositiveAmount;
 use payments_core::payments::{
-    Outcome, Recorded, StepCommand, StepError, cancel, decline, expire, lock_key, settle, void,
+    Outcome, Recorded, StepCommand, StepError, cancel, create_payment, find_payment, lock_key,
+    register_merchant,
 };
+use payments_core::requests::{Ask, RecordRequest};
+use payments_core::tenancy::Tenant;
 use sqlx::{PgPool, Postgres, Transaction};
 
 type TestResult = Result<(), Box<dyn Error>>;
 
-/// What declining a payment that stands at its first step records.
-const DECLINED: Recorded = Recorded {
+/// What cancelling a payment that stands at its first step records.
+const CANCELLED: Recorded = Recorded {
     seq: 1,
     from: PaymentStatus::Created,
-    to: PaymentStatus::Failed,
+    to: PaymentStatus::Voided,
     refundable: 0,
 };
-
-/// Sends the command for this event.
-async fn send(app: &PgPool, event: Event, command: &StepCommand) -> Result<Outcome, StepError> {
-    match event {
-        Event::Decline => decline(app, command).await,
-        Event::Cancel => cancel(app, command).await,
-        Event::Void => void(app, command).await,
-        Event::Expire => expire(app, command).await,
-        Event::Settle => settle(app, command).await,
-        other => panic!("{other:?} is not a command without an amount"),
-    }
-}
 
 /// A command with step ID `n` on the payment that `step` belongs to.
 fn command_on(n: u32, step: &Step) -> StepCommand {
@@ -66,7 +62,7 @@ fn command_on(n: u32, step: &Step) -> StepCommand {
 
 /// A first attempt of `command`, uncommitted: under the lock, with its step
 /// written as the library writes it.
-async fn first_attempt_of_decline(
+async fn first_attempt_of_cancel(
     pool: &PgPool,
     first: &Step,
     command: &StepCommand,
@@ -75,84 +71,268 @@ async fn first_attempt_of_decline(
     take_lock(&mut attempt, command.payment).await?;
     let stored = Step {
         id: command.step.get(),
-        ..first.then("decline", "failed", 0, 0)
+        ..first.then("cancel", "voided", 0, 0)
     };
     stored.insert(&mut attempt).await?;
     Ok(attempt)
 }
 
-#[sqlx::test]
-async fn every_command_follows_the_table_from_every_status(pool: PgPool) -> TestResult {
-    // 7 statuses and 5 commands, 35 pairs against the real tables. Rust's table
-    // is checked on its own in the lifecycle's unit tests.
-    let books = books(&pool).await?;
-    let app = runtime_pool(&pool).await?;
-    let mut n = 0;
-    for &status in PaymentStatus::ALL {
-        for event in [
-            Event::Decline,
-            Event::Cancel,
-            Event::Void,
-            Event::Expire,
-            Event::Settle,
-        ] {
-            n += 1;
-            let newest = committed_at(&pool, &books, status).await?;
-            let command = command_on(n, &newest);
-            let result = send(&app, event, &command).await;
-            let context = format!("{event:?} from {status}");
-            match next(status, event) {
-                Ok(step) => {
-                    let seq = newest.seq + 1;
-                    let reply = Recorded {
-                        seq,
-                        from: status,
-                        to: step.to(),
-                        refundable: newest.refundable,
-                    };
-                    assert_eq!(result?, Outcome::Applied(reply), "{context}");
-                    // Its retry finds the step, though the new status refuses the
-                    // event, so each command must store the kind it compares.
-                    assert_eq!(
-                        send(&app, event, &command).await?,
-                        Outcome::AlreadyApplied(reply),
-                        "{context}"
-                    );
-                    let row = sqlx::query!(
-                        "SELECT payment_id, seq, prev_seq, kind, from_status, to_status, amount, \
-                                prev_refundable, refundable \
-                           FROM payment_transitions WHERE id = $1",
-                        command.step.get()
-                    )
-                    .fetch_one(&pool)
-                    .await?;
-                    assert_eq!(row.payment_id, newest.payment_id, "{context}");
-                    assert_eq!((row.seq, row.prev_seq), (seq, newest.seq), "{context}");
-                    assert_eq!(row.kind, step.kind().as_str(), "{context}");
-                    assert_eq!(row.from_status, status.as_str(), "{context}");
-                    assert_eq!(row.to_status, step.to().as_str(), "{context}");
-                    assert_eq!(row.amount, 0, "{context}");
-                    assert_eq!(row.prev_refundable, newest.refundable, "{context}");
-                    assert_eq!(row.refundable, newest.refundable, "{context}");
-                    assert_eq!(status_of(&app, command.payment).await?, step.to());
-                }
-                Err(illegal) => {
-                    let err = result.unwrap_err();
-                    assert!(
-                        matches!(err, StepError::Illegal(got) if got == illegal),
-                        "{context}: {err:?}"
-                    );
-                    assert_eq!(status_of(&app, command.payment).await?, status);
-                    assert_eq!(
-                        steps(&pool, command.payment).await?,
-                        i64::from(newest.seq) + 1,
-                        "{context}"
-                    );
-                }
+/// A merchant, registered by the system role, and a pool of the tenant role, on which it
+/// asks.
+async fn registered(pool: &PgPool) -> Result<(PgPool, MerchantId), Box<dyn Error>> {
+    let system = runtime_pool(pool).await?;
+    let merchant = merchant_id(1);
+    register_merchant(&system, merchant, fee_rate()).await?;
+    system.close().await;
+    Ok((tenant_pool(pool).await?, merchant))
+}
+
+fn amount(minor: i64) -> PositiveAmount {
+    PositiveAmount::new(minor).expect("valid amount")
+}
+
+/// Request `n`: the authorization of all of this payment.
+fn authorization(n: u32, payment: PaymentId) -> RecordRequest {
+    RecordRequest {
+        request: request_id(n),
+        payment,
+        ask: Ask::Authorize(amount(REQUESTED)),
+    }
+}
+
+/// Creates payment `n` as its merchant and takes it to `status` as the server would: the
+/// merchant's own steps, and the PSP's word through the fake.
+async fn at(
+    psp: &mut PspSide,
+    me: Tenant<'_>,
+    merchant: MerchantId,
+    n: u32,
+    status: PaymentStatus,
+) -> Result<PaymentId, Box<dyn Error>> {
+    let command = create_command(n, merchant);
+    create_payment(me, &command).await?;
+    let payment = command.id;
+    match status {
+        PaymentStatus::Created => {}
+        PaymentStatus::Failed => {
+            let asked = authorization(n, payment);
+            psp.sent(me, &asked).await;
+            psp.fake.decline(asked.request.get());
+            psp.caught_up(payment).await;
+        }
+        PaymentStatus::Voided => {
+            let cancelling = StepCommand {
+                step: transition_id(n + 1000),
+                payment,
+            };
+            cancel(me, &cancelling).await?;
+        }
+        PaymentStatus::Authorized
+        | PaymentStatus::Captured
+        | PaymentStatus::Settled
+        | PaymentStatus::Refunded => {
+            psp.authorized(me, payment).await;
+            if status != PaymentStatus::Authorized {
+                psp.captured(me, payment).await;
+            }
+            if status == PaymentStatus::Settled {
+                psp.fake.settle(payment.get());
+                psp.caught_up(payment).await;
+            }
+            if status == PaymentStatus::Refunded {
+                psp.applied(me, payment, Ask::Refund(amount(AUTHORIZED)))
+                    .await;
             }
         }
     }
-    app.close().await;
+    Ok(payment)
+}
+
+/// The PSP's lapse or settlement of `payment`: decided by the fake where a PSP could,
+/// and appended where none would (ADR-0038).
+fn lapse_or_settle(psp: &PspSide, payment: PaymentId, status: PaymentStatus, event: Event) {
+    match (event, status) {
+        (Event::Expire, PaymentStatus::Authorized) => psp.fake.expire(payment.get()),
+        (Event::Expire, _) => psp.fake.append(payment.get(), Detail::Expired),
+        // Settled after a full refund too (ADR-0016).
+        (Event::Settle, PaymentStatus::Captured | PaymentStatus::Refunded) => {
+            psp.fake.settle(payment.get());
+        }
+        (Event::Settle, _) => psp.fake.append(payment.get(), Detail::Settled),
+        _ => unreachable!("only a lapse and a settlement answer no request"),
+    }
+}
+
+/// Where a payment stands: its newest step's `seq`, and what it leaves refundable.
+async fn newest(pool: &PgPool, payment: PaymentId) -> Result<(i32, i64), Box<dyn Error>> {
+    let count = steps(pool, payment).await?;
+    let stored = find_payment(pool, payment).await?.ok_or("stored")?;
+    Ok((i32::try_from(count - 1)?, stored.refundable))
+}
+
+/// Checks that `payment` moved from `status` by `step`, after a newest step at `seq`
+/// that left `refundable`: a step that moves no money, and the status it leads to.
+async fn assert_moved(
+    pool: &PgPool,
+    payment: PaymentId,
+    (seq, refundable): (i32, i64),
+    status: PaymentStatus,
+    step: Transition,
+    context: &str,
+) -> TestResult {
+    let row = sqlx::query!(
+        "SELECT prev_seq, kind, from_status, to_status, amount, prev_refundable, refundable \
+           FROM payment_transitions WHERE payment_id = $1 AND seq = $2",
+        payment.get(),
+        seq + 1
+    )
+    .fetch_one(pool)
+    .await?;
+    assert_eq!(row.prev_seq, seq, "{context}");
+    assert_eq!(row.kind, step.kind().as_str(), "{context}");
+    assert_eq!(row.from_status, status.as_str(), "{context}");
+    assert_eq!(row.to_status, step.to().as_str(), "{context}");
+    assert_eq!(row.amount, 0, "{context}");
+    assert_eq!(
+        (row.prev_refundable, row.refundable),
+        (refundable, refundable),
+        "{context}"
+    );
+    assert_eq!(status_of(pool, payment).await?, step.to(), "{context}");
+    Ok(())
+}
+
+#[sqlx::test]
+async fn each_move_without_money_follows_the_table(pool: PgPool) -> TestResult {
+    // The PSP's lapse and settlement, which answer no request, as facts from all 7
+    // statuses, and the merchant's cancel from all 7, against the real tables. A decline
+    // or a void answers its request, which the catch-up checks first (ADR-0041), so each
+    // is tried where its request can wait; `catching_up.rs` stops one that answers no
+    // waiting request. Rust's table is checked on its own in the lifecycle's unit tests.
+    let (tenant, merchant) = registered(&pool).await?;
+    let me = Tenant::new(&tenant, merchant);
+    let mut psp = PspSide::start(&pool).await?;
+    let client = client_of(&psp.fake);
+    let mut n = 0;
+    for &status in PaymentStatus::ALL {
+        for event in [Event::Expire, Event::Settle] {
+            n += 1;
+            let payment = at(&mut psp, me, merchant, n, status).await?;
+            let before = newest(&psp.system, payment).await?;
+            lapse_or_settle(&psp, payment, status, event);
+            let caught_up = catch_up(&psp.system, &client, payment).await?;
+            let context = format!("{event:?} from {status}");
+            match next(status, event) {
+                Ok(step) => {
+                    assert_eq!(caught_up, CaughtUp::Current { applied: 1 }, "{context}");
+                    assert_moved(&pool, payment, before, status, step, &context).await?;
+                    // Caught up again, it applies nothing twice.
+                    assert_eq!(
+                        catch_up(&psp.system, &client, payment).await?,
+                        CaughtUp::Current { applied: 0 },
+                        "{context}"
+                    );
+                }
+                // A settlement after a full refund is recorded without a step (ADR-0016).
+                Err(_) if (status, event) == (PaymentStatus::Refunded, Event::Settle) => {
+                    assert_eq!(caught_up, CaughtUp::Current { applied: 1 }, "{context}");
+                    assert_eq!(newest(&psp.system, payment).await?, before, "{context}");
+                }
+                Err(_) => {
+                    let history = psp.fake.history(payment.get()).ok_or("a history")?;
+                    let stop = Stop {
+                        position: i32::try_from(history.facts.len())?,
+                        reason: StopReason::NoPlace,
+                    };
+                    assert_eq!(
+                        caught_up,
+                        CaughtUp::Stopped { applied: 0, stop },
+                        "{context}"
+                    );
+                    assert_eq!(newest(&psp.system, payment).await?, before, "{context}");
+                    assert_eq!(status_of(&psp.system, payment).await?, status, "{context}");
+                }
+            }
+        }
+        // The merchant's cancel, as a command.
+        n += 1;
+        let payment = at(&mut psp, me, merchant, n, status).await?;
+        let before = newest(&psp.system, payment).await?;
+        let command = StepCommand {
+            step: transition_id(n + 2000),
+            payment,
+        };
+        let result = cancel(me, &command).await;
+        let context = format!("Cancel from {status}");
+        match next(status, Event::Cancel) {
+            Ok(step) => {
+                let reply = Recorded {
+                    seq: before.0 + 1,
+                    from: status,
+                    to: step.to(),
+                    refundable: before.1,
+                };
+                assert_eq!(result?, Outcome::Applied(reply), "{context}");
+                // Its retry finds the step, though the new status refuses the event, so
+                // the command must store the kind it compares.
+                assert_eq!(
+                    cancel(me, &command).await?,
+                    Outcome::AlreadyApplied(reply),
+                    "{context}"
+                );
+                assert_moved(&pool, payment, before, status, step, &context).await?;
+            }
+            Err(illegal) => {
+                let err = result.unwrap_err();
+                assert!(
+                    matches!(err, StepError::Illegal(got) if got == illegal),
+                    "{context}: {err:?}"
+                );
+                assert_eq!(newest(&psp.system, payment).await?, before, "{context}");
+                assert_eq!(status_of(&psp.system, payment).await?, status, "{context}");
+            }
+        }
+    }
+    // A decline answers the authorization's request, which waits while the payment is
+    // created, and a void answers its own, which waits while the payment is authorized.
+    n += 1;
+    let payment = at(&mut psp, me, merchant, n, PaymentStatus::Created).await?;
+    let asked = authorization(n, payment);
+    psp.sent(me, &asked).await;
+    psp.fake.decline(asked.request.get());
+    psp.caught_up(payment).await;
+    let declined = next(PaymentStatus::Created, Event::Decline)?;
+    assert_moved(
+        &pool,
+        payment,
+        (0, 0),
+        PaymentStatus::Created,
+        declined,
+        "Decline from created",
+    )
+    .await?;
+    n += 1;
+    let payment = at(&mut psp, me, merchant, n, PaymentStatus::Authorized).await?;
+    let voiding = RecordRequest {
+        request: request_id(n),
+        payment,
+        ask: Ask::Void,
+    };
+    psp.sent(me, &voiding).await;
+    psp.fake.approve(voiding.request.get());
+    psp.caught_up(payment).await;
+    let voided = next(PaymentStatus::Authorized, Event::Void)?;
+    assert_moved(
+        &pool,
+        payment,
+        (1, 0),
+        PaymentStatus::Authorized,
+        voided,
+        "Void from authorized",
+    )
+    .await?;
+    tenant.close().await;
+    psp.close().await;
     Ok(())
 }
 
@@ -163,7 +343,7 @@ async fn a_command_on_an_unknown_payment_is_not_found(pool: PgPool) -> TestResul
         step: transition_id(1),
         payment: PaymentId::try_from(test_uuid(1))?,
     };
-    let err = decline(&app, &command).await.unwrap_err();
+    let err = cancel(&app, &command).await.unwrap_err();
     assert!(
         matches!(err, StepError::NotFound { payment } if payment == command.payment),
         "{err:?}"
@@ -177,16 +357,16 @@ async fn a_retry_gets_the_stored_reply_although_the_status_has_moved_on(
     pool: PgPool,
 ) -> TestResult {
     // Checked against the state first, this retry would be refused as illegal:
-    // a failed payment cannot be declined (ADR-0019).
+    // a voided payment cannot be cancelled (ADR-0019).
     let books = books(&pool).await?;
     let app = runtime_pool(&pool).await?;
     let first = committed_at(&pool, &books, PaymentStatus::Created).await?;
     let command = command_on(1, &first);
-    assert_eq!(decline(&app, &command).await?, Outcome::Applied(DECLINED));
+    assert_eq!(cancel(&app, &command).await?, Outcome::Applied(CANCELLED));
     for _ in 0..2 {
         assert_eq!(
-            decline(&app, &command).await?,
-            Outcome::AlreadyApplied(DECLINED)
+            cancel(&app, &command).await?,
+            Outcome::AlreadyApplied(CANCELLED)
         );
     }
     assert_eq!(steps(&pool, command.payment).await?, 2);
@@ -196,34 +376,33 @@ async fn a_retry_gets_the_stored_reply_although_the_status_has_moved_on(
 
 #[sqlx::test]
 async fn a_retry_gets_its_own_steps_reply_and_not_the_newest_steps(pool: PgPool) -> TestResult {
-    let books = books(&pool).await?;
-    let app = runtime_pool(&pool).await?;
-    let captured = committed_at(&pool, &books, PaymentStatus::Captured).await?;
-    let command = command_on(1, &captured);
-    let settled = Recorded {
-        seq: captured.seq + 1,
-        from: PaymentStatus::Captured,
-        to: PaymentStatus::Settled,
-        refundable: AUTHORIZED,
+    // A create, then a newer step from the PSP's fact: the create's retry gets the
+    // create's own reply, by identity (ADR-0019).
+    let (tenant, merchant) = registered(&pool).await?;
+    let me = Tenant::new(&tenant, merchant);
+    let mut psp = PspSide::start(&pool).await?;
+    let command = create_command(1, merchant);
+    let created = Recorded {
+        seq: 0,
+        from: PaymentStatus::Created,
+        to: PaymentStatus::Created,
+        refundable: 0,
     };
-    assert_eq!(settle(&app, &command).await?, Outcome::Applied(settled));
-    // A newer step, written after it: the rest of the capture is refunded.
-    let mut tx = runtime_transaction(&pool).await?;
-    let stored = Step {
-        id: command.step.get(),
-        ..captured.then("settle", "settled", 0, AUTHORIZED)
-    };
-    refund_step(&mut tx, &books, &stored, "refunded", AUTHORIZED).await?;
-    commit(tx).await?;
     assert_eq!(
-        status_of(&app, command.payment).await?,
-        PaymentStatus::Refunded
+        create_payment(me, &command).await?,
+        Outcome::Applied(created)
+    );
+    psp.authorized(me, command.id).await;
+    assert_eq!(
+        status_of(&psp.system, command.id).await?,
+        PaymentStatus::Authorized
     );
     assert_eq!(
-        settle(&app, &command).await?,
-        Outcome::AlreadyApplied(settled)
+        create_payment(me, &command).await?,
+        Outcome::AlreadyApplied(created)
     );
-    app.close().await;
+    tenant.close().await;
+    psp.close().await;
     Ok(())
 }
 
@@ -231,15 +410,20 @@ async fn a_retry_gets_its_own_steps_reply_and_not_the_newest_steps(pool: PgPool)
 async fn a_changed_retry_is_a_mismatch(pool: PgPool) -> TestResult {
     let books = books(&pool).await?;
     let app = runtime_pool(&pool).await?;
+    // The ID of the payment's create, sent as a cancel of the same payment.
     let first = committed_at(&pool, &books, PaymentStatus::Created).await?;
-    let command = command_on(1, &first);
-    decline(&app, &command).await?;
-    // The same ID, as another kind of step on the same payment.
-    let err = cancel(&app, &command).await.unwrap_err();
+    let same_id = StepCommand {
+        step: TransitionId::try_from(first.id)?,
+        payment: PaymentId::try_from(first.payment_id)?,
+    };
+    let err = cancel(&app, &same_id).await.unwrap_err();
     assert!(matches!(err, StepError::Mismatch { .. }), "{err:?}");
-    // The same ID, on another payment, which stays as it was.
+    assert_eq!(steps(&pool, same_id.payment).await?, 1);
+    // A cancel's ID, on another payment, which stays as it was.
+    let command = command_on(1, &first);
+    cancel(&app, &command).await?;
     let other = committed_at(&pool, &books, PaymentStatus::Created).await?;
-    let err = decline(&app, &command_on(1, &other)).await.unwrap_err();
+    let err = cancel(&app, &command_on(1, &other)).await.unwrap_err();
     let StepError::Mismatch { step } = err else {
         panic!("expected Mismatch, got {err:?}");
     };
@@ -255,37 +439,30 @@ async fn a_changed_retry_is_a_mismatch(pool: PgPool) -> TestResult {
 
 #[sqlx::test]
 async fn a_refused_command_is_decided_again(pool: PgPool) -> TestResult {
-    // Rejections are not stored (ADR-0019), so one refused while the payment
-    // was created succeeds later, with the same ID.
+    // Rejections are not stored (ADR-0019): a refused command is decided again each
+    // time, and its ID stays free for a command that applies.
     let books = books(&pool).await?;
     let app = runtime_pool(&pool).await?;
+    let voided = committed_at(&pool, &books, PaymentStatus::Voided).await?;
+    let refused = command_on(1, &voided);
+    for _ in 0..2 {
+        let err = cancel(&app, &refused).await.unwrap_err();
+        assert!(
+            matches!(
+                err,
+                StepError::Illegal(IllegalTransition {
+                    status: PaymentStatus::Voided,
+                    event: Event::Cancel,
+                })
+            ),
+            "{err:?}"
+        );
+    }
+    assert_eq!(steps(&pool, refused.payment).await?, 2);
     let first = committed_at(&pool, &books, PaymentStatus::Created).await?;
-    let command = command_on(1, &first);
-    let err = void(&app, &command).await.unwrap_err();
-    assert!(
-        matches!(
-            err,
-            StepError::Illegal(IllegalTransition {
-                status: PaymentStatus::Created,
-                event: Event::Void,
-            })
-        ),
-        "{err:?}"
-    );
-    assert_eq!(steps(&pool, command.payment).await?, 1);
-    let mut tx = runtime_transaction(&pool).await?;
-    let authorized = first.then("authorize", "authorized", AUTHORIZED, 0);
-    authorized.insert(&mut tx).await?;
-    insert_authorization(&mut tx, &authorized, REQUESTED).await?;
-    commit(tx).await?;
     assert_eq!(
-        void(&app, &command).await?,
-        Outcome::Applied(Recorded {
-            seq: 2,
-            from: PaymentStatus::Authorized,
-            to: PaymentStatus::Voided,
-            refundable: 0,
-        })
+        cancel(&app, &command_on(1, &first)).await?,
+        Outcome::Applied(CANCELLED)
     );
     app.close().await;
     Ok(())
@@ -299,15 +476,15 @@ async fn eight_concurrent_copies_apply_once(pool: PgPool) -> TestResult {
     let app = runtime_pool(&pool).await?;
     let first = committed_at(&pool, &books, PaymentStatus::Created).await?;
     let copies: Vec<StepCommand> = (0..8).map(|_| command_on(1, &first)).collect();
-    let results = join_all(copies.iter().map(|copy| decline(&app, copy))).await;
+    let results = join_all(copies.iter().map(|copy| cancel(&app, copy))).await;
     let mut applied = 0;
     for result in results {
         match result? {
             Outcome::Applied(recorded) => {
                 applied += 1;
-                assert_eq!(recorded, DECLINED);
+                assert_eq!(recorded, CANCELLED);
             }
-            Outcome::AlreadyApplied(recorded) => assert_eq!(recorded, DECLINED),
+            Outcome::AlreadyApplied(recorded) => assert_eq!(recorded, CANCELLED),
         }
     }
     assert_eq!(applied, 1);
@@ -318,33 +495,30 @@ async fn eight_concurrent_copies_apply_once(pool: PgPool) -> TestResult {
 
 #[sqlx::test]
 async fn racing_commands_get_one_winner_and_a_domain_answer(pool: PgPool) -> TestResult {
-    // Whichever gets the lock first, the other waits, reads the winner's step
-    // and is refused by the table, with no database error (ADR-0018).
+    // Two cancels with IDs of their own: whichever gets the lock first, the other
+    // waits, reads the winner's step and is refused by the table, with no database
+    // error (ADR-0018).
     let books = books(&pool).await?;
     let app = runtime_pool(&pool).await?;
     for n in 0..8 {
         let first = committed_at(&pool, &books, PaymentStatus::Created).await?;
-        let declining = command_on(2 * n + 1, &first);
-        let cancelling = command_on(2 * n + 2, &first);
-        let results = join(decline(&app, &declining), cancel(&app, &cancelling)).await;
-        let (status, event) = match results {
-            (Ok(Outcome::Applied(_)), Err(StepError::Illegal(illegal))) => {
-                assert_eq!(illegal.status, PaymentStatus::Failed);
-                (PaymentStatus::Failed, illegal.event)
-            }
-            (Err(StepError::Illegal(illegal)), Ok(Outcome::Applied(_))) => {
-                assert_eq!(illegal.status, PaymentStatus::Voided);
-                (PaymentStatus::Voided, illegal.event)
-            }
+        let one = command_on(2 * n + 1, &first);
+        let two = command_on(2 * n + 2, &first);
+        let results = join(cancel(&app, &one), cancel(&app, &two)).await;
+        let refused = match results {
+            (Ok(Outcome::Applied(_)), Err(StepError::Illegal(illegal)))
+            | (Err(StepError::Illegal(illegal)), Ok(Outcome::Applied(_))) => illegal,
             other => panic!("{other:?}"),
         };
-        let expected = match status {
-            PaymentStatus::Failed => Event::Cancel,
-            _ => Event::Decline,
-        };
-        assert_eq!(event, expected);
-        assert_eq!(status_of(&app, declining.payment).await?, status);
-        assert_eq!(steps(&pool, declining.payment).await?, 2);
+        assert_eq!(
+            refused,
+            IllegalTransition {
+                status: PaymentStatus::Voided,
+                event: Event::Cancel,
+            }
+        );
+        assert_eq!(status_of(&app, one.payment).await?, PaymentStatus::Voided);
+        assert_eq!(steps(&pool, one.payment).await?, 2);
     }
     app.close().await;
     Ok(())
@@ -366,7 +540,7 @@ async fn a_command_waits_for_the_lock_and_reads_what_its_holder_committed(
         .then("cancel", "voided", 0, 0)
         .insert(&mut holder)
         .await?;
-    let (answer, committed) = join(decline(&app, &command), async {
+    let (answer, committed) = join(cancel(&app, &command), async {
         wait_for_lock_wait(&pool, "advisory").await?;
         commit(holder).await?;
         Ok::<_, Box<dyn Error>>(())
@@ -379,7 +553,7 @@ async fn a_command_waits_for_the_lock_and_reads_what_its_holder_committed(
             err,
             StepError::Illegal(IllegalTransition {
                 status: PaymentStatus::Voided,
-                event: Event::Decline,
+                event: Event::Cancel,
             })
         ),
         "{err:?}"
@@ -396,17 +570,17 @@ async fn a_lock_timeout_is_not_confirmed_and_a_retry_settles_it(pool: PgPool) ->
     let books = books(&pool).await?;
     let first = committed_at(&pool, &books, PaymentStatus::Created).await?;
     let command = command_on(1, &first);
-    let attempt = first_attempt_of_decline(&pool, &first, &command).await?;
+    let attempt = first_attempt_of_cancel(&pool, &first, &command).await?;
     let retry = runtime_pool_with_lock_timeout(&pool, 200).await?;
-    let err = decline(&retry, &command).await.unwrap_err();
+    let err = cancel(&retry, &command).await.unwrap_err();
     let StepError::NotConfirmed { source, .. } = err else {
         panic!("expected NotConfirmed, got {err:?}");
     };
     assert_eq!(sqlstate(source), "55P03", "lock_not_available");
     commit(attempt).await?;
     assert_eq!(
-        decline(&retry, &command).await?,
-        Outcome::AlreadyApplied(DECLINED)
+        cancel(&retry, &command).await?,
+        Outcome::AlreadyApplied(CANCELLED)
     );
     retry.close().await;
     Ok(())
@@ -417,10 +591,10 @@ async fn a_retry_applies_after_a_first_attempt_rolls_back(pool: PgPool) -> TestR
     let books = books(&pool).await?;
     let first = committed_at(&pool, &books, PaymentStatus::Created).await?;
     let command = command_on(1, &first);
-    let attempt = first_attempt_of_decline(&pool, &first, &command).await?;
+    let attempt = first_attempt_of_cancel(&pool, &first, &command).await?;
     attempt.rollback().await?;
     let app = runtime_pool(&pool).await?;
-    assert_eq!(decline(&app, &command).await?, Outcome::Applied(DECLINED));
+    assert_eq!(cancel(&app, &command).await?, Outcome::Applied(CANCELLED));
     app.close().await;
     Ok(())
 }
@@ -433,12 +607,12 @@ async fn a_retry_outlasts_a_first_attempt_left_idle(pool: PgPool) -> TestResult 
     let books = books(&pool).await?;
     let first = committed_at(&pool, &books, PaymentStatus::Created).await?;
     let command = command_on(1, &first);
-    let mut attempt = first_attempt_of_decline(&pool, &first, &command).await?;
+    let mut attempt = first_attempt_of_cancel(&pool, &first, &command).await?;
     sqlx::query!("SET LOCAL idle_in_transaction_session_timeout = '1s'")
         .execute(&mut *attempt)
         .await?;
     let retry = runtime_pool_with_lock_timeout(&pool, 10_000).await?;
-    assert_eq!(decline(&retry, &command).await?, Outcome::Applied(DECLINED));
+    assert_eq!(cancel(&retry, &command).await?, Outcome::Applied(CANCELLED));
     // The server has ended the first attempt's session.
     assert!(attempt.commit().await.is_err());
     retry.close().await;
@@ -462,7 +636,7 @@ async fn a_writer_that_skips_the_lock_and_commits_first_makes_a_command_a_bug(
         .then("cancel", "voided", 0, 0)
         .insert(&mut writer)
         .await?;
-    let (answer, committed) = join(decline(&app, &command), async {
+    let (answer, committed) = join(cancel(&app, &command), async {
         wait_for_lock_wait(&pool, "transactionid").await?;
         commit(writer).await?;
         Ok::<_, Box<dyn Error>>(())
@@ -491,19 +665,22 @@ async fn a_duplicate_key_is_settled_by_the_step_with_the_commands_id(pool: PgPoo
     // has one connection, so the lookup cannot keep the failed transaction's.
     let books = books(&pool).await?;
     let app = runtime_pool_of_one(&pool).await?;
-    for (n, kind, to_status, equal) in [
-        (1, "decline", "failed", true),
-        (2, "cancel", "voided", false),
-    ] {
+    for (n, equal) in [(1, true), (2, false)] {
         let first = committed_at(&pool, &books, PaymentStatus::Created).await?;
         let command = command_on(n, &first);
+        // The same cancel, or one with the same ID on another payment.
+        let target = if equal {
+            first
+        } else {
+            committed_at(&pool, &books, PaymentStatus::Created).await?
+        };
         let mut writer = runtime_transaction(&pool).await?;
         let stored = Step {
             id: command.step.get(),
-            ..first.then(kind, to_status, 0, 0)
+            ..target.then("cancel", "voided", 0, 0)
         };
         stored.insert(&mut writer).await?;
-        let (answer, committed) = join(decline(&app, &command), async {
+        let (answer, committed) = join(cancel(&app, &command), async {
             wait_for_lock_wait(&pool, "transactionid").await?;
             commit(writer).await?;
             Ok::<_, Box<dyn Error>>(())
@@ -511,10 +688,11 @@ async fn a_duplicate_key_is_settled_by_the_step_with_the_commands_id(pool: PgPoo
         .await;
         committed?;
         if equal {
-            assert_eq!(answer?, Outcome::AlreadyApplied(DECLINED));
+            assert_eq!(answer?, Outcome::AlreadyApplied(CANCELLED));
         } else {
             let err = answer.unwrap_err();
             assert!(matches!(err, StepError::Mismatch { .. }), "{err:?}");
+            assert_eq!(steps(&pool, command.payment).await?, 1);
         }
     }
     app.close().await;
@@ -527,11 +705,12 @@ async fn a_batch_queues_behind_a_command_and_a_command_behind_the_batch(
 ) -> TestResult {
     // Phase 6 will settle many payments in one transaction: it locks them all
     // first, in ascending key order, and then waits its turn instead of aborting
-    // (ADR-0018). The batch here is raw SQL, under the same locks.
+    // (ADR-0018). The batch here is raw SQL under the same locks, and its steps
+    // are the merchant's own.
     let books = books(&pool).await?;
     let app = runtime_pool(&pool).await?;
-    let one = committed_at(&pool, &books, PaymentStatus::Captured).await?;
-    let two = committed_at(&pool, &books, PaymentStatus::Captured).await?;
+    let one = committed_at(&pool, &books, PaymentStatus::Created).await?;
+    let two = committed_at(&pool, &books, PaymentStatus::Created).await?;
     let mut ids = [one, two].map(|step| PaymentId::try_from(step.payment_id).expect("a UUIDv7"));
     ids.sort_by_key(|id| lock_key(*id));
 
@@ -558,12 +737,12 @@ async fn a_batch_queues_behind_a_command_and_a_command_behind_the_batch(
     // The batch holds both keys and writes, so a real command waits in turn,
     // then gets a domain answer.
     for step in [one, two] {
-        step.then("settle", "settled", 0, AUTHORIZED)
+        step.then("cancel", "voided", 0, 0)
             .insert(&mut batch)
             .await?;
     }
     let command = command_on(1, &one);
-    let (answer, committed) = join(settle(&app, &command), async {
+    let (answer, committed) = join(cancel(&app, &command), async {
         wait_for_lock_wait(&pool, "advisory").await?;
         commit(batch).await?;
         Ok::<_, Box<dyn Error>>(())
@@ -575,14 +754,14 @@ async fn a_batch_queues_behind_a_command_and_a_command_behind_the_batch(
         matches!(
             err,
             StepError::Illegal(IllegalTransition {
-                status: PaymentStatus::Settled,
-                event: Event::Settle,
+                status: PaymentStatus::Voided,
+                event: Event::Cancel,
             })
         ),
         "{err:?}"
     );
     for id in ids {
-        assert_eq!(status_of(&app, id).await?, PaymentStatus::Settled);
+        assert_eq!(status_of(&app, id).await?, PaymentStatus::Voided);
     }
     app.close().await;
     Ok(())
@@ -607,7 +786,7 @@ async fn a_write_that_a_trigger_corrupts_is_a_bug(pool: PgPool) -> TestResult {
     .await?;
     let app = runtime_pool(&pool).await?;
     let command = command_on(1, &first);
-    let err = decline(&app, &command).await.unwrap_err();
+    let err = cancel(&app, &command).await.unwrap_err();
     let StepError::Invariant { source, .. } = err else {
         panic!("expected Invariant, got {err:?}");
     };
@@ -675,14 +854,14 @@ async fn an_unproven_commit_failure_is_settled_by_sending_again(pool: PgPool) ->
     .await?;
     let app = runtime_pool(&pool).await?;
     let command = command_on(1, &first);
-    let err = decline(&app, &command).await.unwrap_err();
+    let err = cancel(&app, &command).await.unwrap_err();
     assert!(matches!(err, StepError::NotConfirmed { .. }), "{err:?}");
     assert_eq!(steps(&pool, command.payment).await?, 1);
     // The caller's one rule: send the same command again.
     sqlx::query!("DROP TRIGGER zz_end_session ON payment_transitions")
         .execute(&pool)
         .await?;
-    assert_eq!(decline(&app, &command).await?, Outcome::Applied(DECLINED));
+    assert_eq!(cancel(&app, &command).await?, Outcome::Applied(CANCELLED));
     app.close().await;
     Ok(())
 }
