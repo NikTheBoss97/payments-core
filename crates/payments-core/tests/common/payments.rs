@@ -12,17 +12,12 @@ use payments_core::db::commit;
 use payments_core::ids::{MerchantId, PaymentId};
 use payments_core::lifecycle::PaymentStatus;
 use payments_core::money::{BasisPoints, Currency, PositiveAmount};
-use payments_core::payments::{
-    AccountCandidates, Authorize, Capture, CreatePayment, Refund, create_payment, find_payment,
-    lock_key,
-};
+use payments_core::payments::{AccountCandidates, CreatePayment, find_payment, lock_key};
 use payments_core::times::BusinessTime;
 use sqlx::{PgConnection, PgPool, Postgres, Transaction};
 use uuid::{Uuid, uuid};
 
-use super::{
-    account_id, payment_id, runtime_connection, runtime_transaction, transaction_id, transition_id,
-};
+use super::{account_id, payment_id, runtime_connection, runtime_transaction, transition_id};
 
 /// A valid UUID that is not version 7.
 pub const VERSION_4: Uuid = uuid!("019b76da-a800-4000-8000-000000000001");
@@ -60,74 +55,16 @@ pub fn create_command(n: u32, merchant: MerchantId) -> CreatePayment {
     }
 }
 
-/// When the test authorizations expire: a time that the command carries, and a
-/// retry compares (ADR-0022).
+/// When the test authorizations expire (ADR-0022).
 pub fn deadline() -> BusinessTime {
     let time = "2026-01-08T12:00:00.123456Z".parse().expect("a valid time");
     BusinessTime::new(time).expect("a time that can be stored")
-}
-
-/// The command that authorizes a payment for [`AUTHORIZED`]. Its step ID is
-/// `1000 + n`, apart from those of [`create_command`].
-pub fn authorize_command(n: u32, payment: PaymentId) -> Authorize {
-    Authorize {
-        step: transition_id(n.checked_add(1000).expect("a small n")),
-        payment,
-        amount: PositiveAmount::new(AUTHORIZED).expect("valid amount"),
-        expires_at: deadline(),
-    }
 }
 
 /// When the test captures took effect.
 pub fn capture_time() -> BusinessTime {
     let time = "2026-01-05T09:30:00.654321Z".parse().expect("a valid time");
     BusinessTime::new(time).expect("a time that can be stored")
-}
-
-/// The command that captures a payment for [`AUTHORIZED`]. Its step ID is
-/// `2000 + n`, apart from those of the commands above, and its posting's ID is `n`.
-pub fn capture_command(n: u32, payment: PaymentId) -> Capture {
-    Capture {
-        step: transition_id(n.checked_add(2000).expect("a small n")),
-        posting: transaction_id(n),
-        payment,
-        amount: PositiveAmount::new(AUTHORIZED).expect("valid amount"),
-        captured_at: capture_time(),
-    }
-}
-
-/// When the test refunds took effect.
-pub fn refund_time() -> BusinessTime {
-    let time = "2026-01-12T16:45:00.111222Z".parse().expect("a valid time");
-    BusinessTime::new(time).expect("a time that can be stored")
-}
-
-/// The command that refunds this much of a payment. Its step ID is `3000 + n`,
-/// apart from those of the commands above, and its posting's ID is `1000 + n`,
-/// apart from those of the captures.
-pub fn refund_command(n: u32, payment: PaymentId, minor: i64) -> Refund {
-    Refund {
-        step: transition_id(n.checked_add(3000).expect("a small n")),
-        posting: transaction_id(n.checked_add(1000).expect("a small n")),
-        payment,
-        amount: PositiveAmount::new(minor).expect("valid amount"),
-        refunded_at: refund_time(),
-    }
-}
-
-/// Creates payment `n` at this fee rate, through the library, and returns its ID.
-pub async fn created_with(
-    app: &PgPool,
-    merchant: MerchantId,
-    n: u32,
-    fee_rate: BasisPoints,
-) -> Result<PaymentId, Box<dyn Error>> {
-    let command = CreatePayment {
-        fee_rate,
-        ..create_command(n, merchant)
-    };
-    create_payment(app, &command).await?;
-    Ok(command.id)
 }
 
 /// An account's balance, debits minus credits. An account that does not exist yet
