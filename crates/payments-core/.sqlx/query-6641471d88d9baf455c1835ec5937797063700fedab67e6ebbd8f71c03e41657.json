@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT payment_id, amount, authorized_amount, fee, captured_at, ledger_transaction_id FROM payment_captures WHERE transition_id = $1",
+  "query": "SELECT payment_id, amount, authorized_amount, fee, captured_at FROM payment_captures WHERE transition_id = $1",
   "describe": {
     "columns": [
       {
@@ -57,17 +57,6 @@
             "name": "captured_at"
           }
         }
-      },
-      {
-        "ordinal": 5,
-        "name": "ledger_transaction_id",
-        "type_info": "Uuid",
-        "origin": {
-          "Table": {
-            "table": "payment_captures",
-            "name": "ledger_transaction_id"
-          }
-        }
       }
     ],
     "parameters": {
@@ -80,9 +69,8 @@
       false,
       false,
       false,
-      false,
       false
     ]
   },
-  "hash": "04143c85c6c09935a2239c95f25955437fc24c7caa0f108c0ccca8341f2403e2"
+  "hash": "6641471d88d9baf455c1835ec5937797063700fedab67e6ebbd8f71c03e41657"
 }
