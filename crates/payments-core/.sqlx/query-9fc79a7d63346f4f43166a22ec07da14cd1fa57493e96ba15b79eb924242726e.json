@@ -1,16 +1,16 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT seq, prev_seq, kind, from_status, to_status, amount, prev_refundable, refundable FROM payment_transitions WHERE id = $1",
+  "query": "SELECT id, prev_seq, kind, from_status, to_status, amount, prev_refundable, refundable FROM payment_transitions WHERE payment_id = $1 AND seq = 3",
   "describe": {
     "columns": [
       {
         "ordinal": 0,
-        "name": "seq",
-        "type_info": "Int4",
+        "name": "id",
+        "type_info": "Uuid",
         "origin": {
           "Table": {
             "table": "payment_transitions",
-            "name": "seq"
+            "name": "id"
           }
         }
       },
@@ -108,5 +108,5 @@
       false
     ]
   },
-  "hash": "b48ccb0bf4d80d4f683c352aee99fc60b76fd6b6039c3a194f20e7dc783b5d07"
+  "hash": "9fc79a7d63346f4f43166a22ec07da14cd1fa57493e96ba15b79eb924242726e"
 }

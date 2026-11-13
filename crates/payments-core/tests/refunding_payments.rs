@@ -1,75 +1,101 @@
 // Author: Nicola Antonello
 
-//! Refunding a payment through the library, as the runtime role (ADR-0016,
-//! ADR-0019, ADR-0020). What can be refunded falls with each refund, so its limit
-//! depends on every refund before it, and racing refunds are where the lock and
-//! the history's constraints earn their keep. The path that every command shares
-//! is tried in `payment_steps.rs`.
+//! Refunding a payment (ADR-0016, ADR-0020). What can be refunded falls with each refund,
+//! so a refund's limit depends on every refund before it, and on the refunds that wait for
+//! the PSP when the merchant asks (ADR-0039). The PSP's refund reaches the payment through
+//! a catch-up (ADR-0031, ADR-0041). The path that every command shares is tried in
+//! `payment_steps.rs`.
 
 mod common;
 
 use std::error::Error;
 
 use common::payments::{
-    AUTHORIZED, FEE, authorize_command, balance_of, books, capture_command, committed_at,
-    created_with, eur, fee_rate, refund_command, status_of, steps, unbalanced_currencies,
-    uncaused_postings,
+    AUTHORIZED, FEE, balance_of, books, committed_at, create_command, eur, fee_rate, requests_of,
+    status_of, steps, unbalanced_currencies, uncaused_postings,
 };
-use common::{
-    assert_guard, merchant_id, payment_id, runtime_pool, runtime_pool_of_one, transaction_id,
-    transition_id,
-};
-use futures_util::future::{join, join_all};
+use common::psp::{PspSide, client_of, decided, hand_over_and_step};
+use common::{assert_guard, merchant_id, request_id, runtime_pool, tenant_pool};
+use futures_util::future::join_all;
+use mock_psp::wire::Detail;
 use payments_core::accounts::{AccountRef, Psp};
+use payments_core::catch_up::{CatchUpError, CaughtUp, catch_up};
 use payments_core::ids::{MerchantId, PaymentId};
 use payments_core::lifecycle::{Event, IllegalTransition, PaymentStatus, Refused};
-use payments_core::money::{BasisPoints, PositiveAmount};
-use payments_core::payments::{
-    Capture, Outcome, Recorded, Refund, RefundError, StepCommand, StepError, authorize, capture,
-    find_payment, refund, register_merchant, settle,
+use payments_core::money::PositiveAmount;
+use payments_core::payments::{create_payment, find_payment, register_merchant};
+use payments_core::requests::{
+    Ask, RecordRequest, Refusal, RequestError, RequestOutcome, record_request,
 };
+use payments_core::tenancy::Tenant;
 use payments_core::times::BusinessTime;
 use sqlx::PgPool;
 use uuid::Uuid;
 
 type TestResult = Result<(), Box<dyn Error>>;
 
-/// A runtime pool and a registered merchant.
-async fn app_with_merchant(pool: &PgPool) -> Result<(PgPool, MerchantId), Box<dyn Error>> {
-    let app = runtime_pool(pool).await?;
+/// A merchant, registered by the system role, and a pool of the tenant role, on which it
+/// asks.
+async fn registered(pool: &PgPool) -> Result<(PgPool, MerchantId), Box<dyn Error>> {
+    let system = runtime_pool(pool).await?;
     let merchant = merchant_id(1);
-    register_merchant(&app, merchant, fee_rate()).await?;
-    Ok((app, merchant))
+    register_merchant(&system, merchant, fee_rate()).await?;
+    system.close().await;
+    Ok((tenant_pool(pool).await?, merchant))
 }
 
-/// Takes payment `n` to `captured`, for [`AUTHORIZED`] with a fee of [`FEE`].
-async fn captured(app: &PgPool, merchant: MerchantId, n: u32) -> Result<PaymentId, Box<dyn Error>> {
-    captured_for(app, merchant, n, AUTHORIZED).await
+fn amount(minor: i64) -> PositiveAmount {
+    PositiveAmount::new(minor).expect("valid amount")
 }
 
-/// Takes payment `n` to `captured`, for `minor`, at a fee rate of 2.5%.
+/// Takes payment `n` to `captured` through the PSP, for [`AUTHORIZED`] with a fee of
+/// [`FEE`].
+async fn captured(
+    psp: &mut PspSide,
+    me: Tenant<'_>,
+    merchant: MerchantId,
+    n: u32,
+) -> Result<PaymentId, Box<dyn Error>> {
+    captured_for(psp, me, merchant, n, AUTHORIZED).await
+}
+
+/// Takes payment `n` to `captured` through the PSP, for `minor`, at a fee rate of 2.5%.
 async fn captured_for(
-    app: &PgPool,
+    psp: &mut PspSide,
+    me: Tenant<'_>,
     merchant: MerchantId,
     n: u32,
     minor: i64,
 ) -> Result<PaymentId, Box<dyn Error>> {
-    let payment = created_with(app, merchant, n, BasisPoints::new(250)?).await?;
-    authorize(app, &authorize_command(n, payment)).await?;
-    let command = Capture {
-        amount: PositiveAmount::new(minor)?,
-        ..capture_command(n, payment)
-    };
-    capture(app, &command).await?;
-    Ok(payment)
+    let command = create_command(n, merchant);
+    create_payment(me, &command).await?;
+    psp.authorized(me, command.id).await;
+    psp.applied(me, command.id, Ask::Capture(amount(minor)))
+        .await;
+    Ok(command.id)
 }
 
-/// A command that settles a payment, with step ID `5000 + n`.
-fn settle_command(n: u32, payment: PaymentId) -> StepCommand {
-    StepCommand {
-        step: transition_id(n + 5000),
+/// Request `n`: the refund of this much of a payment.
+fn refund_request(n: u32, payment: PaymentId, minor: i64) -> RecordRequest {
+    RecordRequest {
+        request: request_id(n),
         payment,
+        ask: Ask::Refund(amount(minor)),
     }
+}
+
+/// Asks for request `n`, a refund of `minor`, as its merchant, and the PSP approves it.
+/// The catch-up that applies it is the test's.
+async fn refund_approved(
+    psp: &mut PspSide,
+    me: Tenant<'_>,
+    n: u32,
+    payment: PaymentId,
+    minor: i64,
+) {
+    let refunding = refund_request(n, payment, minor);
+    psp.sent(me, &refunding).await;
+    psp.fake.approve(refunding.request.get());
 }
 
 /// Each account's balance: the PSP's receivable, the merchant's payable, and the
@@ -96,33 +122,33 @@ async fn refundable_of(app: &PgPool, payment: PaymentId) -> Result<i64, Box<dyn 
 
 #[sqlx::test]
 async fn a_partial_refund_keeps_the_status_and_lowers_what_is_left(pool: PgPool) -> TestResult {
-    let (app, merchant) = app_with_merchant(&pool).await?;
-    let payment = captured(&app, merchant, 1).await?;
-    let command = refund_command(1, payment, 3_000);
+    let (tenant, merchant) = registered(&pool).await?;
+    let me = Tenant::new(&tenant, merchant);
+    let mut psp = PspSide::start(&pool).await?;
+    let payment = captured(&mut psp, me, merchant, 1).await?;
+    refund_approved(&mut psp, me, 1, payment, 3_000).await;
+    psp.caught_up(payment).await;
     assert_eq!(
-        refund(&app, &command).await?,
-        Outcome::Applied(Recorded {
-            seq: 3,
-            from: PaymentStatus::Captured,
-            to: PaymentStatus::Captured,
-            refundable: AUTHORIZED - 3_000,
-        })
+        status_of(&psp.system, payment).await?,
+        PaymentStatus::Captured
     );
-    assert_eq!(status_of(&app, payment).await?, PaymentStatus::Captured);
-    assert_eq!(refundable_of(&app, payment).await?, AUTHORIZED - 3_000);
+    assert_eq!(
+        refundable_of(&psp.system, payment).await?,
+        AUTHORIZED - 3_000
+    );
     // ADR-0020's lines, on top of the capture's: the merchant pays it all.
     assert_eq!(
-        balances(&app, merchant).await?,
+        balances(&psp.system, merchant).await?,
         [AUTHORIZED - 3_000, FEE - AUTHORIZED + 3_000, -FEE]
     );
     let step = sqlx::query!(
-        "SELECT seq, prev_seq, kind, from_status, to_status, amount, prev_refundable, refundable \
-           FROM payment_transitions WHERE id = $1",
-        command.step.get()
+        "SELECT id, prev_seq, kind, from_status, to_status, amount, prev_refundable, refundable \
+           FROM payment_transitions WHERE payment_id = $1 AND seq = 3",
+        payment.get()
     )
     .fetch_one(&pool)
     .await?;
-    assert_eq!((step.seq, step.prev_seq), (3, 2));
+    assert_eq!(step.prev_seq, 2);
     assert_eq!(step.kind, "refund");
     assert_eq!(
         (step.from_status.as_str(), step.to_status.as_str()),
@@ -134,19 +160,24 @@ async fn a_partial_refund_keeps_the_status_and_lowers_what_is_left(pool: PgPool)
         (AUTHORIZED, AUTHORIZED - 3_000)
     );
     let record = sqlx::query!(
-        "SELECT payment_id, amount, refunded_at, ledger_transaction_id \
-           FROM payment_refunds WHERE transition_id = $1",
-        command.step.get()
+        "SELECT payment_id, amount, refunded_at FROM payment_refunds WHERE transition_id = $1",
+        step.id
     )
     .fetch_one(&pool)
     .await?;
+    // The time comes from the PSP's fact (ADR-0031).
+    let Detail::Refunded { refunded_at, .. } = decided(&psp.fake, payment, &request_id(1)) else {
+        panic!("the fake refunded it");
+    };
     assert_eq!(record.payment_id, payment.get());
     assert_eq!(record.amount, 3_000);
-    assert_eq!(record.refunded_at, command.refunded_at.get());
-    assert_eq!(record.ledger_transaction_id, command.posting.get());
+    assert_eq!(record.refunded_at, BusinessTime::new(refunded_at)?.get());
+    // The capture's posting and this one, each with a record that caused it (ADR-0021).
+    assert_eq!(postings(&pool).await?, 2);
     assert_eq!(unbalanced_currencies(&pool).await?, Vec::<String>::new());
     assert_eq!(uncaused_postings(&pool).await?, Vec::<Uuid>::new());
-    app.close().await;
+    tenant.close().await;
+    psp.close().await;
     Ok(())
 }
 
@@ -154,84 +185,83 @@ async fn a_partial_refund_keeps_the_status_and_lowers_what_is_left(pool: PgPool)
 async fn after_a_full_refund_the_merchant_owes_the_platform_its_fee(pool: PgPool) -> TestResult {
     // ADR-0020's consequence: the PSP's receivable is back at 0, the merchant's
     // payable stands at +F, and the fee revenue at -F.
-    let (app, merchant) = app_with_merchant(&pool).await?;
-    let payment = captured(&app, merchant, 1).await?;
-    refund(&app, &refund_command(1, payment, 3_000)).await?;
+    let (tenant, merchant) = registered(&pool).await?;
+    let me = Tenant::new(&tenant, merchant);
+    let mut psp = PspSide::start(&pool).await?;
+    let payment = captured(&mut psp, me, merchant, 1).await?;
+    psp.applied(me, payment, Ask::Refund(amount(3_000))).await;
+    psp.applied(me, payment, Ask::Refund(amount(AUTHORIZED - 3_000)))
+        .await;
     assert_eq!(
-        refund(&app, &refund_command(2, payment, AUTHORIZED - 3_000)).await?,
-        Outcome::Applied(Recorded {
-            seq: 4,
-            from: PaymentStatus::Captured,
-            to: PaymentStatus::Refunded,
-            refundable: 0,
-        })
+        status_of(&psp.system, payment).await?,
+        PaymentStatus::Refunded
     );
-    assert_eq!(status_of(&app, payment).await?, PaymentStatus::Refunded);
-    assert_eq!(balances(&app, merchant).await?, [0, FEE, -FEE]);
+    assert_eq!(refundable_of(&psp.system, payment).await?, 0);
+    assert_eq!(balances(&psp.system, merchant).await?, [0, FEE, -FEE]);
     assert_eq!(unbalanced_currencies(&pool).await?, Vec::<String>::new());
     assert_eq!(uncaused_postings(&pool).await?, Vec::<Uuid>::new());
-    app.close().await;
+    tenant.close().await;
+    psp.close().await;
     Ok(())
 }
 
 #[sqlx::test]
 async fn a_settled_payment_can_be_refunded(pool: PgPool) -> TestResult {
-    let (app, merchant) = app_with_merchant(&pool).await?;
-    let payment = captured(&app, merchant, 1).await?;
-    settle(&app, &settle_command(1, payment)).await?;
-    assert_eq!(
-        refund(&app, &refund_command(1, payment, 3_000)).await?,
-        Outcome::Applied(Recorded {
-            seq: 4,
-            from: PaymentStatus::Settled,
-            to: PaymentStatus::Settled,
-            refundable: AUTHORIZED - 3_000,
-        })
-    );
-    assert_eq!(
-        refund(&app, &refund_command(2, payment, AUTHORIZED - 3_000)).await?,
-        Outcome::Applied(Recorded {
-            seq: 5,
-            from: PaymentStatus::Settled,
-            to: PaymentStatus::Refunded,
-            refundable: 0,
-        })
-    );
-    app.close().await;
+    let (tenant, merchant) = registered(&pool).await?;
+    let me = Tenant::new(&tenant, merchant);
+    let mut psp = PspSide::start(&pool).await?;
+    let payment = captured(&mut psp, me, merchant, 1).await?;
+    psp.fake.settle(payment.get());
+    psp.caught_up(payment).await;
+    for (minor, status, left) in [
+        (3_000, PaymentStatus::Settled, AUTHORIZED - 3_000),
+        (AUTHORIZED - 3_000, PaymentStatus::Refunded, 0),
+    ] {
+        psp.applied(me, payment, Ask::Refund(amount(minor))).await;
+        assert_eq!(status_of(&psp.system, payment).await?, status, "{minor}");
+        assert_eq!(refundable_of(&psp.system, payment).await?, left, "{minor}");
+    }
+    tenant.close().await;
+    psp.close().await;
     Ok(())
 }
 
 #[sqlx::test]
 async fn the_amount_is_at_most_what_is_left(pool: PgPool) -> TestResult {
-    let (app, merchant) = app_with_merchant(&pool).await?;
-    let payment = captured(&app, merchant, 1).await?;
+    let (tenant, merchant) = registered(&pool).await?;
+    let me = Tenant::new(&tenant, merchant);
+    let mut psp = PspSide::start(&pool).await?;
+    let payment = captured(&mut psp, me, merchant, 1).await?;
     let above = |n, minor, left| {
-        move |err: RefundError| {
+        move |err: RequestError| {
             let refused = matches!(
                 err,
-                RefundError::Refused(Refused::AboveLimit { amount, limit })
+                RequestError::Refused(Refusal::Refused(Refused::AboveLimit { amount, limit }))
                     if amount == minor && limit == left
             );
-            assert!(refused, "command {n}: {err:?}");
+            assert!(refused, "request {n}: {err:?}");
         }
     };
     let before = postings(&pool).await?;
     above(1, AUTHORIZED + 1, AUTHORIZED)(
-        refund(&app, &refund_command(1, payment, AUTHORIZED + 1))
+        record_request(me, &refund_request(1, payment, AUTHORIZED + 1))
             .await
             .unwrap_err(),
     );
     assert_eq!(steps(&pool, payment).await?, 3);
+    // The authorization's request and the capture's.
+    assert_eq!(requests_of(&pool, payment).await?, 2);
     assert_eq!(postings(&pool).await?, before);
     // The limit falls with each refund.
-    refund(&app, &refund_command(2, payment, 5_000)).await?;
+    psp.applied(me, payment, Ask::Refund(amount(5_000))).await;
     above(3, 3_001, 3_000)(
-        refund(&app, &refund_command(3, payment, 3_001))
+        record_request(me, &refund_request(3, payment, 3_001))
             .await
             .unwrap_err(),
     );
-    assert_eq!(refundable_of(&app, payment).await?, 3_000);
-    app.close().await;
+    assert_eq!(refundable_of(&psp.system, payment).await?, 3_000);
+    tenant.close().await;
+    psp.close().await;
     Ok(())
 }
 
@@ -240,7 +270,8 @@ async fn only_a_captured_or_settled_payment_can_be_refunded(pool: PgPool) -> Tes
     // The other statuses refuse it whatever the amount (ADR-0016). An amount at
     // or above the limit, here 0, is tried as a final refund.
     let books = books(&pool).await?;
-    let app = runtime_pool(&pool).await?;
+    let tenant = tenant_pool(&pool).await?;
+    let me = Tenant::new(&tenant, MerchantId::try_from(books.merchant)?);
     let mut n = 0;
     for status in [
         PaymentStatus::Created,
@@ -253,195 +284,150 @@ async fn only_a_captured_or_settled_payment_can_be_refunded(pool: PgPool) -> Tes
         let newest = committed_at(&pool, &books, status).await?;
         let payment = PaymentId::try_from(newest.payment_id)?;
         let before = postings(&pool).await?;
-        let err = refund(&app, &refund_command(n, payment, 1))
+        let err = record_request(me, &refund_request(n, payment, 1))
             .await
             .unwrap_err();
         assert!(
             matches!(
                 err,
-                RefundError::Refused(Refused::Illegal(IllegalTransition {
+                RequestError::Refused(Refusal::Refused(Refused::Illegal(IllegalTransition {
                     status: got,
                     event: Event::FinalRefund,
-                })) if got == status
+                }))) if got == status
             ),
             "{status}: {err:?}"
         );
+        assert_eq!(requests_of(&pool, payment).await?, 0);
         assert_eq!(steps(&pool, payment).await?, i64::from(newest.seq) + 1);
         assert_eq!(postings(&pool).await?, before);
     }
-    app.close().await;
-    Ok(())
-}
-
-#[sqlx::test]
-async fn an_unknown_payment_is_not_found(pool: PgPool) -> TestResult {
-    let app = runtime_pool(&pool).await?;
-    let unknown = payment_id(1);
-    let err = refund(&app, &refund_command(1, unknown, 1))
-        .await
-        .unwrap_err();
-    assert!(
-        matches!(err, RefundError::NotFound { payment } if payment == unknown),
-        "{err:?}"
-    );
-    app.close().await;
-    Ok(())
-}
-
-#[sqlx::test]
-async fn a_retry_of_an_older_refund_gets_its_own_reply(pool: PgPool) -> TestResult {
-    // Two refunds of the same size, and a retry of the first after the second.
-    // The state would refuse it, or take it for a new refund, so identity decides,
-    // on the one connection of this pool (ADR-0019).
-    let app = runtime_pool_of_one(&pool).await?;
-    let merchant = merchant_id(1);
-    register_merchant(&app, merchant, fee_rate()).await?;
-    let payment = captured(&app, merchant, 1).await?;
-    let first = refund_command(1, payment, 3_000);
-    let first_reply = Recorded {
-        seq: 3,
-        from: PaymentStatus::Captured,
-        to: PaymentStatus::Captured,
-        refundable: AUTHORIZED - 3_000,
-    };
-    assert_eq!(refund(&app, &first).await?, Outcome::Applied(first_reply));
-    refund(&app, &refund_command(2, payment, 3_000)).await?;
-    let money = balances(&app, merchant).await?;
-    assert_eq!(
-        refund(&app, &first).await?,
-        Outcome::AlreadyApplied(first_reply)
-    );
-    assert_eq!(balances(&app, merchant).await?, money);
-    assert_eq!(steps(&pool, payment).await?, 5);
-    app.close().await;
-    Ok(())
-}
-
-#[sqlx::test]
-async fn a_changed_retry_is_a_mismatch_for_each_field(pool: PgPool) -> TestResult {
-    let (app, merchant) = app_with_merchant(&pool).await?;
-    let payment = captured(&app, merchant, 1).await?;
-    refund(&app, &refund_command(1, payment, 3_000)).await?;
-    // Another refund of the same size for the same merchant: its posting has the
-    // very lines of the first, so only the record's link can tell them apart.
-    let twin = captured(&app, merchant, 2).await?;
-    refund(&app, &refund_command(2, twin, 3_000)).await?;
-    let other = captured(&app, merchant, 3).await?;
-    let money = balances(&app, merchant).await?;
-    let later = BusinessTime::new("2026-01-20T12:00:00Z".parse()?)?;
-    for changed in [
-        Refund {
-            amount: PositiveAmount::new(2_999)?,
-            ..refund_command(1, payment, 3_000)
-        },
-        Refund {
-            refunded_at: later,
-            ..refund_command(1, payment, 3_000)
-        },
-        Refund {
-            posting: transaction_id(99),
-            ..refund_command(1, payment, 3_000)
-        },
-        Refund {
-            posting: transaction_id(1002),
-            ..refund_command(1, payment, 3_000)
-        },
-        Refund {
-            payment: other,
-            ..refund_command(1, payment, 3_000)
-        },
-    ] {
-        let err = refund(&app, &changed).await.unwrap_err();
-        let RefundError::Mismatch { step } = err else {
-            panic!("expected Mismatch for {changed:?}, got {err:?}");
-        };
-        assert_eq!(step, changed.step.get());
-    }
-    assert_eq!(refundable_of(&app, other).await?, AUTHORIZED);
-    assert_eq!(balances(&app, merchant).await?, money);
-    app.close().await;
+    tenant.close().await;
     Ok(())
 }
 
 #[sqlx::test]
 async fn of_many_refunds_of_one_exactly_what_is_left_apply(pool: PgPool) -> TestResult {
-    // ADR-0019's race. Twelve refunds of 1 against 5: they queue on the lock, each
-    // reads what the one before it left, exactly 5 apply, and the rest are told so
-    // by the table, with no database error.
-    let (app, merchant) = app_with_merchant(&pool).await?;
+    // ADR-0019's race, on the merchant's side (ADR-0039). Twelve refunds of 1 against
+    // 5: they queue on the lock, each counts the refunds in flight before it, exactly 5
+    // are recorded, and the rest are told so by the limit. The PSP refunds those 5.
+    let (tenant, merchant) = registered(&pool).await?;
+    let me = Tenant::new(&tenant, merchant);
+    let mut psp = PspSide::start(&pool).await?;
     let left = 5;
-    let payment = captured_for(&app, merchant, 1, left).await?;
-    let commands: Vec<Refund> = (1..=12).map(|n| refund_command(n, payment, 1)).collect();
-    let results = join_all(commands.iter().map(|command| refund(&app, command))).await;
-    let mut replies = Vec::new();
-    for result in results {
+    let payment = captured_for(&mut psp, me, merchant, 1, left).await?;
+    let requests: Vec<RecordRequest> = (1..=12).map(|n| refund_request(n, payment, 1)).collect();
+    let results = join_all(requests.iter().map(|request| record_request(me, request))).await;
+    let mut recorded = Vec::new();
+    for (request, result) in requests.iter().zip(results) {
         match result {
-            Ok(Outcome::Applied(recorded)) => replies.push(recorded.refundable),
-            Err(RefundError::Refused(Refused::Illegal(illegal))) => {
-                assert_eq!(illegal.status, PaymentStatus::Refunded);
-            }
+            Ok(RequestOutcome::Recorded(_)) => recorded.push(request),
+            Err(RequestError::Refused(Refusal::Refused(Refused::AboveLimit {
+                amount: 1,
+                limit: 0,
+            }))) => {}
             other => panic!("{other:?}"),
         }
     }
-    replies.sort_unstable();
-    assert_eq!(replies, [0, 1, 2, 3, 4]);
-    assert_eq!(status_of(&app, payment).await?, PaymentStatus::Refunded);
-    assert_eq!(refundable_of(&app, payment).await?, 0);
+    assert_eq!(recorded.len(), 5);
+    for request in recorded {
+        hand_over_and_step(&mut psp.sender, &psp.system, &request.request).await;
+        psp.fake.approve(request.request.get());
+    }
+    assert_eq!(
+        catch_up(&psp.system, &client_of(&psp.fake), payment).await?,
+        CaughtUp::Current { applied: 5 }
+    );
+    assert_eq!(
+        status_of(&psp.system, payment).await?,
+        PaymentStatus::Refunded
+    );
+    assert_eq!(refundable_of(&psp.system, payment).await?, 0);
     // A fee of 2.5% of 5 rounds to 0, so every account is back at 0.
-    assert_eq!(balances(&app, merchant).await?, [0, 0, 0]);
+    assert_eq!(balances(&psp.system, merchant).await?, [0, 0, 0]);
     assert_eq!(unbalanced_currencies(&pool).await?, Vec::<String>::new());
     assert_eq!(uncaused_postings(&pool).await?, Vec::<Uuid>::new());
-    app.close().await;
+    tenant.close().await;
+    psp.close().await;
     Ok(())
 }
 
 #[sqlx::test]
-async fn a_partial_refund_racing_a_settle_applies_both(pool: PgPool) -> TestResult {
-    // Neither refuses the other, so whichever gets the lock first, both apply and
-    // the payment ends settled with less to refund.
-    let (app, merchant) = app_with_merchant(&pool).await?;
-    for n in 1..=8 {
-        let payment = captured(&app, merchant, n).await?;
-        let refunding = refund_command(n, payment, 3_000);
-        let settling = settle_command(n, payment);
-        let (refunded, settled) = join(refund(&app, &refunding), settle(&app, &settling)).await;
-        assert!(matches!(refunded?, Outcome::Applied(_)));
-        assert!(matches!(settled?, Outcome::Applied(_)));
-        assert_eq!(status_of(&app, payment).await?, PaymentStatus::Settled);
-        assert_eq!(refundable_of(&app, payment).await?, AUTHORIZED - 3_000);
-    }
-    assert_eq!(unbalanced_currencies(&pool).await?, Vec::<String>::new());
-    app.close().await;
-    Ok(())
-}
-
-#[sqlx::test]
-async fn a_final_refund_racing_a_settle_ends_refunded_either_way(pool: PgPool) -> TestResult {
-    // If the refund goes first, a refunded payment refuses the settle. If the settle
-    // goes first, the refund still applies. The money is the same in both orders.
-    let (app, merchant) = app_with_merchant(&pool).await?;
-    for n in 1..=8 {
-        let payment = captured(&app, merchant, n).await?;
-        let refunding = refund_command(n, payment, AUTHORIZED);
-        let settling = settle_command(n, payment);
-        let (refunded, settled) = join(refund(&app, &refunding), settle(&app, &settling)).await;
-        assert!(matches!(refunded?, Outcome::Applied(_)));
-        match settled {
-            Ok(Outcome::Applied(_)) => {}
-            Err(StepError::Illegal(illegal)) => assert_eq!(
-                illegal,
-                IllegalTransition {
-                    status: PaymentStatus::Refunded,
-                    event: Event::Settle,
-                }
-            ),
-            other => panic!("{other:?}"),
+async fn a_partial_refund_and_a_settle_apply_in_either_order(pool: PgPool) -> TestResult {
+    // Neither refuses the other, so in whichever order the PSP gives them, both apply
+    // and the payment ends settled with less to refund.
+    let (tenant, merchant) = registered(&pool).await?;
+    let me = Tenant::new(&tenant, merchant);
+    let mut psp = PspSide::start(&pool).await?;
+    for (n, settled_first) in [(1, true), (2, false)] {
+        let payment = captured(&mut psp, me, merchant, n).await?;
+        if settled_first {
+            psp.fake.settle(payment.get());
         }
-        assert_eq!(status_of(&app, payment).await?, PaymentStatus::Refunded);
+        refund_approved(&mut psp, me, n, payment, 3_000).await;
+        if !settled_first {
+            psp.fake.settle(payment.get());
+        }
+        assert_eq!(
+            catch_up(&psp.system, &client_of(&psp.fake), payment).await?,
+            CaughtUp::Current { applied: 2 }
+        );
+        assert_eq!(
+            status_of(&psp.system, payment).await?,
+            PaymentStatus::Settled
+        );
+        assert_eq!(
+            refundable_of(&psp.system, payment).await?,
+            AUTHORIZED - 3_000
+        );
     }
-    // Eight full refunds: each leaves the merchant owing its fee.
-    assert_eq!(balances(&app, merchant).await?, [0, 8 * FEE, -8 * FEE]);
-    app.close().await;
+    // The same money in both orders.
+    assert_eq!(
+        balances(&psp.system, merchant).await?,
+        [
+            2 * (AUTHORIZED - 3_000),
+            2 * (FEE - AUTHORIZED + 3_000),
+            -2 * FEE
+        ]
+    );
+    assert_eq!(unbalanced_currencies(&pool).await?, Vec::<String>::new());
+    tenant.close().await;
+    psp.close().await;
+    Ok(())
+}
+
+#[sqlx::test]
+async fn a_final_refund_and_a_settle_end_refunded_in_either_order(pool: PgPool) -> TestResult {
+    // If the refund comes first, the settle after it takes no step (ADR-0016). If the
+    // settle comes first, the refund still applies. The money is the same in both
+    // orders; `catching_up.rs` checks the steps.
+    let (tenant, merchant) = registered(&pool).await?;
+    let me = Tenant::new(&tenant, merchant);
+    let mut psp = PspSide::start(&pool).await?;
+    for (n, settled_first) in [(1, true), (2, false)] {
+        let payment = captured(&mut psp, me, merchant, n).await?;
+        if settled_first {
+            psp.fake.settle(payment.get());
+        }
+        refund_approved(&mut psp, me, n, payment, AUTHORIZED).await;
+        if !settled_first {
+            psp.fake.settle(payment.get());
+        }
+        assert_eq!(
+            catch_up(&psp.system, &client_of(&psp.fake), payment).await?,
+            CaughtUp::Current { applied: 2 }
+        );
+        assert_eq!(
+            status_of(&psp.system, payment).await?,
+            PaymentStatus::Refunded
+        );
+    }
+    // Two full refunds: each leaves the merchant owing its fee.
+    assert_eq!(
+        balances(&psp.system, merchant).await?,
+        [0, 2 * FEE, -2 * FEE]
+    );
+    tenant.close().await;
+    psp.close().await;
     Ok(())
 }
 
@@ -450,8 +436,11 @@ async fn a_posting_that_a_trigger_corrupts_fails_at_commit(pool: PgPool) -> Test
     // Still balanced, so the ledger's own check passes: only the check of the
     // record against its posting can notice, and LG006 proves a rollback. The
     // step, the posting and the record all go (ADR-0014, ADR-0021).
-    let (app, merchant) = app_with_merchant(&pool).await?;
-    let payment = captured(&app, merchant, 1).await?;
+    let (tenant, merchant) = registered(&pool).await?;
+    let me = Tenant::new(&tenant, merchant);
+    let mut psp = PspSide::start(&pool).await?;
+    let payment = captured(&mut psp, me, merchant, 1).await?;
+    refund_approved(&mut psp, me, 1, payment, 3_000).await;
     let before = postings(&pool).await?;
     sqlx::query!(
         "CREATE FUNCTION grow_a_refund() RETURNS trigger LANGUAGE plpgsql AS $$ \
@@ -468,10 +457,10 @@ async fn a_posting_that_a_trigger_corrupts_fails_at_commit(pool: PgPool) -> Test
     )
     .execute(&pool)
     .await?;
-    let err = refund(&app, &refund_command(1, payment, 3_000))
+    let err = catch_up(&psp.system, &client_of(&psp.fake), payment)
         .await
         .unwrap_err();
-    let RefundError::Invariant { source, .. } = err else {
+    let CatchUpError::Invariant { source, .. } = err else {
         panic!("expected Invariant, got {err:?}");
     };
     assert_guard(
@@ -482,15 +471,19 @@ async fn a_posting_that_a_trigger_corrupts_fails_at_commit(pool: PgPool) -> Test
     );
     assert_eq!(steps(&pool, payment).await?, 3);
     assert_eq!(postings(&pool).await?, before);
-    assert_eq!(refundable_of(&app, payment).await?, AUTHORIZED);
-    app.close().await;
+    assert_eq!(refundable_of(&psp.system, payment).await?, AUTHORIZED);
+    tenant.close().await;
+    psp.close().await;
     Ok(())
 }
 
 #[sqlx::test]
 async fn a_record_that_a_trigger_loses_fails_at_commit(pool: PgPool) -> TestResult {
-    let (app, merchant) = app_with_merchant(&pool).await?;
-    let payment = captured(&app, merchant, 1).await?;
+    let (tenant, merchant) = registered(&pool).await?;
+    let me = Tenant::new(&tenant, merchant);
+    let mut psp = PspSide::start(&pool).await?;
+    let payment = captured(&mut psp, me, merchant, 1).await?;
+    refund_approved(&mut psp, me, 1, payment, 3_000).await;
     let before = postings(&pool).await?;
     sqlx::query!(
         "CREATE FUNCTION lose_row() RETURNS trigger LANGUAGE plpgsql AS $$ \
@@ -504,10 +497,10 @@ async fn a_record_that_a_trigger_loses_fails_at_commit(pool: PgPool) -> TestResu
     )
     .execute(&pool)
     .await?;
-    let err = refund(&app, &refund_command(1, payment, 3_000))
+    let err = catch_up(&psp.system, &client_of(&psp.fake), payment)
         .await
         .unwrap_err();
-    let RefundError::Invariant { source, .. } = err else {
+    let CatchUpError::Invariant { source, .. } = err else {
         panic!("expected Invariant, got {err:?}");
     };
     assert_guard(
@@ -518,6 +511,7 @@ async fn a_record_that_a_trigger_loses_fails_at_commit(pool: PgPool) -> TestResu
     );
     assert_eq!(steps(&pool, payment).await?, 3);
     assert_eq!(postings(&pool).await?, before);
-    app.close().await;
+    tenant.close().await;
+    psp.close().await;
     Ok(())
 }

@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT payment_id, amount, refunded_at, ledger_transaction_id FROM payment_refunds WHERE transition_id = $1",
+  "query": "SELECT payment_id, amount, refunded_at FROM payment_refunds WHERE transition_id = $1",
   "describe": {
     "columns": [
       {
@@ -35,17 +35,6 @@
             "name": "refunded_at"
           }
         }
-      },
-      {
-        "ordinal": 3,
-        "name": "ledger_transaction_id",
-        "type_info": "Uuid",
-        "origin": {
-          "Table": {
-            "table": "payment_refunds",
-            "name": "ledger_transaction_id"
-          }
-        }
       }
     ],
     "parameters": {
@@ -56,9 +45,8 @@
     "nullable": [
       false,
       false,
-      false,
       false
     ]
   },
-  "hash": "e0d3d6f3646d2f2f4784442dc74cc2191e5c00fa5c57a5026a0b9296d86f0697"
+  "hash": "d6bc9a82251bd26068eb8b3caa78652003e7802df582e2eda7a978c85d7fad36"
 }
