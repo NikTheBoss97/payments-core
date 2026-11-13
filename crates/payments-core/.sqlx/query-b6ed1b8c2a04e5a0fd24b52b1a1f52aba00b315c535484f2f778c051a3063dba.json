@@ -1,0 +1,35 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT (SELECT count(*) FROM payment_facts) AS \"facts!\",\n                  (SELECT count(*) FROM payment_transition_facts) AS \"links!\",\n                  (SELECT count(*) FROM payment_request_decisions) AS \"decisions!\"",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "facts!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 1,
+        "name": "links!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 2,
+        "name": "decisions!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "b6ed1b8c2a04e5a0fd24b52b1a1f52aba00b315c535484f2f778c051a3063dba"
+}
