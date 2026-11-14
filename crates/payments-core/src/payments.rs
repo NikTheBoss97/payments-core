@@ -23,6 +23,7 @@ use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
 use crate::accounts::{AccountError, AccountKey, AccountRef, Psp, find_account, open_account};
+use crate::catch_up::PspWord;
 use crate::db::{CommitError, code_and_constraint, commit};
 use crate::idempotency::Decided;
 use crate::ids::{AccountId, MerchantId, PaymentId, TransactionId, TransitionId};
@@ -31,7 +32,7 @@ use crate::lifecycle::{
     self, Event, IllegalTransition, PaymentStatus, Refused, StepKind, Transition, next,
 };
 use crate::money::{self, BasisPoints, Currency, PositiveAmount};
-use crate::posting::{self, PostInError, post_in};
+use crate::posting::{PostInError, post_in};
 use crate::requests::{Conflict, Refusal, RequestKind};
 use crate::tenancy::{Scope, Tenant};
 use crate::times::BusinessTime;
@@ -531,9 +532,10 @@ async fn stored_create(
     }))
 }
 
-/// The command that records an authorization (ADR-0016).
+/// The command that records an authorization (ADR-0016), which only the catch-up
+/// gives, from a fact of the PSP's (ADR-0048).
 #[derive(Debug)]
-pub struct Authorize {
+pub(crate) struct Authorize {
     /// The step's ID, which identifies this command.
     pub step: TransitionId,
     pub payment: PaymentId,
@@ -544,84 +546,13 @@ pub struct Authorize {
     pub expires_at: BusinessTime,
 }
 
-/// Why an [`Authorize`] was not applied. Only [`AuthorizeError::NotConfirmed`]
-/// may have stored its step.
-#[derive(Debug, thiserror::Error)]
-pub enum AuthorizeError {
-    /// No payment has this ID.
-    #[error("payment {payment} does not exist")]
-    NotFound { payment: PaymentId },
-    /// The status or the amount refuses it. Nothing is stored, and a retry is
-    /// decided again (ADR-0019).
-    #[error(transparent)]
-    Refused(Refused),
-    /// The command's step ID is stored with other content: a bug, never
-    /// retried.
-    #[error("step {step} is stored with other content")]
-    Mismatch { step: Uuid },
-    /// The idempotency key already holds an answer, so this attempt rolled back
-    /// whole. Look the key up for the answer (ADR-0026).
-    #[error("the idempotency key already holds an answer")]
-    KeyTaken,
-    /// The database caught what the domain types should have prevented, or a
-    /// writer that skipped the payment's lock got there first (ADR-0018): a bug,
-    /// never retried.
-    #[error("step {step}: the database rejected it as invalid")]
-    Invariant {
-        step: Uuid,
-        #[source]
-        source: sqlx::Error,
-    },
-    /// The step may or may not be stored. Send the identical command again
-    /// later, never one with new IDs (ADR-0019).
-    #[error("step {step} may or may not be stored: send the command again")]
-    NotConfirmed {
-        step: Uuid,
-        #[source]
-        source: sqlx::Error,
-    },
-}
-
-impl AuthorizeError {
-    fn new(command: &Authorize, failed: Failed<Refused>) -> Self {
-        let step = command.step.get();
-        match failed {
-            Failed::NotFound => Self::NotFound {
-                payment: command.payment,
-            },
-            Failed::Refused(refused) => Self::Refused(refused),
-            Failed::Mismatch => Self::Mismatch { step },
-            Failed::KeyTaken => Self::KeyTaken,
-            Failed::Duplicate(source) | Failed::Invariant(source) => {
-                Self::Invariant { step, source }
-            }
-            Failed::NotConfirmed(source) => Self::NotConfirmed { step, source },
-        }
-    }
-}
-
-/// Records that the PSP authorized a payment, for at most the requested amount
-/// (ADR-0016).
-///
-/// # Errors
-///
-/// See [`AuthorizeError`].
-pub async fn authorize<'a>(
-    scope: impl Into<Scope<'a>>,
-    command: &Authorize,
-) -> Result<Outcome, AuthorizeError> {
-    apply(scope.into(), &authorize_plan(command), |state| {
-        authorize_move(state, command)
-    })
-    .await
-    .map_err(|failed| AuthorizeError::new(command, failed))
-}
-
 /// An [`Authorize`]'s steps 3 to 6, in a transaction that the caller has begun and
-/// locked: the catch-up applies the PSP's facts this way (ADR-0039).
+/// locked: the catch-up applies the PSP's facts this way (ADR-0039), and only it
+/// makes the [`PspWord`] that this takes (ADR-0048).
 pub(crate) async fn authorize_in(
     tx: &mut Transaction<'_, Postgres>,
     command: &Authorize,
+    _: &PspWord,
 ) -> Result<Outcome, Failed<Refused>> {
     apply_in(tx, &authorize_plan(command), |state| {
         authorize_move(state, command)
@@ -650,9 +581,10 @@ fn authorize_move(state: &State, command: &Authorize) -> Result<Transition, Refu
     lifecycle::authorize(state.status, command.amount, state.requested)
 }
 
-/// The command that records a capture, and posts it (ADR-0016, ADR-0020).
+/// The command that records a capture, and posts it (ADR-0016, ADR-0020), which only
+/// the catch-up gives, from a fact of the PSP's (ADR-0048).
 #[derive(Debug)]
-pub struct Capture {
+pub(crate) struct Capture {
     /// The step's ID, which identifies this command.
     pub step: TransitionId,
     /// The ID of the ledger transaction that this capture posts.
@@ -665,99 +597,15 @@ pub struct Capture {
     pub captured_at: BusinessTime,
 }
 
-/// Why a [`Capture`] was not applied. Only [`CaptureError::NotConfirmed`] may
-/// have stored its step.
-#[derive(Debug, thiserror::Error)]
-pub enum CaptureError {
-    /// No payment has this ID.
-    #[error("payment {payment} does not exist")]
-    NotFound { payment: PaymentId },
-    /// The status or the amount refuses it. Nothing is stored, and a retry is
-    /// decided again (ADR-0019).
-    #[error(transparent)]
-    Refused(Refused),
-    /// An account of the posting does not exist. Creating a payment opens them,
-    /// and accounts are never deleted, so a writer that skipped that broke a
-    /// rule: a bug, never retried.
-    #[error("account {key} does not exist")]
-    MissingAccount { key: AccountKey },
-    /// The command's step ID is stored with other content: a bug, never
-    /// retried.
-    #[error("step {step} is stored with other content")]
-    Mismatch { step: Uuid },
-    /// The idempotency key already holds an answer, so this attempt rolled back
-    /// whole. Look the key up for the answer (ADR-0026).
-    #[error("the idempotency key already holds an answer")]
-    KeyTaken,
-    /// The database caught what the domain types should have prevented, or a
-    /// writer that skipped the payment's lock got there first (ADR-0018): a bug,
-    /// never retried.
-    #[error("step {step}: the database rejected it as invalid")]
-    Invariant {
-        step: Uuid,
-        #[source]
-        source: sqlx::Error,
-    },
-    /// The step may or may not be stored. Send the identical command again
-    /// later, never one with new IDs (ADR-0019).
-    #[error("step {step} may or may not be stored: send the command again")]
-    NotConfirmed {
-        step: Uuid,
-        #[source]
-        source: sqlx::Error,
-    },
-}
-
-impl CaptureError {
-    fn new(command: &Capture, failed: Failed<PostingRefusal>) -> Self {
-        let step = command.step.get();
-        match failed {
-            Failed::NotFound => Self::NotFound {
-                payment: command.payment,
-            },
-            Failed::Refused(PostingRefusal::Refused(refused)) => Self::Refused(refused),
-            Failed::Refused(PostingRefusal::MissingAccount(key)) => Self::MissingAccount { key },
-            Failed::Mismatch => Self::Mismatch { step },
-            Failed::KeyTaken => Self::KeyTaken,
-            Failed::Duplicate(source) | Failed::Invariant(source) => {
-                Self::Invariant { step, source }
-            }
-            Failed::NotConfirmed(source) => Self::NotConfirmed { step, source },
-        }
-    }
-}
-
-/// Records that the PSP captured a payment, for at most the authorized amount,
-/// and posts it: the step, the posting and the record commit together
-/// (ADR-0016, ADR-0020).
-///
-/// # Errors
-///
-/// See [`CaptureError`].
-pub async fn capture<'a>(
-    scope: impl Into<Scope<'a>>,
-    command: &Capture,
-) -> Result<Outcome, CaptureError> {
-    let scope = scope.into();
-    let fail = |failed| CaptureError::new(command, failed);
-    let books = read_books(scope, command.payment).await.map_err(fail)?;
-    let (posting, asked) = capture_parts(&books, command);
-    let plan = Plan {
-        id: &command.step,
-        asked,
-        posting: Some(&posting),
-    };
-    apply(scope, &plan, |state| capture_move(state, command))
-        .await
-        .map_err(fail)
-}
-
 /// A [`Capture`]'s steps 3 to 6, in a transaction that the caller has begun and locked,
-/// with the payment's [`Books`] read before the lock (ADR-0039).
+/// with the payment's [`Books`] read before the lock (ADR-0039): the step, the posting
+/// and the record commit together. Only the catch-up makes the [`PspWord`] that this
+/// takes (ADR-0048).
 pub(crate) async fn capture_in(
     tx: &mut Transaction<'_, Postgres>,
     books: &Books,
     command: &Capture,
+    _: &PspWord,
 ) -> Result<Outcome, Failed<PostingRefusal>> {
     let (posting, asked) = capture_parts(books, command);
     let plan = Plan {
@@ -835,7 +683,7 @@ fn capture_move(state: &State, command: &Capture) -> Result<Transition, PostingR
     // Before an authorization the status refuses the capture, so this limit is never
     // read.
     let limit = state.authorized.unwrap_or(state.requested);
-    lifecycle::capture(state.status, command.amount, limit).map_err(PostingRefusal::Refused)
+    lifecycle::capture(state.status, command.amount, limit).map_err(|_| PostingRefusal::Refused)
 }
 
 /// The accounts of a capture's posting.
@@ -885,9 +733,10 @@ fn credit_line(account: AccountId, minor: i64) -> Option<Entry> {
     })
 }
 
-/// The command that records a refund, and posts it (ADR-0016, ADR-0020).
+/// The command that records a refund, and posts it (ADR-0016, ADR-0020), which only
+/// the catch-up gives, from a fact of the PSP's (ADR-0048).
 #[derive(Debug)]
-pub struct Refund {
+pub(crate) struct Refund {
     /// The step's ID, which identifies this command.
     pub step: TransitionId,
     /// The ID of the ledger transaction that this refund posts.
@@ -900,110 +749,16 @@ pub struct Refund {
     pub refunded_at: BusinessTime,
 }
 
-/// Why a [`Refund`] was not applied. Only [`RefundError::NotConfirmed`] may have
-/// stored its step.
-#[derive(Debug, thiserror::Error)]
-pub enum RefundError {
-    /// No payment has this ID.
-    #[error("payment {payment} does not exist")]
-    NotFound { payment: PaymentId },
-    /// The status or the amount refuses it. Nothing is stored, and a retry is
-    /// decided again (ADR-0019).
-    #[error(transparent)]
-    Refused(Refused),
-    /// An account of the posting does not exist. Creating a payment opens them,
-    /// and accounts are never deleted, so a writer that skipped that broke a
-    /// rule: a bug, never retried.
-    #[error("account {key} does not exist")]
-    MissingAccount { key: AccountKey },
-    /// The command's step ID is stored with other content: a bug, never
-    /// retried.
-    #[error("step {step} is stored with other content")]
-    Mismatch { step: Uuid },
-    /// The idempotency key already holds an answer, so this attempt rolled back
-    /// whole. Look the key up for the answer (ADR-0026).
-    #[error("the idempotency key already holds an answer")]
-    KeyTaken,
-    /// The database caught what the domain types should have prevented, or a
-    /// writer that skipped the payment's lock got there first (ADR-0018): a bug,
-    /// never retried.
-    #[error("step {step}: the database rejected it as invalid")]
-    Invariant {
-        step: Uuid,
-        #[source]
-        source: sqlx::Error,
-    },
-    /// The step may or may not be stored. Send the identical command again
-    /// later, never one with new IDs (ADR-0019).
-    #[error("step {step} may or may not be stored: send the command again")]
-    NotConfirmed {
-        step: Uuid,
-        #[source]
-        source: sqlx::Error,
-    },
-}
-
-impl RefundError {
-    fn new(command: &Refund, failed: Failed<PostingRefusal>) -> Self {
-        let step = command.step.get();
-        match failed {
-            Failed::NotFound => Self::NotFound {
-                payment: command.payment,
-            },
-            Failed::Refused(PostingRefusal::Refused(refused)) => Self::Refused(refused),
-            Failed::Refused(PostingRefusal::MissingAccount(key)) => Self::MissingAccount { key },
-            Failed::Mismatch => Self::Mismatch { step },
-            Failed::KeyTaken => Self::KeyTaken,
-            Failed::Duplicate(source) | Failed::Invariant(source) => {
-                Self::Invariant { step, source }
-            }
-            Failed::NotConfirmed(source) => Self::NotConfirmed { step, source },
-        }
-    }
-}
-
-/// Records that the PSP refunded part or all of what is left of a capture, and
-/// posts it: the merchant pays, and the platform keeps its fee (ADR-0020). The
-/// step, the posting and the record commit together.
-///
-/// # Errors
-///
-/// See [`RefundError`].
-pub async fn refund<'a>(
-    scope: impl Into<Scope<'a>>,
-    command: &Refund,
-) -> Result<Outcome, RefundError> {
-    let scope = scope.into();
-    let pool = scope.pool();
-    let fail = |failed| RefundError::new(command, failed);
-    // Outside the command's transaction, as for a capture.
-    let terms = read_terms(scope, command.payment).await.map_err(fail)?;
-    let payable = posting_account(
-        pool,
-        AccountRef::MerchantPayable(terms.merchant, terms.currency),
-    )
-    .await
-    .map_err(fail)?;
-    let receivable = posting_account(pool, AccountRef::PspReceivable(terms.psp, terms.currency))
-        .await
-        .map_err(fail)?;
-    let (posting, asked) = refund_parts(terms.currency, payable, receivable, command);
-    let plan = Plan {
-        id: &command.step,
-        asked,
-        posting: Some(&posting),
-    };
-    apply(scope, &plan, |state| refund_move(state, command))
-        .await
-        .map_err(fail)
-}
-
 /// A [`Refund`]'s steps 3 to 6, in a transaction that the caller has begun and locked,
-/// with the payment's [`Books`] read before the lock (ADR-0039).
+/// with the payment's [`Books`] read before the lock (ADR-0039): the merchant pays,
+/// the platform keeps its fee (ADR-0020), and the step, the posting and the record
+/// commit together. Only the catch-up makes the [`PspWord`] that this takes
+/// (ADR-0048).
 pub(crate) async fn refund_in(
     tx: &mut Transaction<'_, Postgres>,
     books: &Books,
     command: &Refund,
+    _: &PspWord,
 ) -> Result<Outcome, Failed<PostingRefusal>> {
     let (posting, asked) = refund_parts(books.currency, books.payable, books.receivable, command);
     let plan = Plan {
@@ -1044,7 +799,7 @@ fn refund_parts(
 /// (ADR-0016).
 fn refund_move(state: &State, command: &Refund) -> Result<Transition, PostingRefusal> {
     lifecycle::refund(state.status, command.amount, state.refundable)
-        .map_err(PostingRefusal::Refused)
+        .map_err(|_| PostingRefusal::Refused)
 }
 
 /// ADR-0020's lines for a refund of R: the merchant's payable +R and the PSP's
@@ -1079,7 +834,9 @@ fn same_posting_id(id: &TransactionId) -> TransactionId {
 /// What stops a command that posts, besides a [`Failed`] that any command can
 /// meet.
 pub(crate) enum PostingRefusal {
-    Refused(Refused),
+    /// The table of moves or the amount's limit, which stops the payment in a
+    /// catch-up whatever the reason (ADR-0041).
+    Refused,
     MissingAccount(AccountKey),
 }
 
@@ -1107,8 +864,8 @@ async fn posting_account(
     }
 }
 
-/// A command that moves a payment and carries nothing else: decline, cancel,
-/// void, expire or settle.
+/// A command that moves a payment and carries nothing else: the merchant's cancel,
+/// and in a catch-up a decline, a void, a lapse or a settlement.
 #[derive(Debug)]
 pub struct StepCommand {
     /// The step's ID, which identifies this command.
@@ -1178,18 +935,6 @@ impl StepError {
     }
 }
 
-/// Records that the PSP declined the authorization (ADR-0016).
-///
-/// # Errors
-///
-/// See [`StepError`].
-pub async fn decline<'a>(
-    scope: impl Into<Scope<'a>>,
-    command: &StepCommand,
-) -> Result<Outcome, StepError> {
-    plain_step(scope.into(), command, Event::Decline, StepKind::Decline).await
-}
-
 /// Cancels a payment before its authorization (ADR-0016), and before any request
 /// to authorize it, since the PSP may then hold one (ADR-0039).
 ///
@@ -1200,66 +945,24 @@ pub async fn cancel<'a>(
     scope: impl Into<Scope<'a>>,
     command: &StepCommand,
 ) -> Result<Outcome, StepError> {
-    plain_step(scope.into(), command, Event::Cancel, StepKind::Cancel).await
-}
-
-/// Records that an authorization was voided (ADR-0016).
-///
-/// # Errors
-///
-/// See [`StepError`].
-pub async fn void<'a>(
-    scope: impl Into<Scope<'a>>,
-    command: &StepCommand,
-) -> Result<Outcome, StepError> {
-    plain_step(scope.into(), command, Event::Void, StepKind::Void).await
-}
-
-/// Records that the PSP reported an authorization as expired, a call that only
-/// the PSP can make (ADR-0016).
-///
-/// # Errors
-///
-/// See [`StepError`].
-pub async fn expire<'a>(
-    scope: impl Into<Scope<'a>>,
-    command: &StepCommand,
-) -> Result<Outcome, StepError> {
-    plain_step(scope.into(), command, Event::Expire, StepKind::Expire).await
-}
-
-/// Records that the PSP reported a capture as settled (ADR-0016).
-///
-/// # Errors
-///
-/// See [`StepError`].
-pub async fn settle<'a>(
-    scope: impl Into<Scope<'a>>,
-    command: &StepCommand,
-) -> Result<Outcome, StepError> {
-    plain_step(scope.into(), command, Event::Settle, StepKind::Settle).await
-}
-
-async fn plain_step(
-    scope: Scope<'_>,
-    command: &StepCommand,
-    event: Event,
-    kind: StepKind,
-) -> Result<Outcome, StepError> {
-    apply(scope, &plain_plan(command, kind), |state| {
-        plain_move(state, event)
-    })
+    apply(
+        scope.into(),
+        &plain_plan(command, StepKind::Cancel),
+        |state| plain_move(state, Event::Cancel),
+    )
     .await
     .map_err(|failed| StepError::new(command, failed))
 }
 
-/// A step that carries nothing, in a transaction that the caller has begun and locked
-/// (ADR-0039).
+/// A step of the PSP's that carries nothing, in a transaction that the caller has
+/// begun and locked (ADR-0039): a decline, a void, a lapse or a settlement. Only the
+/// catch-up makes the [`PspWord`] that this takes (ADR-0048).
 pub(crate) async fn plain_in(
     tx: &mut Transaction<'_, Postgres>,
     command: &StepCommand,
     event: Event,
     kind: StepKind,
+    _: &PspWord,
 ) -> Result<Outcome, Failed<PlainRefusal>> {
     apply_in(tx, &plain_plan(command, kind), |state| {
         plain_move(state, event)
@@ -1493,16 +1196,9 @@ pub(crate) async fn store_sealed(
 }
 
 /// What of a command's refusal is final, and so stored under its key: what the table
-/// of moves says, or a request already recorded. A missing account says something
-/// about the books instead.
+/// of moves says, or a request already recorded.
 trait FinalRefusal {
     fn final_refusal(&self) -> Option<Refusal>;
-}
-
-impl FinalRefusal for Refused {
-    fn final_refusal(&self) -> Option<Refusal> {
-        Some((*self).into())
-    }
 }
 
 impl FinalRefusal for PlainRefusal {
@@ -1511,15 +1207,6 @@ impl FinalRefusal for PlainRefusal {
             Self::Illegal(illegal) => (*illegal).into(),
             Self::AuthorizationRequested => Conflict::AuthorizationRequested.into(),
         })
-    }
-}
-
-impl FinalRefusal for PostingRefusal {
-    fn final_refusal(&self) -> Option<Refusal> {
-        match self {
-            Self::Refused(refused) => Some((*refused).into()),
-            Self::MissingAccount(_) => None,
-        }
     }
 }
 
@@ -1555,7 +1242,7 @@ pub(crate) async fn apply_in<R>(
     // Identity first: a retry that waited behind its own first attempt finds
     // that attempt's step, and checked against the state it would be refused.
     if let Some(stored) = state.stored {
-        return answer(tx, stored, plan).await.map(Outcome::AlreadyApplied);
+        return answer(stored, plan).map(Outcome::AlreadyApplied);
     }
     let step = decide(&state).map_err(Failed::Refused)?;
     let seq = state
@@ -1615,32 +1302,18 @@ async fn look_up_again<R>(
 ) -> Result<Outcome, Failed<R>> {
     let mut tx = begin_locked(scope, plan.asked.payment).await?;
     match read_state(&mut tx, plan).await?.stored {
-        Some(stored) => answer(&mut tx, stored, plan)
-            .await
-            .map(Outcome::AlreadyApplied),
+        Some(stored) => answer(stored, plan).map(Outcome::AlreadyApplied),
         None => Err(Failed::Invariant(duplicate)),
     }
 }
 
-/// The stored reply when the stored step is this command's: the same step, the
-/// same record, and the same entries (ADR-0019). The entries are compared on the
-/// connection that holds the lock, because asking the pool for another one here
-/// can wait for itself.
-async fn answer<R>(
-    tx: &mut Transaction<'_, Postgres>,
-    stored: Stored,
-    plan: &Plan<'_>,
-) -> Result<Recorded, Failed<R>> {
+/// The stored reply when the stored step is this command's: the same step and the
+/// same record (ADR-0019). Only a cancel is retried here, which posts nothing: the
+/// commands that post are the catch-up's, whose step IDs are new (ADR-0039), so no
+/// posting is compared (ADR-0048).
+fn answer<R>(stored: Stored, plan: &Plan<'_>) -> Result<Recorded, Failed<R>> {
     if stored.asked != plan.asked {
         return Err(Failed::Mismatch);
-    }
-    if let Some(posting) = plan.posting {
-        let same = posting::is_stored_as(&mut **tx, posting)
-            .await
-            .map_err(Failed::database)?;
-        if !same {
-            return Err(Failed::Mismatch);
-        }
     }
     Ok(stored.recorded)
 }
