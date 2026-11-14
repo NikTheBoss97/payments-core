@@ -38,7 +38,7 @@ async fn a_whole_lifecycle_commits_and_its_newest_step_is_its_state(
     let captured = captured_payment(&mut tx, &books).await?;
     let partial = refund_step(&mut tx, &books, &captured, "captured", 3_000).await?;
     let settled = partial.then("settle", "settled", 0, partial.refundable);
-    settled.insert(&mut tx).await?;
+    settled.insert_with_fact(&mut tx).await?;
     refund_step(&mut tx, &books, &settled, "refunded", 5_000).await?;
     tx.commit().await?;
 
@@ -63,7 +63,7 @@ async fn a_step_that_carries_data_needs_its_record(pool: PgPool) -> sqlx::Result
     let first = payment_with_first_step(&mut tx).await?;
     first
         .then("authorize", "authorized", AUTHORIZED, 0)
-        .insert(&mut tx)
+        .insert_with_fact(&mut tx)
         .await?;
     let err = tx.commit().await.unwrap_err();
     assert_guard(err, NO_RECORD, STEP_COMMIT_CHECK, table);
@@ -72,7 +72,7 @@ async fn a_step_that_carries_data_needs_its_record(pool: PgPool) -> sqlx::Result
     let authorized = authorized_payment(&mut tx, &books).await?;
     authorized
         .then("capture", "captured", AUTHORIZED, AUTHORIZED)
-        .insert(&mut tx)
+        .insert_with_fact(&mut tx)
         .await?;
     let err = tx.commit().await.unwrap_err();
     assert_guard(err, NO_RECORD, STEP_COMMIT_CHECK, table);
@@ -82,7 +82,7 @@ async fn a_step_that_carries_data_needs_its_record(pool: PgPool) -> sqlx::Result
     let captured = captured_payment(&mut tx, &books).await?;
     captured
         .then("refund", "captured", 1, AUTHORIZED - 1)
-        .insert(&mut tx)
+        .insert_with_fact(&mut tx)
         .await?;
     let CommitError::Rejected(source) = commit(tx).await.unwrap_err() else {
         panic!("expected a proven rollback");
@@ -103,7 +103,13 @@ async fn a_step_without_data_needs_no_record(pool: PgPool) -> sqlx::Result<()> {
     for (kind, to_status) in [("decline", "failed"), ("cancel", "voided")] {
         let mut tx = runtime_transaction(&pool).await?;
         let first = payment_with_first_step(&mut tx).await?;
-        first.then(kind, to_status, 0, 0).insert(&mut tx).await?;
+        let step = first.then(kind, to_status, 0, 0);
+        // A cancel is the merchant's own step, and a decline comes with its fact.
+        if kind == "cancel" {
+            step.insert(&mut tx).await?;
+        } else {
+            step.insert_with_fact(&mut tx).await?;
+        }
         tx.commit().await?;
     }
     for kind in ["void", "expire"] {
@@ -111,7 +117,7 @@ async fn a_step_without_data_needs_no_record(pool: PgPool) -> sqlx::Result<()> {
         let authorized = authorized_payment(&mut tx, &books).await?;
         authorized
             .then(kind, "voided", 0, 0)
-            .insert(&mut tx)
+            .insert_with_fact(&mut tx)
             .await?;
         tx.commit().await?;
     }
@@ -125,7 +131,7 @@ async fn checking_early_refuses_a_step_at_once(pool: PgPool) -> sqlx::Result<()>
     let first = payment_with_first_step(&mut tx).await?;
     first
         .then("authorize", "authorized", AUTHORIZED, 0)
-        .insert(&mut tx)
+        .insert_with_fact(&mut tx)
         .await?;
     let err = sqlx::query!("SET CONSTRAINTS ALL IMMEDIATE")
         .execute(&mut *tx)

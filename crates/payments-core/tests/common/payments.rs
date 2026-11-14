@@ -243,6 +243,47 @@ impl Step {
         Ok(())
     }
 
+    /// Inserts a step of the PSP's with the fact that makes it and the link between
+    /// them, as the catch-up writes them, so that the step meets the check at COMMIT
+    /// that it has its fact (ADR-0048). The fact's position is the step's sequence
+    /// number: a fixture's history starts with the payment's first step and puts no
+    /// cancel before a step of the PSP's.
+    pub async fn insert_with_fact(&self, conn: &mut PgConnection) -> sqlx::Result<()> {
+        let previous = self
+            .seq
+            .checked_sub(1)
+            .expect("a step of the PSP's comes after the first step")
+            .max(1);
+        sqlx::query!(
+            "INSERT INTO payment_facts \
+                 (payment_id, position, prev_position, psp, psp_fact_id, kind, amount) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7)",
+            self.payment_id,
+            self.seq,
+            previous,
+            Psp::Mock.as_str(),
+            format!("fact_{}", self.id.simple()),
+            self.kind,
+            self.amount
+        )
+        .execute(&mut *conn)
+        .await?;
+        self.insert(&mut *conn).await?;
+        sqlx::query!(
+            "INSERT INTO payment_transition_facts \
+                 (transition_id, payment_id, kind, amount, position) \
+             VALUES ($1, $2, $3, $4, $5)",
+            self.id,
+            self.payment_id,
+            self.kind,
+            self.amount,
+            self.seq
+        )
+        .execute(conn)
+        .await?;
+        Ok(())
+    }
+
     /// Inserts the step and returns the error, failing the test if the insert
     /// succeeds.
     pub async fn insert_rejected(&self, conn: &mut PgConnection) -> sqlx::Error {
@@ -476,29 +517,29 @@ pub async fn insert_refund(
     Ok(())
 }
 
-/// Writes a payment up to its authorization, with its record.
+/// Writes a payment up to its authorization, with its record and its fact.
 pub async fn authorized_payment(conn: &mut PgConnection, books: &Books) -> sqlx::Result<Step> {
     let payment = NewPayment::valid(books.merchant);
     payment.insert(conn).await?;
     let first = Step::first(payment.id);
     first.insert(conn).await?;
     let authorized = first.then("authorize", "authorized", AUTHORIZED, 0);
-    authorized.insert(conn).await?;
+    authorized.insert_with_fact(conn).await?;
     insert_authorization(conn, &authorized, REQUESTED).await?;
     Ok(authorized)
 }
 
-/// Writes a payment up to its capture, with its records and posting.
+/// Writes a payment up to its capture, with its records, posting and facts.
 pub async fn captured_payment(conn: &mut PgConnection, books: &Books) -> sqlx::Result<Step> {
     let authorized = authorized_payment(conn, books).await?;
     let captured = authorized.then("capture", "captured", AUTHORIZED, AUTHORIZED);
-    captured.insert(conn).await?;
+    captured.insert_with_fact(conn).await?;
     let posting = write_posting(conn, &books.capture_lines(AUTHORIZED, FEE)).await?;
     insert_capture(conn, &captured, AUTHORIZED, FEE, posting).await?;
     Ok(captured)
 }
 
-/// Writes a refund after `previous`, with its record and posting.
+/// Writes a refund after `previous`, with its record, posting and fact.
 pub async fn refund_step(
     conn: &mut PgConnection,
     books: &Books,
@@ -507,7 +548,7 @@ pub async fn refund_step(
     amount: i64,
 ) -> sqlx::Result<Step> {
     let refund = previous.then("refund", to_status, amount, previous.refundable - amount);
-    refund.insert(conn).await?;
+    refund.insert_with_fact(conn).await?;
     let posting = write_posting(conn, &books.refund_lines(amount)).await?;
     insert_refund(conn, &refund, posting).await?;
     Ok(refund)
@@ -520,37 +561,41 @@ pub async fn payment_at(
     books: &Books,
     status: PaymentStatus,
 ) -> sqlx::Result<Step> {
-    // Each arm writes its payment's steps; `step` writes one more after them.
-    let step = match status {
-        PaymentStatus::Authorized => return authorized_payment(conn, books).await,
-        PaymentStatus::Captured => return captured_payment(conn, books).await,
+    // Each arm writes its payment's steps: the PSP's with their facts, the merchant's
+    // without, as the catch-up and the commands write them.
+    match status {
+        PaymentStatus::Authorized => authorized_payment(conn, books).await,
+        PaymentStatus::Captured => captured_payment(conn, books).await,
         PaymentStatus::Refunded => {
             let captured = captured_payment(conn, books).await?;
-            return refund_step(conn, books, &captured, "refunded", AUTHORIZED).await;
+            refund_step(conn, books, &captured, "refunded", AUTHORIZED).await
         }
         PaymentStatus::Settled => {
             let captured = captured_payment(conn, books).await?;
-            captured.then("settle", "settled", 0, AUTHORIZED)
+            let settled = captured.then("settle", "settled", 0, AUTHORIZED);
+            settled.insert_with_fact(conn).await?;
+            Ok(settled)
         }
         PaymentStatus::Created | PaymentStatus::Failed | PaymentStatus::Voided => {
             let payment = NewPayment::valid(books.merchant);
             payment.insert(conn).await?;
             let first = Step::first(payment.id);
+            first.insert(conn).await?;
             match status {
                 PaymentStatus::Failed => {
-                    first.insert(conn).await?;
-                    first.then("decline", "failed", 0, 0)
+                    let declined = first.then("decline", "failed", 0, 0);
+                    declined.insert_with_fact(conn).await?;
+                    Ok(declined)
                 }
                 PaymentStatus::Voided => {
-                    first.insert(conn).await?;
-                    first.then("cancel", "voided", 0, 0)
+                    let cancelled = first.then("cancel", "voided", 0, 0);
+                    cancelled.insert(conn).await?;
+                    Ok(cancelled)
                 }
-                _ => first,
+                _ => Ok(first),
             }
         }
-    };
-    step.insert(conn).await?;
-    Ok(step)
+    }
 }
 
 /// A merchant and its accounts.

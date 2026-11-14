@@ -14,8 +14,9 @@ mod common;
 use std::error::Error;
 
 use common::payments::{
-    AUTHORIZED, FEE, NewPayment, REQUESTED, Step, authorized_payment, books, committed_at,
-    insert_authorization, insert_capture, refund_step, register_merchant, write_posting,
+    AUTHORIZED, FEE, NewPayment, REQUESTED, Step, authorized_payment, back_to_savepoint, books,
+    committed_at, insert_authorization, insert_capture, refund_step, register_merchant, savepoint,
+    write_posting,
 };
 use common::{
     APPEND_ONLY, CHECK_VIOLATION, FOREIGN_KEY_VIOLATION, INSUFFICIENT_PRIVILEGE, UNIQUE_VIOLATION,
@@ -231,10 +232,10 @@ impl Stop {
 }
 
 /// A new merchant's payment, committed by the system role with the first step that a
-/// committed payment needs, and authorized too, with its record, if `authorize`.
-/// Returns the merchant and the payment's newest step. A test that needs several
-/// merchants uses this rather than [`books`], which opens the platform's accounts,
-/// and these exist once in a database.
+/// committed payment needs, and authorized too, with its record and the fact at
+/// position 1 that made the step, if `authorize`. Returns the merchant and the
+/// payment's newest step. A test that needs several merchants uses this rather than
+/// [`books`], which opens the platform's accounts, and these exist once in a database.
 async fn new_payment(pool: &PgPool, authorize: bool) -> sqlx::Result<(Uuid, Step)> {
     let mut tx = runtime_transaction(pool).await?;
     let merchant = register_merchant(&mut tx).await?;
@@ -244,7 +245,7 @@ async fn new_payment(pool: &PgPool, authorize: bool) -> sqlx::Result<(Uuid, Step
     newest.insert(&mut tx).await?;
     if authorize {
         newest = newest.then("authorize", "authorized", AUTHORIZED, 0);
-        newest.insert(&mut tx).await?;
+        newest.insert_with_fact(&mut tx).await?;
         insert_authorization(&mut tx, &newest, REQUESTED).await?;
     }
     tx.commit().await?;
@@ -507,16 +508,17 @@ async fn a_request_is_decided_once_by_a_fact_of_a_matching_kind(pool: PgPool) ->
 #[sqlx::test]
 async fn a_step_and_the_fact_that_made_it_agree_on_kind_and_amount(pool: PgPool) -> TestResult {
     // A capture and two refunds of the same amount: two steps of one kind and one
-    // amount, which is what a fact needs to make two steps.
+    // amount, which is what a fact needs to make two steps. Each step commits with the
+    // fact that made it (ADR-0048), so the second refund, which the links below try, is
+    // written without one in a transaction that never commits.
     let books = books(&pool).await?;
     let mut tx = runtime_transaction(&pool).await?;
     let authorized = authorized_payment(&mut tx, &books).await?;
     let captured = authorized.then("capture", "captured", AUTHORIZED, AUTHORIZED);
-    captured.insert(&mut tx).await?;
+    captured.insert_with_fact(&mut tx).await?;
     let posting = write_posting(&mut tx, &books.capture_lines(AUTHORIZED, FEE)).await?;
     insert_capture(&mut tx, &captured, AUTHORIZED, FEE, posting).await?;
     let first_refund = refund_step(&mut tx, &books, &captured, "captured", 100).await?;
-    let second_refund = refund_step(&mut tx, &books, &first_refund, "captured", 100).await?;
     commit(tx).await?;
     let payment = authorized.payment_id;
     let created = sqlx::query_scalar!(
@@ -527,33 +529,36 @@ async fn a_step_and_the_fact_that_made_it_agree_on_kind_and_amount(pool: PgPool)
     .await?;
     let cancelled = committed_at(&pool, &books, PaymentStatus::Voided).await?;
 
-    let mut app = runtime_connection(&pool).await?;
+    // The facts that the three steps committed with, at positions 1 to 3, and three
+    // more after them.
     let f1 = Fact::first(payment, "authorize", AUTHORIZED);
     let f2 = f1.then("capture", AUTHORIZED);
     let f3 = f2.then("refund", 100);
     let f4 = f3.then("authorize", AUTHORIZED);
     let f5 = f4.then("refund", 200);
     let f6 = f5.then("refund_refused", 0);
-    for fact in [&f1, &f2, &f3, &f4, &f5, &f6] {
-        fact.insert(&mut app).await?;
+    let mut tx = runtime_transaction(&pool).await?;
+    let second_refund = first_refund.then("refund", "captured", 100, first_refund.refundable - 100);
+    second_refund.insert(&mut tx).await?;
+    for fact in [&f4, &f5, &f6] {
+        fact.insert(&mut tx).await?;
     }
     let of_cancelled = Fact::first(cancelled.payment_id, "void", 0);
-    of_cancelled.insert(&mut app).await?;
-    Link::of(&authorized, &f1).insert(&mut app).await?;
-    Link::of(&captured, &f2).insert(&mut app).await?;
-    Link::of(&first_refund, &f3).insert(&mut app).await?;
+    of_cancelled.insert(&mut tx).await?;
 
     // A second fact for a step, and a fact for a second step.
-    let err = Link::of(&authorized, &f4)
-        .insert(&mut app)
-        .await
-        .unwrap_err();
-    assert_violation(err, UNIQUE_VIOLATION, "payment_transition_facts_pkey");
-    let err = Link::of(&second_refund, &f3)
-        .insert(&mut app)
-        .await
-        .unwrap_err();
-    assert_violation(err, UNIQUE_VIOLATION, "payment_transition_facts_fact_key");
+    for (link, constraint) in [
+        (Link::of(&authorized, &f4), "payment_transition_facts_pkey"),
+        (
+            Link::of(&second_refund, &f3),
+            "payment_transition_facts_fact_key",
+        ),
+    ] {
+        savepoint(&mut tx).await?;
+        let err = link.insert(&mut tx).await.unwrap_err();
+        back_to_savepoint(&mut tx).await?;
+        assert_violation(err, UNIQUE_VIOLATION, constraint);
+    }
     // Each link below names a position that no link holds yet, so that the unique
     // key, checked as the row goes in, cannot fire before the foreign keys, which
     // PostgreSQL checks at the end of the statement.
@@ -595,9 +600,12 @@ async fn a_step_and_the_fact_that_made_it_agree_on_kind_and_amount(pool: PgPool)
             "payment_transition_facts_fact_fkey",
         ),
     ] {
-        let err = link.insert(&mut app).await.unwrap_err();
+        savepoint(&mut tx).await?;
+        let err = link.insert(&mut tx).await.unwrap_err();
+        back_to_savepoint(&mut tx).await?;
         assert_violation(err, FOREIGN_KEY_VIOLATION, constraint);
     }
+    tx.rollback().await?;
     Ok(())
 }
 
@@ -672,9 +680,9 @@ async fn a_payment_stops_once_for_a_known_reason(pool: PgPool) -> TestResult {
     Ok(())
 }
 
-/// An authorized payment of a new merchant, with its fact, its link, its request
-/// and decision, and a stop: a row in each table. Returns the merchant and the
-/// payment.
+/// An authorized payment of a new merchant, with the fact and the link that its step
+/// commits with, its request and decision, and a stop: a row in each table. Returns
+/// the merchant and the payment.
 async fn one_of_each(pool: &PgPool) -> sqlx::Result<(Uuid, Uuid)> {
     let (merchant, authorized) = new_payment(pool, true).await?;
     let payment = authorized.payment_id;
@@ -682,10 +690,15 @@ async fn one_of_each(pool: &PgPool) -> sqlx::Result<(Uuid, Uuid)> {
     let mut owner = pool.acquire().await?;
     request.insert(&mut owner).await?;
     let mut app = runtime_connection(pool).await?;
-    let fact = Fact::first(payment, "authorize", AUTHORIZED);
-    fact.insert(&mut app).await?;
-    Link::of(&authorized, &fact).insert(&mut app).await?;
-    Decision::of(&request, &fact).insert(&mut app).await?;
+    Decision {
+        request_id: request.id,
+        payment_id: payment,
+        request_kind: request.kind,
+        position: 1,
+        fact_kind: "authorize",
+    }
+    .insert(&mut app)
+    .await?;
     Stop {
         payment_id: payment,
         position: 2,
