@@ -37,6 +37,25 @@ use crate::psp::{Fact, FactDetail, FactKind, History, PspClient, ReadError};
 use crate::requests::RequestKind;
 use crate::retries::RetryBudget;
 
+/// What the step commands of the PSP's moves take: proof that their caller is a
+/// catch-up, which alone applies the PSP's facts (ADR-0034, ADR-0048). Its one field
+/// is private, so only this module makes one, as only the table of moves makes a
+/// [`Transition`](crate::lifecycle::Transition) (ADR-0016).
+///
+/// Code outside the crate can name it:
+///
+/// ```
+/// let _ = |_: &payments_core::catch_up::PspWord| ();
+/// ```
+///
+/// but cannot make one:
+///
+/// ```compile_fail
+/// let forged = payments_core::catch_up::PspWord(()); // a private field
+/// ```
+#[derive(Debug)]
+pub struct PspWord(());
+
 /// What the first half of a catch-up read: how many facts the service held before it
 /// asked, and the PSP's history. Only [`read`] makes one.
 #[derive(Debug)]
@@ -517,6 +536,8 @@ impl Applying<'_> {
         let books = self.books;
         let step = TransitionId::now_v7();
         let id = step.get();
+        // What lets the commands of the PSP's moves apply this fact (ADR-0048).
+        let word = PspWord(());
         let made = match detail {
             FactDetail::Authorized {
                 amount, expires_at, ..
@@ -527,7 +548,7 @@ impl Applying<'_> {
                     amount,
                     expires_at,
                 };
-                refusal(payment, authorize_in(&mut self.tx, &command).await)?.is_none()
+                refusal(payment, authorize_in(&mut self.tx, &command, &word).await)?.is_none()
             }
             FactDetail::Captured {
                 amount,
@@ -543,7 +564,7 @@ impl Applying<'_> {
                 };
                 refusal(
                     payment,
-                    capture_in(&mut self.tx, books.expect(NEEDED), &command).await,
+                    capture_in(&mut self.tx, books.expect(NEEDED), &command, &word).await,
                 )?
                 .is_none()
             }
@@ -561,23 +582,26 @@ impl Applying<'_> {
                 };
                 refusal(
                     payment,
-                    refund_in(&mut self.tx, books.expect(NEEDED), &command).await,
+                    refund_in(&mut self.tx, books.expect(NEEDED), &command, &word).await,
                 )?
                 .is_none()
             }
             FactDetail::Declined { .. } => self
-                .plain(step, Event::Decline, StepKind::Decline)
+                .plain(step, Event::Decline, StepKind::Decline, &word)
                 .await?
                 .is_none(),
             FactDetail::Voided { .. } => self
-                .plain(step, Event::Void, StepKind::Void)
+                .plain(step, Event::Void, StepKind::Void, &word)
                 .await?
                 .is_none(),
             FactDetail::Expired => self
-                .plain(step, Event::Expire, StepKind::Expire)
+                .plain(step, Event::Expire, StepKind::Expire, &word)
                 .await?
                 .is_none(),
-            FactDetail::Settled => match self.plain(step, Event::Settle, StepKind::Settle).await? {
+            FactDetail::Settled => match self
+                .plain(step, Event::Settle, StepKind::Settle, &word)
+                .await?
+            {
                 None => true,
                 // A settlement after a full refund is recorded without a step, unless the
                 // PSP settled the payment before (ADR-0016).
@@ -605,6 +629,7 @@ impl Applying<'_> {
         step: TransitionId,
         event: Event,
         kind: StepKind,
+        word: &PspWord,
     ) -> Result<Option<PlainRefusal>, CatchUpError> {
         let command = StepCommand {
             step,
@@ -612,7 +637,7 @@ impl Applying<'_> {
         };
         refusal(
             self.payment,
-            plain_in(&mut self.tx, &command, event, kind).await,
+            plain_in(&mut self.tx, &command, event, kind, word).await,
         )
     }
 
@@ -781,7 +806,7 @@ fn books_failure(payment: PaymentId, failed: Failed<PostingRefusal>) -> CatchUpE
         Failed::Refused(PostingRefusal::MissingAccount(key)) => {
             CatchUpError::MissingAccount { key }
         }
-        Failed::Refused(PostingRefusal::Refused(_)) => {
+        Failed::Refused(PostingRefusal::Refused) => {
             unreachable!("reading the books moves nothing")
         }
         failed => broken(payment, failed),
