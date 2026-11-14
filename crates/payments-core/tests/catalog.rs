@@ -574,6 +574,11 @@ async fn every_guard_trigger_fires_always(pool: PgPool) -> sqlx::Result<()> {
         ),
         (
             "payment_transitions",
+            "payment_transitions_fact_check",
+            "check_payment_step_fact",
+        ),
+        (
+            "payment_transitions",
             "payment_transitions_no_truncate",
             "reject_change",
         ),
@@ -646,6 +651,12 @@ async fn every_guard_function_has_a_pinned_search_path(pool: PgPool) -> sqlx::Re
             ),
             (
                 "check_payment_posting".to_owned(),
+                pinned.to_owned(),
+                false,
+                false
+            ),
+            (
+                "check_payment_step_fact".to_owned(),
                 pinned.to_owned(),
                 false,
                 false
@@ -932,6 +943,7 @@ async fn every_constraint_keeps_its_name(pool: PgPool) -> sqlx::Result<()> {
             "payment_transition_facts_step_fkey",
             "payment_transitions_commit_check",
             "payment_transitions_edge_check",
+            "payment_transitions_fact_check",
             "payment_transitions_id_check",
             "payment_transitions_id_key",
             "payment_transitions_money_check",

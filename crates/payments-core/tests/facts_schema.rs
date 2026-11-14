@@ -1,7 +1,9 @@
 // Author: Nicola Antonello
 
 //! Database tests for `payment_facts`, `payment_request_decisions`,
-//! `payment_transition_facts` and `payment_stops` (ADR-0031, ADR-0034, ADR-0037).
+//! `payment_transition_facts` and `payment_stops` (ADR-0031, ADR-0034, ADR-0037), and
+//! for the check at `COMMIT` that ties a step of the PSP's to its fact (`LG007`,
+//! ADR-0048).
 //!
 //! Rows are written with raw SQL as the system role, `payments_app`, which runs the
 //! catch-up, the way a buggy code path or a manual session could write them. Each
@@ -14,16 +16,16 @@ mod common;
 use std::error::Error;
 
 use common::payments::{
-    AUTHORIZED, FEE, NewPayment, REQUESTED, Step, authorized_payment, back_to_savepoint, books,
-    committed_at, insert_authorization, insert_capture, refund_step, register_merchant, savepoint,
-    write_posting,
+    AUTHORIZED, Books, FEE, NewPayment, REQUESTED, Step, authorized_payment, back_to_savepoint,
+    books, committed_at, insert_authorization, insert_capture, insert_refund, payment_at,
+    payment_with_first_step, refund_step, register_merchant, savepoint, write_posting,
 };
 use common::{
     APPEND_ONLY, CHECK_VIOLATION, FOREIGN_KEY_VIOLATION, INSUFFICIENT_PRIVILEGE, UNIQUE_VIOLATION,
     assert_guard, assert_violation, runtime_connection, runtime_transaction, sqlstate,
     tenant_login, tenant_transaction,
 };
-use payments_core::db::commit;
+use payments_core::db::{CommitError, commit};
 use payments_core::lifecycle::PaymentStatus;
 use sqlx::{Connection, PgConnection, PgPool};
 use uuid::Uuid;
@@ -954,5 +956,99 @@ async fn facts_and_what_hangs_on_them_are_append_only_even_for_the_owner(
         .await
         .unwrap_err();
     assert_guard(truncate, APPEND_ONLY, "payment_stops_no_truncate", table);
+    Ok(())
+}
+
+/// Writes the record that a step of this kind carries, with its posting for a capture
+/// or a refund, and nothing for a step that carries no data.
+async fn record_of(conn: &mut PgConnection, books: &Books, step: &Step) -> sqlx::Result<()> {
+    match step.kind {
+        "authorize" => insert_authorization(conn, step, REQUESTED).await,
+        "capture" => {
+            let posting = write_posting(&mut *conn, &books.capture_lines(step.amount, FEE)).await?;
+            insert_capture(conn, step, step.amount, FEE, posting).await
+        }
+        "refund" => {
+            let posting = write_posting(&mut *conn, &books.refund_lines(step.amount)).await?;
+            insert_refund(conn, step, posting).await
+        }
+        _ => Ok(()),
+    }
+}
+
+#[sqlx::test]
+async fn a_step_of_the_psps_commits_only_with_its_fact(pool: PgPool) -> TestResult {
+    // Each step that only a fact of the PSP's brings, from a status where the table of
+    // moves allows it, with its record and its posting: without its fact, only the check
+    // at COMMIT is left to refuse it (LG007, ADR-0034), and that proves a rollback
+    // (ADR-0014). With its fact, the same step commits.
+    let books = books(&pool).await?;
+    for (from, kind, to, amount) in [
+        (
+            PaymentStatus::Created,
+            "authorize",
+            "authorized",
+            AUTHORIZED,
+        ),
+        (PaymentStatus::Created, "decline", "failed", 0),
+        (PaymentStatus::Authorized, "capture", "captured", AUTHORIZED),
+        (PaymentStatus::Authorized, "void", "voided", 0),
+        (PaymentStatus::Authorized, "expire", "voided", 0),
+        (PaymentStatus::Captured, "settle", "settled", 0),
+        (PaymentStatus::Captured, "refund", "captured", 1_000),
+    ] {
+        for with_fact in [false, true] {
+            let mut tx = runtime_transaction(&pool).await?;
+            let previous = payment_at(&mut tx, &books, from).await?;
+            let refundable = match kind {
+                "capture" => amount,
+                "refund" => previous.refundable - amount,
+                _ => previous.refundable,
+            };
+            let step = previous.then(kind, to, amount, refundable);
+            if with_fact {
+                step.insert_with_fact(&mut tx).await?;
+            } else {
+                step.insert(&mut tx).await?;
+            }
+            record_of(&mut tx, &books, &step).await?;
+            let committed = commit(tx).await;
+            if with_fact {
+                committed?;
+                continue;
+            }
+            let Err(CommitError::Rejected(source)) = committed else {
+                panic!("{kind}: expected a proven rollback, got {committed:?}");
+            };
+            assert_guard(
+                source,
+                "LG007",
+                "payment_transitions_fact_check",
+                "payment_transitions",
+            );
+        }
+    }
+    // The merchant's own steps, a payment's first and a cancel, need none.
+    committed_at(&pool, &books, PaymentStatus::Voided).await?;
+    Ok(())
+}
+
+#[sqlx::test]
+async fn a_step_without_its_record_or_its_fact_reports_its_record(pool: PgPool) -> TestResult {
+    // Two checks at COMMIT fail on one row, and PostgreSQL fires the triggers of a row in
+    // the order of their names, so the record's check speaks first (ADR-0048).
+    let mut tx = runtime_transaction(&pool).await?;
+    let first = payment_with_first_step(&mut tx).await?;
+    first
+        .then("authorize", "authorized", AUTHORIZED, 0)
+        .insert(&mut tx)
+        .await?;
+    let err = tx.commit().await.unwrap_err();
+    assert_guard(
+        err,
+        "LG004",
+        "payment_transitions_commit_check",
+        "payment_transitions",
+    );
     Ok(())
 }
