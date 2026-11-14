@@ -10,9 +10,8 @@
 mod common;
 
 use common::payments::{
-    AUTHORIZED, Books, FEE, NO_GENESIS, NO_RECORD, NewPayment, STEP_COMMIT_CHECK, Step,
-    back_to_savepoint, captured_payment, insert_authorization, insert_capture, insert_refund,
-    open_account, open_books, refund_step, register_merchant, savepoint, write_posting,
+    Books, NO_GENESIS, NewPayment, Step, back_to_savepoint, captured_payment, open_account,
+    open_books, refund_step, register_merchant, savepoint,
 };
 use common::{
     CHECK_VIOLATION, INSUFFICIENT_PRIVILEGE, UNIQUE_VIOLATION, assert_guard, assert_violation,
@@ -59,6 +58,19 @@ async fn two_merchants(pool: &PgPool) -> sqlx::Result<Merchants> {
         b,
         b_step,
     })
+}
+
+/// A payment of this merchant at its first step, committed by the system role. A cancel
+/// after it is a step that the merchant's role may write (ADR-0034), so only the policies
+/// of ADR-0025 are left to refuse one for the wrong merchant.
+async fn created(pool: &PgPool, books: &Books) -> sqlx::Result<Step> {
+    let mut tx = runtime_transaction(pool).await?;
+    let payment = NewPayment::valid(books.merchant);
+    payment.insert(&mut tx).await?;
+    let first = Step::first(payment.id);
+    first.insert(&mut tx).await?;
+    tx.commit().await?;
+    Ok(first)
 }
 
 /// How many rows this session sees in each table that a merchant owns: merchants,
@@ -173,14 +185,14 @@ async fn with_no_merchant_named_nothing_a_merchant_owns_is_visible(
 #[sqlx::test]
 async fn with_no_merchant_named_nothing_can_be_written(pool: PgPool) -> sqlx::Result<()> {
     let world = two_merchants(&pool).await?;
+    let first = created(&pool, &world.a).await?;
     let mut tenant = tenant_login(&pool).await?;
     let err = NewPayment::valid(world.a.merchant)
         .insert_rejected(&mut tenant)
         .await;
     assert_eq!(sqlstate(err), INSUFFICIENT_PRIVILEGE);
-    let err = world
-        .a_step
-        .then("settle", "settled", 0, world.a_step.refundable)
+    let err = first
+        .then("cancel", "voided", 0, 0)
         .insert_rejected(&mut tenant)
         .await;
     assert_eq!(sqlstate(err), INSUFFICIENT_PRIVILEGE);
@@ -240,10 +252,11 @@ async fn one_prepared_statement_serves_each_merchant(pool: PgPool) -> sqlx::Resu
 
 #[sqlx::test]
 async fn a_merchant_cannot_write_for_another(pool: PgPool) -> sqlx::Result<()> {
+    // The rows that the merchant's role writes, a payment and its own steps (ADR-0034),
+    // each for the other merchant.
     let world = two_merchants(&pool).await?;
-    let stranger = &world.b_step;
+    let stranger = created(&pool, &world.b).await?;
     let mut tx = tenant_transaction(&pool, world.a.merchant).await?;
-    let posting = write_posting(&mut tx, &world.b.refund_lines(1_000)).await?;
 
     savepoint(&mut tx).await?;
     let err = NewPayment::valid(world.b.merchant)
@@ -252,45 +265,31 @@ async fn a_merchant_cannot_write_for_another(pool: PgPool) -> sqlx::Result<()> {
     back_to_savepoint(&mut tx).await?;
     assert_eq!(sqlstate(err), INSUFFICIENT_PRIVILEGE);
 
-    let next = stranger.then("settle", "settled", 0, stranger.refundable);
-    savepoint(&mut tx).await?;
-    let err = next.insert_rejected(&mut tx).await;
-    back_to_savepoint(&mut tx).await?;
-    assert_eq!(sqlstate(err), INSUFFICIENT_PRIVILEGE);
-
-    savepoint(&mut tx).await?;
-    let err = insert_authorization(&mut tx, stranger, 10_000)
-        .await
-        .unwrap_err();
-    back_to_savepoint(&mut tx).await?;
-    assert_eq!(sqlstate(err), INSUFFICIENT_PRIVILEGE);
-
-    savepoint(&mut tx).await?;
-    let err = insert_capture(&mut tx, stranger, AUTHORIZED, FEE, posting)
-        .await
-        .unwrap_err();
-    back_to_savepoint(&mut tx).await?;
-    assert_eq!(sqlstate(err), INSUFFICIENT_PRIVILEGE);
-
-    savepoint(&mut tx).await?;
-    let err = insert_refund(&mut tx, stranger, posting).await.unwrap_err();
-    back_to_savepoint(&mut tx).await?;
+    let err = stranger
+        .then("cancel", "voided", 0, 0)
+        .rejected_in(&mut tx)
+        .await?;
     assert_eq!(sqlstate(err), INSUFFICIENT_PRIVILEGE);
     tx.rollback().await
 }
 
 #[sqlx::test]
-async fn a_whole_lifecycle_commits_as_the_tenant(pool: PgPool) -> sqlx::Result<()> {
+async fn a_create_and_a_cancel_commit_as_the_tenant(pool: PgPool) -> sqlx::Result<()> {
     // The deferred checks run as the tenant role, and read through the policies at
-    // COMMIT, so a check that lost sight of a row would refuse this.
+    // COMMIT, so a check that lost sight of a row would refuse this: the payment's check
+    // looks for its first step. These are the steps that the merchant's role writes
+    // (ADR-0034).
     let world = two_merchants(&pool).await?;
     let mut tx = tenant_transaction(&pool, world.a.merchant).await?;
-    let captured = captured_payment(&mut tx, &world.a).await?;
-    refund_step(&mut tx, &world.a, &captured, "captured", 2_000).await?;
+    let payment = NewPayment::valid(world.a.merchant);
+    payment.insert(&mut tx).await?;
+    let first = Step::first(payment.id);
+    first.insert(&mut tx).await?;
+    first.then("cancel", "voided", 0, 0).insert(&mut tx).await?;
     tx.commit().await?;
 
     let mut tx = tenant_transaction(&pool, world.a.merchant).await?;
-    assert_eq!(visible(&mut tx).await?, [1, 2, 8, 2, 2, 2]);
+    assert_eq!(visible(&mut tx).await?, [1, 2, 6, 1, 1, 1]);
     tx.rollback().await
 }
 
@@ -298,50 +297,15 @@ async fn a_whole_lifecycle_commits_as_the_tenant(pool: PgPool) -> sqlx::Result<(
 async fn the_checks_at_commit_still_refuse_what_the_tenant_writes(
     pool: PgPool,
 ) -> sqlx::Result<()> {
-    // Row-level security must not blind a deferred check: each of these commits
-    // would otherwise leave a broken row for the merchant's own payment.
+    // Row-level security must not blind a deferred check: this commit would otherwise
+    // leave the merchant's own payment without its first step. Of the checks at COMMIT,
+    // it is the one that the rows the merchant's role writes can break (ADR-0034).
     let world = two_merchants(&pool).await?;
     let merchant = world.a.merchant;
-
     let mut tx = tenant_transaction(&pool, merchant).await?;
     NewPayment::valid(merchant).insert(&mut tx).await?;
     let err = tx.commit().await.unwrap_err();
     assert_guard(err, NO_GENESIS, "payments_commit_check", "payments");
-
-    let mut tx = tenant_transaction(&pool, merchant).await?;
-    let settled = world
-        .a_step
-        .then("settle", "settled", 0, world.a_step.refundable);
-    settled.insert(&mut tx).await?;
-    let recordless = settled.then("refund", "settled", 1_000, settled.refundable - 1_000);
-    recordless.insert(&mut tx).await?;
-    let err = tx.commit().await.unwrap_err();
-    assert_guard(err, NO_RECORD, STEP_COMMIT_CHECK, "payment_transitions");
-
-    let mut tx = tenant_transaction(&pool, merchant).await?;
-    let refund = world
-        .a_step
-        .then("refund", "captured", 1_000, world.a_step.refundable - 1_000);
-    refund.insert(&mut tx).await?;
-    let wrong = write_posting(&mut tx, &world.a.refund_lines(999)).await?;
-    insert_refund(&mut tx, &refund, wrong).await?;
-    let err = tx.commit().await.unwrap_err();
-    assert_guard(
-        err,
-        "LG006",
-        "payment_refunds_commit_check",
-        "payment_refunds",
-    );
-
-    let mut tx = tenant_transaction(&pool, merchant).await?;
-    write_posting(&mut tx, &[(world.a.payable, 1), (world.a.fees, 2)]).await?;
-    let err = tx.commit().await.unwrap_err();
-    assert_guard(
-        err,
-        "LG003",
-        "ledger_transactions_commit_check",
-        "ledger_transactions",
-    );
     Ok(())
 }
 
