@@ -234,6 +234,11 @@ The 21 that retire:
   and a payment has one request for its authorization (ADR-0039), so each is tried where
   its request can wait: a decline from `created`, a void from `authorized`. From any other
   status one is a contradiction, which `catching_up.rs` stops.
+- 2026-11-14: The third pull request's "revocations by column" are one table-level
+  `REVOKE` of `INSERT` on the five tables. PostgreSQL revokes a table's privilege on each
+  of its columns too ([REVOKE](https://www.postgresql.org/docs/18/sql-revoke.html)), so the
+  statement takes every column grant and cannot miss one, and what the role keeps stays
+  granted by column, as ADR-0034 requires.
 
 ## References
 

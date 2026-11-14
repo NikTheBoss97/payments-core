@@ -184,7 +184,8 @@ async fn the_runtime_role_has_exactly_the_expected_privileges(pool: PgPool) -> s
 #[sqlx::test]
 async fn the_tenant_role_has_exactly_the_expected_privileges(pool: PgPool) -> sqlx::Result<()> {
     // What a merchant's requests and their deferred checks need, and no more: it
-    // cannot create a merchant or see an API key (ADR-0025).
+    // cannot create a merchant or see an API key (ADR-0025), and it writes no ledger
+    // line and no record of a step, which only the PSP's facts bring (ADR-0034).
     assert_eq!(
         granted_to(&pool, "payments_tenant").await?,
         [
@@ -202,34 +203,13 @@ async fn the_tenant_role_has_exactly_the_expected_privileges(pool: PgPool) -> sq
             "idempotency_records.key INSERT",
             "idempotency_records.merchant_id INSERT",
             "idempotency_records.status INSERT",
-            "ledger_entries INSERT",
             "ledger_entries SELECT",
             "ledger_transactions SELECT",
-            "ledger_transactions.currency INSERT",
-            "ledger_transactions.entry_count INSERT",
-            "ledger_transactions.id INSERT",
             "merchants SELECT",
             "payment_authorizations SELECT",
-            "payment_authorizations.amount INSERT",
-            "payment_authorizations.expires_at INSERT",
-            "payment_authorizations.payment_amount INSERT",
-            "payment_authorizations.payment_id INSERT",
-            "payment_authorizations.transition_id INSERT",
             "payment_captures SELECT",
-            "payment_captures.amount INSERT",
-            "payment_captures.authorized_amount INSERT",
-            "payment_captures.captured_at INSERT",
-            "payment_captures.fee INSERT",
-            "payment_captures.ledger_transaction_id INSERT",
-            "payment_captures.payment_id INSERT",
-            "payment_captures.transition_id INSERT",
             "payment_facts SELECT",
             "payment_refunds SELECT",
-            "payment_refunds.amount INSERT",
-            "payment_refunds.ledger_transaction_id INSERT",
-            "payment_refunds.payment_id INSERT",
-            "payment_refunds.refunded_at INSERT",
-            "payment_refunds.transition_id INSERT",
             "payment_request_answers SELECT",
             "payment_request_decisions SELECT",
             "payment_requests SELECT",
@@ -1021,12 +1001,13 @@ async fn row_level_security_covers_exactly_what_a_merchant_owns(pool: PgPool) ->
 async fn every_policy_keeps_its_text(pool: PgPool) -> sqlx::Result<()> {
     // A policy that went on to compare the wrong column, or that applied to another
     // role, would pass every test that its own merchant runs. With no WITH CHECK,
-    // USING also judges new rows. PostgreSQL stores a policy parsed, so this is its
-    // text as PostgreSQL prints it, with the whitespace of its line breaks reduced.
+    // USING also judges new rows, and an INSERT policy has only its check. PostgreSQL
+    // stores a policy parsed, so this is its text as PostgreSQL prints it, with the
+    // whitespace of its line breaks reduced.
     let mut policies = sqlx::query_scalar!(
         r#"
         SELECT format('%s %s %s %s: %s; check: %s', policyname, permissive, cmd, roles::text,
-                      regexp_replace(qual, '\s+', ' ', 'g'),
+                      COALESCE(regexp_replace(qual, '\s+', ' ', 'g'), 'none'),
                       COALESCE(with_check, 'none')) AS "policy!"
           FROM pg_policies
          WHERE schemaname = 'public'
@@ -1094,6 +1075,12 @@ async fn every_policy_keeps_its_text(pool: PgPool) -> sqlx::Result<()> {
                 "payment_transitions_tenant_isolation",
                 "ALL"
             ),
+            // Restrictive, so a new step must pass it as well as the policy above; for
+            // INSERT only, so the merchant still reads every step of its payments
+            // (ADR-0034).
+            "payment_transitions_tenant_steps RESTRICTIVE INSERT {payments_tenant}: none; \
+             check: (kind = ANY (ARRAY['create'::text, 'cancel'::text]))"
+                .to_owned(),
             format!(
                 "payments_tenant_isolation PERMISSIVE ALL {{payments_tenant}}: \
                  (merchant_id = {setting}); check: none"
