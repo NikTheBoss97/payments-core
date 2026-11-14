@@ -18,7 +18,7 @@ invariants, and [`docs/adr/`](docs/adr/) for the decisions behind them.
 | 1 | Double-entry ledger | done |
 | 2 | Payment lifecycle state machine | done |
 | 3 | Idempotency keys, HTTP API, authentication and tenant isolation | done |
-| 4 | Mock PSP, signed webhooks | in progress |
+| 4 | Mock PSP, signed webhooks | done |
 | 5 | Transactional outbox | — |
 | 6 | Reconciliation | — |
 | 7 | Failure-injection and property tests | — |
@@ -119,8 +119,8 @@ guard, and the failures they reproduce.
 | I5 | A payment never makes an invalid state transition. | Guaranteed since phase 2 | [Payments](docs/correctness/payments.md) |
 | I6 | A payment's state change, its ledger entries and its outbound event commit atomically. | The state change and its entries since phase 2; the outbound event in phase 5 | [Payments](docs/correctness/payments.md) |
 | I7 | A merchant can read or change only its own payments. | Guaranteed since phase 3 | [API](docs/correctness/api.md) |
-| I8 | Only the PSP's word moves a payment: after its creation, every step but a cancellation comes from the PSP's history, once and in its order. | Phase 4, in progress: designed in [ADR-0034](docs/adr/0034-only-the-psps-word-moves-a-payment.md) | |
-| I9 | A request sent to the PSP takes effect there at most once. | Phase 4, in progress: designed in [ADR-0028](docs/adr/0028-requests-to-the-psp.md) and [ADR-0034](docs/adr/0034-only-the-psps-word-moves-a-payment.md) | |
+| I8 | Only the PSP's word moves a payment: after its creation, every step but a cancellation comes from the PSP's history, once and in its order. | Guaranteed since phase 4 | [PSP](docs/correctness/psp.md) |
+| I9 | A request sent to the PSP takes effect there at most once. | Guaranteed since phase 4 | [PSP](docs/correctness/psp.md) |
 
 ### Running the tests
 
