@@ -21,7 +21,9 @@ use axum::Router;
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
 use common::api::{Pools, get, send, unused_psp};
-use common::crashes::{NOTIFICATION_AT_COMMIT, install_crash_points, plan_death};
+use common::crashes::{
+    NOTIFICATION_AT_COMMIT, NOTIFICATION_POINTS, install_crash_points, plan_death,
+};
 use common::payments::{REQUESTED, create_command, fee_rate, status_of};
 use common::psp::{client_of, silent_psp};
 use common::{merchant_id, request_id, runtime_pool, runtime_pool_of_one, test_uuid};
@@ -350,22 +352,39 @@ async fn a_notification_that_cannot_be_recorded_is_a_503_that_asks_for_it_again(
 }
 
 #[sqlx::test]
-async fn a_record_whose_commit_dies_is_a_503_and_the_copy_that_follows_gets_202(
+async fn a_notification_killed_anywhere_is_a_503_and_the_copy_that_follows_gets_202(
     pool: PgPool,
 ) -> TestResult {
+    // The backend dies before the record's insert, after it, and during COMMIT. Each time
+    // nothing of the record stays and the outcome is unknown, so the route asks for the
+    // notification again, and the PSP reads when. The copy that follows is recorded once.
     install_crash_points(&pool).await?;
     let world = World::new(&pool).await?;
     let payment = world.payment(1).await?;
-    let event = world.notify(payment.get());
     let one = runtime_pool_of_one(&pool).await?;
     world.serve_with(one.clone()).await;
-    plan_death(&one, NOTIFICATION_AT_COMMIT).await?;
-    // The outcome is unknown, so the route asks for the notification again, and the PSP
-    // reads when.
-    assert_eq!(world.fake.deliver(&event).await, answered(503, Some(5)));
-    assert_eq!(recorded(&pool).await?, []);
-    assert_eq!(world.fake.deliver(&event).await, answered(202, None));
-    assert_eq!(recorded(&pool).await?, [(event, payment.get())]);
+    let mut held = Vec::new();
+    for point in NOTIFICATION_POINTS
+        .into_iter()
+        .chain([NOTIFICATION_AT_COMMIT])
+    {
+        let event = world.notify(payment.get());
+        plan_death(&one, point).await?;
+        assert_eq!(
+            world.fake.deliver(&event).await,
+            answered(503, Some(5)),
+            "{point}"
+        );
+        assert_eq!(recorded(&pool).await?, held, "{point}");
+        assert_eq!(
+            world.fake.deliver(&event).await,
+            answered(202, None),
+            "{point}"
+        );
+        held.push((event, payment.get()));
+        held.sort();
+        assert_eq!(recorded(&pool).await?, held, "{point}");
+    }
     one.close().await;
     world.close().await;
     Ok(())
