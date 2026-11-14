@@ -40,6 +40,11 @@ pub const OPERATOR_KEY_POINTS: [&str; 2] = [
 ];
 /// During `COMMIT` of an operator's command, which writes no step.
 pub const OPERATOR_AT_COMMIT: &str = "zz_die_at_commit operator_idempotency_records";
+/// The points around a notification's record (ADR-0030).
+pub const NOTIFICATION_POINTS: [&str; 2] = [
+    "die_before psp_notifications",
+    "die_after psp_notifications",
+];
 /// During `COMMIT` of a notification's record, which writes no step either.
 pub const NOTIFICATION_AT_COMMIT: &str = "zz_die_at_commit psp_notifications";
 /// The points around a request's own row (ADR-0046).
@@ -81,7 +86,7 @@ pub async fn install_crash_points(pool: &PgPool) -> sqlx::Result<()> {
                  'payment_captures', 'payment_refunds', 'idempotency_records', 'merchants', \
                  'api_keys', 'api_key_revocations', 'operator_idempotency_records', \
                  'payment_requests', 'payment_facts', 'payment_transition_facts', \
-                 'payment_request_decisions'] LOOP \
+                 'payment_request_decisions', 'psp_notifications'] LOOP \
                  EXECUTE format('CREATE TRIGGER die_before BEFORE INSERT ON %I \
                      FOR EACH ROW EXECUTE FUNCTION die_if_planned()', target); \
                  EXECUTE format('CREATE TRIGGER die_after AFTER INSERT ON %I \
