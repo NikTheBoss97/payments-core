@@ -36,7 +36,7 @@ async fn capture_with_posting_in(
 ) -> sqlx::Result<Step> {
     let authorized = authorized_payment(tx, books).await?;
     let step = authorized.then("capture", "captured", AUTHORIZED, AUTHORIZED);
-    step.insert(tx).await?;
+    step.insert_with_fact(tx).await?;
     let posting = write_posting_in(tx, currency, lines).await?;
     insert_capture(tx, &step, AUTHORIZED, FEE, posting).await?;
     Ok(step)
@@ -51,7 +51,7 @@ async fn refund_with_posting(
 ) -> sqlx::Result<Step> {
     let captured = captured_payment(tx, books).await?;
     let step = captured.then("refund", "captured", 1_000, AUTHORIZED - 1_000);
-    step.insert(tx).await?;
+    step.insert_with_fact(tx).await?;
     insert_refund(tx, &step, posting).await?;
     Ok(step)
 }
@@ -112,7 +112,7 @@ async fn a_zero_line_is_left_out_of_a_capture_posting(pool: PgPool) -> sqlx::Res
         let mut tx = runtime_transaction(&pool).await?;
         let authorized = authorized_payment(&mut tx, &books).await?;
         let step = authorized.then("capture", "captured", AUTHORIZED, AUTHORIZED);
-        step.insert(&mut tx).await?;
+        step.insert_with_fact(&mut tx).await?;
         let posting = write_posting(&mut tx, &books.capture_lines(AUTHORIZED, fee)).await?;
         insert_capture(&mut tx, &step, AUTHORIZED, fee, posting).await?;
         tx.commit().await?;
@@ -215,7 +215,7 @@ async fn one_posting_cannot_serve_a_capture_and_a_refund(pool: PgPool) -> sqlx::
     let posting = write_posting(&mut tx, &lines).await?;
     let authorized = authorized_payment(&mut tx, &books).await?;
     let captured = authorized.then("capture", "captured", AUTHORIZED, AUTHORIZED);
-    captured.insert(&mut tx).await?;
+    captured.insert_with_fact(&mut tx).await?;
     insert_capture(&mut tx, &captured, AUTHORIZED, FEE, posting).await?;
     refund_with_posting(&mut tx, &books, posting).await?;
     let err = tx.commit().await.unwrap_err();
@@ -340,7 +340,7 @@ async fn the_commit_checks_fire_in_replica_mode(pool: PgPool) -> sqlx::Result<()
     let first = payment_with_first_step(&mut tx).await?;
     first
         .then("authorize", "authorized", AUTHORIZED, 0)
-        .insert(&mut tx)
+        .insert_with_fact(&mut tx)
         .await?;
     let err = tx.commit().await.unwrap_err();
     assert_guard(err, NO_RECORD, STEP_COMMIT_CHECK, "payment_transitions");
