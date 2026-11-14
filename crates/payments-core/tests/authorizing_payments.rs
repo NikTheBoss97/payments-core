@@ -294,6 +294,46 @@ async fn a_record_that_a_trigger_loses_fails_at_commit(pool: PgPool) -> TestResu
 }
 
 #[sqlx::test]
+async fn a_link_that_a_trigger_loses_fails_at_commit(pool: PgPool) -> TestResult {
+    // Only the check at COMMIT can notice a step that no fact is tied to, and LG007
+    // proves a rollback (ADR-0014, ADR-0048): none of the catch-up stays.
+    let (tenant, merchant) = registered(&pool).await?;
+    let me = Tenant::new(&tenant, merchant);
+    let mut psp = PspSide::start(&pool).await?;
+    let payment = created(me, merchant, 1).await?;
+    psp.sent(me, &authorization(1, payment)).await;
+    psp.fake.approve(request_id(1).get());
+    sqlx::query!(
+        "CREATE FUNCTION lose_row() RETURNS trigger LANGUAGE plpgsql AS $$ \
+         BEGIN RETURN NULL; END $$"
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query!(
+        "CREATE TRIGGER lose_link BEFORE INSERT ON payment_transition_facts \
+         FOR EACH ROW EXECUTE FUNCTION lose_row()"
+    )
+    .execute(&pool)
+    .await?;
+    let err = catch_up(&psp.system, &client_of(&psp.fake), payment)
+        .await
+        .unwrap_err();
+    let CatchUpError::Invariant { source, .. } = err else {
+        panic!("expected Invariant, got {err:?}");
+    };
+    assert_guard(
+        source,
+        "LG007",
+        "payment_transitions_fact_check",
+        "payment_transitions",
+    );
+    assert_eq!(steps(&pool, payment).await?, 1);
+    tenant.close().await;
+    psp.close().await;
+    Ok(())
+}
+
+#[sqlx::test]
 async fn a_record_that_a_trigger_corrupts_is_a_bug(pool: PgPool) -> TestResult {
     // The types allow the write; only the CHECK can refuse what reaches it.
     let (tenant, merchant) = registered(&pool).await?;

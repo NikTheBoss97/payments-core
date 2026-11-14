@@ -93,6 +93,9 @@ Two facts about sqlx 0.9 (rev `f1e94ec`) bear on the same question:
   `CommitTransaction()` fires before it writes the commit record, so each
   proves a rollback, and the one function through which every `COMMIT` goes
   lists all five.
+- 2026-11-14: the registry now runs to `LG007` (ADR-0048), raised at `COMMIT`
+  by `payment_transitions_fact_check`. It proves a rollback like the others,
+  and the one function lists all six.
 
 ## References
 
