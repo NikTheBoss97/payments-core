@@ -19,7 +19,7 @@ invariants, and [`docs/adr/`](docs/adr/) for the decisions behind them.
 | 2 | Payment lifecycle state machine | done |
 | 3 | Idempotency keys, HTTP API, authentication and tenant isolation | done |
 | 4 | Mock PSP, signed webhooks | done |
-| 5 | Transactional outbox | — |
+| 5 | Transactional outbox | in progress |
 | 6 | Reconciliation | — |
 | 7 | Failure-injection and property tests | — |
 | 8 | Benchmarks | — |
@@ -117,10 +117,11 @@ guard, and the failures they reproduce.
 | I3 | Balances are derived from the entries: none is stored. | Guaranteed since phase 1 | [Ledger](docs/correctness/ledger.md) |
 | I4 | One idempotency key produces at most one effect. | Guaranteed since phase 3 | [API](docs/correctness/api.md) |
 | I5 | A payment never makes an invalid state transition. | Guaranteed since phase 2 | [Payments](docs/correctness/payments.md) |
-| I6 | A payment's state change, its ledger entries and its outbound event commit atomically. | The state change and its entries since phase 2; the outbound event in phase 5 | [Payments](docs/correctness/payments.md) |
-| I7 | A merchant can read or change only its own payments. | Guaranteed since phase 3 | [API](docs/correctness/api.md) |
+| I6 | A payment's state change, its ledger entries and its outbound event commit atomically. | The state change and its entries since phase 2; the outbound event in phase 5, in progress: designed in [ADR-0049](docs/adr/0049-thin-events-in-an-outbox.md) | [Payments](docs/correctness/payments.md) |
+| I7 | A merchant can read or change only its own payments, and is told only about its own. | Reading and changing guaranteed since phase 3; being told in phase 5, in progress: designed in [ADR-0054](docs/adr/0054-what-phase-5-promises-and-how-it-is-tested.md) | [API](docs/correctness/api.md) |
 | I8 | Only the PSP's word moves a payment: after its creation, every step but a cancellation comes from the PSP's history, once and in its order. | Guaranteed since phase 4 | [PSP](docs/correctness/psp.md) |
 | I9 | A request sent to the PSP takes effect there at most once. | Guaranteed since phase 4 | [PSP](docs/correctness/psp.md) |
+| I10 | Every event reaches every endpoint enabled when it was written, at least once, unless that endpoint is disabled first. | Phase 5, in progress: designed in [ADR-0052](docs/adr/0052-how-the-relay-finds-what-to-send.md) and [ADR-0053](docs/adr/0053-delivering-events.md) | |
 
 ### Running the tests
 
