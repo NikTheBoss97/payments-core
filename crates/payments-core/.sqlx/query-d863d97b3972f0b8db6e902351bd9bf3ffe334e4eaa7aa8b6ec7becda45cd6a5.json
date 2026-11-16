@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO webhook_endpoint_disablements (endpoint_id, reason, recorded_at) VALUES ($1, $2, now())",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "d863d97b3972f0b8db6e902351bd9bf3ffe334e4eaa7aa8b6ec7becda45cd6a5"
+}
