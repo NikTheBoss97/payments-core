@@ -44,6 +44,15 @@ impl BusinessTime {
     pub fn get(self) -> DateTime<Utc> {
         self.0
     }
+
+    /// The time as the API writes it: RFC 3339 in UTC with `Z`, with the fractional digits
+    /// that it needs (ADR-0045).
+    #[must_use]
+    pub fn written(self) -> String {
+        // `%.f` writes no digits for a whole second, and otherwise 3, 6 or 9, as many
+        // as it takes; a business time has 6 at most (ADR-0022).
+        self.0.format("%Y-%m-%dT%H:%M:%S%.fZ").to_string()
+    }
 }
 
 #[cfg(test)]
@@ -70,6 +79,26 @@ mod tests {
 
     fn built(value: DateTime<Utc>) -> DateTime<Utc> {
         BusinessTime::new(value).expect("in range").get()
+    }
+
+    #[test]
+    fn a_time_is_written_in_utc_with_the_digits_that_it_needs() {
+        let written_at = |micros: i64| {
+            let time = DateTime::from_timestamp_micros(micros).expect("a time in range");
+            BusinessTime::new(time)
+                .expect("a time that PostgreSQL stores")
+                .written()
+        };
+        // 2030-01-01T00:00:00Z, and 120 ms and 1 us after it.
+        assert_eq!(written_at(1_893_456_000_000_000), "2030-01-01T00:00:00Z");
+        assert_eq!(
+            written_at(1_893_456_000_120_000),
+            "2030-01-01T00:00:00.120Z"
+        );
+        assert_eq!(
+            written_at(1_893_456_000_000_001),
+            "2030-01-01T00:00:00.000001Z"
+        );
     }
 
     #[test]

@@ -26,7 +26,6 @@ use crate::requests::{
     Applied, Ask, Conflict, Followed, RecordRequest, Refusal, RequestError, RequestOutcome,
     Standing, find_request, record_request,
 };
-use crate::times::BusinessTime;
 
 /// A payment of the merchant that asked. A route that takes one cannot reach another
 /// merchant's payment: holding this proves that its merchant is the credential's.
@@ -391,7 +390,7 @@ pub(super) async fn read_payment(own: OwnPayment) -> Response {
                 .authorization
                 .map(|authorization| AuthorizationView {
                     amount: authorization.amount.get(),
-                    expires_at: written(authorization.expires_at),
+                    expires_at: authorization.expires_at.written(),
                 }),
         },
     )
@@ -426,21 +425,21 @@ impl RequestView {
             Standing::Applied(applied) => Some(match applied {
                 Applied::Authorized { amount, expires_at } => AppliedView::Authorized {
                     amount: amount.get(),
-                    expires_at: written(expires_at),
+                    expires_at: expires_at.written(),
                 },
                 Applied::Captured {
                     amount,
                     captured_at,
                 } => AppliedView::Captured {
                     amount: amount.get(),
-                    captured_at: written(captured_at),
+                    captured_at: captured_at.written(),
                 },
                 Applied::Refunded {
                     amount,
                     refunded_at,
                 } => AppliedView::Refunded {
                     amount: amount.get(),
-                    refunded_at: written(refunded_at),
+                    refunded_at: refunded_at.written(),
                 },
                 Applied::Voided => AppliedView::Voided {},
             }),
@@ -455,14 +454,6 @@ impl RequestView {
             applied,
         }
     }
-}
-
-/// A time as the API writes it: RFC 3339 in UTC with `Z`, with the fractional digits that
-/// it needs (ADR-0045).
-fn written(time: BusinessTime) -> String {
-    // `%.f` writes no digits for a whole second, and otherwise 3, 6 or 9, as many
-    // as it takes; a business time has 6 at most (ADR-0022).
-    time.get().format("%Y-%m-%dT%H:%M:%S%.fZ").to_string()
 }
 
 /// `GET /payments/{id}/requests/{request_id}`: where a request of the payment stands
@@ -499,28 +490,8 @@ pub(super) fn json_text(value: &impl Serialize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use sqlx::types::chrono::DateTime;
-
     use super::*;
     use crate::requests::RequestKind;
-
-    #[test]
-    fn a_time_is_written_in_utc_with_the_digits_that_it_needs() {
-        let written_at = |micros: i64| {
-            let time = DateTime::from_timestamp_micros(micros).expect("a time in range");
-            written(BusinessTime::new(time).expect("a time that PostgreSQL stores"))
-        };
-        // 2030-01-01T00:00:00Z, and 120 ms and 1 us after it.
-        assert_eq!(written_at(1_893_456_000_000_000), "2030-01-01T00:00:00Z");
-        assert_eq!(
-            written_at(1_893_456_000_120_000),
-            "2030-01-01T00:00:00.120Z"
-        );
-        assert_eq!(
-            written_at(1_893_456_000_000_001),
-            "2030-01-01T00:00:00.000001Z"
-        );
-    }
 
     #[test]
     fn a_recorded_request_is_answered_202_with_its_ids() {
