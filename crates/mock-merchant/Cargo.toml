@@ -1,0 +1,36 @@
+# Author: Nicola Antonello
+
+[package]
+name = "mock-merchant"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+# The headers of a delivery, as the routes will read them.
+axum = { version = "0.8.9", default-features = false, features = ["http1", "tokio"] }
+# A delivery's signature (ADR-0051, ADR-0056): the secret's base64, the MAC and its hash.
+# The server and the mock PSP build these crates already.
+base64 = "0.23"
+hmac = "0.13"
+sha2 = { version = "0.11", default-features = false }
+# The window around the fake's clock, and the event's time in RFC 3339. sqlx builds this
+# crate already.
+chrono = { version = "0.4.45", default-features = false, features = ["serde", "std"] }
+# The event's body, read strictly (ADR-0049). sqlx builds these crates already.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Derives Display and Error for the error types. sqlx depends on it too.
+thiserror = "2.0.21"
+# The payment and the request that an event names. sqlx builds this crate already.
+uuid = { version = "1.28", features = ["serde"] }
+
+[dev-dependencies]
+# Secrets from the operating system, made at runtime as every test's keys are (ADR-0030).
+# uuid builds this crate already.
+getrandom = "0.4"
+
+[lints]
+workspace = true

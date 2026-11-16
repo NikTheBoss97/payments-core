@@ -842,6 +842,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "mock-merchant"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "base64 0.23.1",
+ "chrono",
+ "getrandom",
+ "hmac",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror",
+ "uuid",
+]
+
+[[package]]
 name = "mock-psp"
 version = "0.1.0"
 dependencies = [
