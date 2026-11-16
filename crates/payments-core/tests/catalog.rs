@@ -9,10 +9,11 @@
 //! the catalogs instead. They pin the runtime role's table and column
 //! privileges, its grant options and its session defaults, check that it can
 //! neither create objects in the public schema nor act through another role,
-//! pin each guard trigger and the function it runs, and pin the type and
-//! nullability of every column and the name of every constraint. The tenant
-//! role, `payments_tenant`, is pinned the same way, with the tables under
-//! row-level security and the text of every policy (ADR-0025).
+//! pin each guard trigger and the function it runs, and pin the type,
+//! nullability and default of every column and the name of every
+//! constraint. The tenant role, `payments_tenant`, is pinned the same way,
+//! with the tables under row-level security and the text of every policy
+//! (ADR-0025).
 
 use sqlx::{Connection, PgConnection, PgPool};
 
@@ -813,6 +814,55 @@ async fn every_column_has_its_type_and_is_not_null(pool: PgPool) -> sqlx::Result
             "psp_notifications.payment_id uuid not null",
             "psp_notifications.psp text not null",
             "psp_notifications.recorded_at timestamp with time zone not null",
+        ]
+    );
+    Ok(())
+}
+
+#[sqlx::test]
+async fn every_default_keeps_its_expression(pool: PgPool) -> sqlx::Result<()> {
+    // A column that only its default fills, such as recorded_at (ADR-0012), is
+    // stamped by the database and by nothing else, so a migration that changed the
+    // expression would pass every test that never reads the column. A generated
+    // column keeps its expression here too. The sqlx bookkeeping table is left out.
+    let mut defaults = sqlx::query_scalar!(
+        r#"
+        SELECT format('%s.%s %s %s', c.relname, a.attname,
+                      CASE WHEN a.attgenerated::text <> '' THEN 'generated' ELSE 'default' END,
+                      pg_get_expr(d.adbin, d.adrelid)) AS "default!"
+          FROM pg_attrdef d
+          JOIN pg_attribute a ON a.attrelid = d.adrelid AND a.attnum = d.adnum
+          JOIN pg_class c ON c.oid = d.adrelid
+         WHERE c.relnamespace = 'public'::regnamespace
+           AND c.relkind = 'r'
+           AND c.relname <> '_sqlx_migrations'
+        "#
+    )
+    .fetch_all(&pool)
+    .await?;
+    defaults.sort();
+
+    let stamped = "default transaction_timestamp()";
+    assert_eq!(
+        defaults,
+        [
+            format!("accounts.recorded_at {stamped}"),
+            format!("api_key_revocations.recorded_at {stamped}"),
+            format!("api_keys.recorded_at {stamped}"),
+            format!("idempotency_records.recorded_at {stamped}"),
+            format!("ledger_transactions.recorded_at {stamped}"),
+            format!("merchants.recorded_at {stamped}"),
+            format!("operator_idempotency_records.recorded_at {stamped}"),
+            "payment_authorizations.kind generated 'authorize'::text".to_owned(),
+            "payment_captures.kind generated 'capture'::text".to_owned(),
+            format!("payment_facts.recorded_at {stamped}"),
+            "payment_refunds.kind generated 'refund'::text".to_owned(),
+            format!("payment_request_answers.recorded_at {stamped}"),
+            format!("payment_requests.recorded_at {stamped}"),
+            format!("payment_stops.recorded_at {stamped}"),
+            format!("payment_transitions.recorded_at {stamped}"),
+            format!("payments.recorded_at {stamped}"),
+            format!("psp_notifications.recorded_at {stamped}"),
         ]
     );
     Ok(())
