@@ -98,6 +98,7 @@ server, because a secret sent in the clear is a stolen key.
 ```
 crates/payments-core/   core library and API server
 crates/mock-psp/        the fake PSP that tests drive, and its binary for local runs
+crates/mock-merchant/   the fake merchant that tests drive, and its binary for local runs
 docs/DESIGN.md          goals, failure model, invariants
 docs/adr/               architecture decision records
 docs/correctness/       how each component's invariants are tested
