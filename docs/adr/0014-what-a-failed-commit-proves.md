@@ -96,6 +96,9 @@ Two facts about sqlx 0.9 (rev `f1e94ec`) bear on the same question:
 - 2026-11-14: the registry now runs to `LG007` (ADR-0048), raised at `COMMIT`
   by `payment_transitions_fact_check`. It proves a rollback like the others,
   and the one function lists all six.
+- 2026-11-16: the registry now runs to `LG008` (ADR-0049), raised at `COMMIT`
+  by `payment_facts_event_check`. It proves a rollback like the others, and
+  the one function lists all seven.
 
 ## References
 

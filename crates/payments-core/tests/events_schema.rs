@@ -2,7 +2,7 @@
 
 //! Database tests for `payment_events`, `webhook_deliveries` and
 //! `webhook_delivery_successes` (ADR-0049, ADR-0052, ADR-0053, ADR-0055), with the
-//! guards of I7 and I10 in PostgreSQL (ADR-0054).
+//! guards of I6, I7 and I10 in PostgreSQL (ADR-0054).
 //!
 //! Rows are written with raw SQL as the system role, `payments_app`, which runs the
 //! catch-up and the relay, the way a buggy code path or a manual session could write
@@ -22,6 +22,7 @@ use common::{
     assert_guard, assert_violation, runtime_connection, runtime_transaction, sqlstate,
     tenant_login,
 };
+use payments_core::db::{CommitError, commit};
 use sqlx::{Connection, PgConnection, PgPool};
 use uuid::Uuid;
 
@@ -204,6 +205,44 @@ async fn an_events_merchant_is_its_payments(pool: PgPool) -> TestResult {
         assert_violation(err, FOREIGN_KEY_VIOLATION, "payment_events_payment_fkey");
         back_to_savepoint(&mut tx).await?;
     }
+    Ok(())
+}
+
+/// Writes the PSP's fact at this position of the payment's history without its event,
+/// as the system role, and checks that COMMIT refuses it with a proven rollback.
+async fn assert_refused_alone(pool: &PgPool, payment: Uuid, position: i32) -> TestResult {
+    let mut tx = runtime_transaction(pool).await?;
+    insert_fact(&mut tx, payment, position).await?;
+    let committed = commit(tx).await;
+    let Err(CommitError::Rejected(source)) = committed else {
+        panic!("fact {position} of {payment}: expected a proven rollback, got {committed:?}");
+    };
+    assert_guard(
+        source,
+        "LG008",
+        "payment_facts_event_check",
+        "payment_facts",
+    );
+    Ok(())
+}
+
+#[sqlx::test]
+async fn a_fact_commits_only_with_its_own_event(pool: PgPool) -> TestResult {
+    // I6 (ADR-0054): a fact of the PSP's and the event that announces it commit
+    // together. Written without it, a fact is refused at COMMIT (LG008, ADR-0049), which
+    // proves a rollback (ADR-0014).
+    let (merchant, payment) = new_payment(&pool).await?;
+    let (_, other) = new_payment(&pool).await?;
+    assert_refused_alone(&pool, payment, 1).await?;
+    // Nothing of that attempt stayed, so the same fact is written again, with its event.
+    let mut tx = runtime_transaction(&pool).await?;
+    insert_fact(&mut tx, payment, 1).await?;
+    insert_event(&mut tx, Uuid::now_v7(), merchant, payment, 1).await?;
+    commit(tx).await?;
+    // No other event will do: neither its payment's at another position, nor another
+    // payment's at its position.
+    assert_refused_alone(&pool, payment, 2).await?;
+    assert_refused_alone(&pool, other, 1).await?;
     Ok(())
 }
 

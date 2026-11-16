@@ -524,6 +524,11 @@ async fn every_guard_trigger_fires_always(pool: PgPool) -> sqlx::Result<()> {
         ),
         (
             "payment_facts",
+            "payment_facts_event_check",
+            "check_payment_fact_event",
+        ),
+        (
+            "payment_facts",
             "payment_facts_no_truncate",
             "reject_change",
         ),
@@ -709,6 +714,12 @@ async fn every_guard_function_has_a_pinned_search_path(pool: PgPool) -> sqlx::Re
         [
             (
                 "check_ledger_transaction".to_owned(),
+                pinned.to_owned(),
+                false,
+                false
+            ),
+            (
+                "check_payment_fact_event".to_owned(),
                 pinned.to_owned(),
                 false,
                 false
@@ -1055,6 +1066,7 @@ async fn every_constraint_keeps_its_name(pool: PgPool) -> sqlx::Result<()> {
             "payment_events_payment_fkey",
             "payment_events_pkey",
             "payment_facts_amount_check",
+            "payment_facts_event_check",
             "payment_facts_kind_amount_key",
             "payment_facts_kind_check",
             "payment_facts_kind_key",

@@ -54,7 +54,7 @@ pub async fn commit(tx: Transaction<'_, Postgres>) -> Result<(), CommitError> {
 fn proves_rollback(code: Option<&str>) -> bool {
     matches!(
         code,
-        Some("LG002" | "LG003" | "LG004" | "LG005" | "LG006" | "LG007")
+        Some("LG002" | "LG003" | "LG004" | "LG005" | "LG006" | "LG007" | "LG008")
     )
 }
 
@@ -83,6 +83,7 @@ mod tests {
             (Some("LG005"), true),
             (Some("LG006"), true),
             (Some("LG007"), true),
+            (Some("LG008"), true),
             // A cancel or terminate held during the commit can arrive after
             // it, so these prove nothing.
             (Some("57014"), false),
@@ -103,7 +104,7 @@ mod tests {
     proptest! {
         #[test]
         fn every_other_code_leaves_the_outcome_unknown(code in "[0-9A-Z]{5}") {
-            let expected = ["LG002", "LG003", "LG004", "LG005", "LG006", "LG007"]
+            let expected = ["LG002", "LG003", "LG004", "LG005", "LG006", "LG007", "LG008"]
                 .contains(&code.as_str());
             prop_assert_eq!(proves_rollback(Some(&code)), expected);
         }
