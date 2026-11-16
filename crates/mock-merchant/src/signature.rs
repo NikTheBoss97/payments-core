@@ -20,8 +20,8 @@ use sha2::Sha256;
 const PREFIX: &str = "whsec_";
 
 /// The headers of a delivery (ADR-0051).
-const ID: &str = "webhook-id";
-const TIMESTAMP: &str = "webhook-timestamp";
+pub(crate) const ID: &str = "webhook-id";
+pub(crate) const TIMESTAMP: &str = "webhook-timestamp";
 const SIGNATURE: &str = "webhook-signature";
 
 /// How far a timestamp may stand from the fake's clock, either way: the tolerance of the
@@ -117,7 +117,7 @@ pub fn verify(
 }
 
 /// The value of a header that appears once, in visible ASCII.
-fn one<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
+pub(crate) fn one<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
     let mut values = headers.get_all(name).iter();
     let value = values.next()?;
     if values.next().is_some() {
