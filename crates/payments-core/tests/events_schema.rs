@@ -31,7 +31,9 @@ type TestResult = Result<(), Box<dyn Error>>;
 const URL: &str = "http://localhost:8080/webhooks";
 
 /// The PSP's fact at this position of a payment's history. The table does not judge
-/// the order of kinds (ADR-0037), so every fact here is an authorization.
+/// the order of kinds (ADR-0037), so every fact here is an authorization. A fact
+/// commits only with its event (ADR-0049, ADR-0057), so each test writes it in the
+/// transaction of the event that announces it.
 async fn insert_fact(conn: &mut PgConnection, payment: Uuid, position: i32) -> sqlx::Result<()> {
     let prev_position = position
         .checked_sub(1)
@@ -54,15 +56,14 @@ async fn insert_fact(conn: &mut PgConnection, payment: Uuid, position: i32) -> s
     Ok(())
 }
 
-/// A new merchant's payment, committed with its first step and the PSP's first fact
-/// about it, which an event can announce. Returns the merchant and the payment.
-async fn payment_with_a_fact(pool: &PgPool) -> sqlx::Result<(Uuid, Uuid)> {
+/// A new merchant's payment, committed with its first step. Returns the merchant and
+/// the payment.
+async fn new_payment(pool: &PgPool) -> sqlx::Result<(Uuid, Uuid)> {
     let mut tx = runtime_transaction(pool).await?;
     let merchant = register_merchant(&mut tx).await?;
     let payment = NewPayment::valid(merchant);
     payment.insert(&mut tx).await?;
     Step::first(payment.id).insert(&mut tx).await?;
-    insert_fact(&mut tx, payment.id, 1).await?;
     tx.commit().await?;
     Ok((merchant, payment.id))
 }
@@ -129,13 +130,14 @@ async fn succeed(conn: &mut PgConnection, delivery: Uuid) -> sqlx::Result<()> {
     Ok(())
 }
 
-/// An event of a new payment, an endpoint of its merchant and the delivery between
-/// them, committed together as the catch-up writes them. Returns the merchant, the
-/// event and the delivery.
+/// The PSP's first fact about a new payment, its event, an endpoint of its merchant and
+/// the delivery between them, committed together as the catch-up writes them. Returns
+/// the merchant, the event and the delivery.
 async fn delivery(pool: &PgPool) -> sqlx::Result<(Uuid, Uuid, Uuid)> {
-    let (merchant, payment) = payment_with_a_fact(pool).await?;
+    let (merchant, payment) = new_payment(pool).await?;
     let (endpoint, event, delivery) = (Uuid::now_v7(), Uuid::now_v7(), Uuid::now_v7());
     let mut tx = runtime_transaction(pool).await?;
+    insert_fact(&mut tx, payment, 1).await?;
     insert_endpoint(&mut tx, endpoint, merchant).await?;
     insert_event(&mut tx, event, merchant, payment, 1).await?;
     insert_delivery(&mut tx, delivery, event, endpoint, merchant).await?;
@@ -145,34 +147,44 @@ async fn delivery(pool: &PgPool) -> sqlx::Result<(Uuid, Uuid, Uuid)> {
 
 #[sqlx::test]
 async fn an_event_has_a_uuidv7_and_announces_one_fact_of_its_payment(pool: PgPool) -> TestResult {
-    let (merchant, payment) = payment_with_a_fact(&pool).await?;
-    let mut app = runtime_connection(&pool).await?;
-    insert_fact(&mut app, payment, 2).await?;
+    let (merchant, payment) = new_payment(&pool).await?;
+    let mut tx = runtime_transaction(&pool).await?;
+    insert_fact(&mut tx, payment, 1).await?;
+    insert_fact(&mut tx, payment, 2).await?;
 
     for id in [Uuid::nil(), Uuid::max(), VERSION_4] {
-        let err = insert_event(&mut app, id, merchant, payment, 1)
+        savepoint(&mut tx).await?;
+        let err = insert_event(&mut tx, id, merchant, payment, 1)
             .await
             .unwrap_err();
         assert_violation(err, CHECK_VIOLATION, "payment_events_id_check");
+        back_to_savepoint(&mut tx).await?;
     }
     // A position that the payment's history does not hold.
-    let err = insert_event(&mut app, Uuid::now_v7(), merchant, payment, 3)
+    savepoint(&mut tx).await?;
+    let err = insert_event(&mut tx, Uuid::now_v7(), merchant, payment, 3)
         .await
         .unwrap_err();
     assert_violation(err, FOREIGN_KEY_VIOLATION, "payment_events_fact_fkey");
+    back_to_savepoint(&mut tx).await?;
 
     let event = Uuid::now_v7();
-    insert_event(&mut app, event, merchant, payment, 1).await?;
+    insert_event(&mut tx, event, merchant, payment, 1).await?;
     // A second event for one fact, and one event for a second fact.
-    let err = insert_event(&mut app, Uuid::now_v7(), merchant, payment, 1)
+    savepoint(&mut tx).await?;
+    let err = insert_event(&mut tx, Uuid::now_v7(), merchant, payment, 1)
         .await
         .unwrap_err();
     assert_violation(err, UNIQUE_VIOLATION, "payment_events_fact_key");
-    let err = insert_event(&mut app, event, merchant, payment, 2)
+    back_to_savepoint(&mut tx).await?;
+    savepoint(&mut tx).await?;
+    let err = insert_event(&mut tx, event, merchant, payment, 2)
         .await
         .unwrap_err();
     assert_violation(err, UNIQUE_VIOLATION, "payment_events_pkey");
-    insert_event(&mut app, Uuid::now_v7(), merchant, payment, 2).await?;
+    back_to_savepoint(&mut tx).await?;
+    insert_event(&mut tx, Uuid::now_v7(), merchant, payment, 2).await?;
+    tx.commit().await?;
     Ok(())
 }
 
@@ -180,14 +192,17 @@ async fn an_event_has_a_uuidv7_and_announces_one_fact_of_its_payment(pool: PgPoo
 async fn an_events_merchant_is_its_payments(pool: PgPool) -> TestResult {
     // I7 (ADR-0054): an event names the merchant whose endpoints it goes to, so that
     // merchant must be its payment's.
-    let (_, payment) = payment_with_a_fact(&pool).await?;
-    let (other, _) = payment_with_a_fact(&pool).await?;
-    let mut app = runtime_connection(&pool).await?;
+    let (_, payment) = new_payment(&pool).await?;
+    let (other, _) = new_payment(&pool).await?;
+    let mut tx = runtime_transaction(&pool).await?;
+    insert_fact(&mut tx, payment, 1).await?;
     for merchant in [other, Uuid::now_v7()] {
-        let err = insert_event(&mut app, Uuid::now_v7(), merchant, payment, 1)
+        savepoint(&mut tx).await?;
+        let err = insert_event(&mut tx, Uuid::now_v7(), merchant, payment, 1)
             .await
             .unwrap_err();
         assert_violation(err, FOREIGN_KEY_VIOLATION, "payment_events_payment_fkey");
+        back_to_savepoint(&mut tx).await?;
     }
     Ok(())
 }
@@ -196,9 +211,10 @@ async fn an_events_merchant_is_its_payments(pool: PgPool) -> TestResult {
 async fn only_the_database_stamps_the_transaction_of_an_event_and_its_delivery(
     pool: PgPool,
 ) -> TestResult {
-    let (merchant, payment) = payment_with_a_fact(&pool).await?;
+    let (merchant, payment) = new_payment(&pool).await?;
     let (endpoint, event, delivery) = (Uuid::now_v7(), Uuid::now_v7(), Uuid::now_v7());
     let mut tx = runtime_transaction(&pool).await?;
+    insert_fact(&mut tx, payment, 1).await?;
     insert_endpoint(&mut tx, endpoint, merchant).await?;
     insert_event(&mut tx, event, merchant, payment, 1).await?;
     insert_delivery(&mut tx, delivery, event, endpoint, merchant).await?;
@@ -270,8 +286,8 @@ async fn only_the_database_stamps_the_transaction_of_an_event_and_its_delivery(
 async fn a_delivery_goes_only_to_an_endpoint_of_its_events_merchant(pool: PgPool) -> TestResult {
     // I7 (ADR-0054), each foreign key broken alone, inside the event's own transaction
     // so that the key to its transaction holds.
-    let (a, payment) = payment_with_a_fact(&pool).await?;
-    let (b, _) = payment_with_a_fact(&pool).await?;
+    let (a, payment) = new_payment(&pool).await?;
+    let (b, _) = new_payment(&pool).await?;
     let (of_a, of_b) = (Uuid::now_v7(), Uuid::now_v7());
     let mut app = runtime_connection(&pool).await?;
     insert_endpoint(&mut app, of_a, a).await?;
@@ -279,6 +295,7 @@ async fn a_delivery_goes_only_to_an_endpoint_of_its_events_merchant(pool: PgPool
 
     let event = Uuid::now_v7();
     let mut tx = runtime_transaction(&pool).await?;
+    insert_fact(&mut tx, payment, 1).await?;
     insert_event(&mut tx, event, a, payment, 1).await?;
     // Another merchant's endpoint, under the event's merchant.
     savepoint(&mut tx).await?;
@@ -308,13 +325,15 @@ async fn a_delivery_goes_only_to_an_endpoint_of_its_events_merchant(pool: PgPool
 async fn a_delivery_is_written_in_its_events_transaction_or_not_at_all(pool: PgPool) -> TestResult {
     // I10 (ADR-0052): once a transaction has ended, the relay's mark may pass it, so a
     // delivery written later for its event could sit below the mark and never be sent.
-    let (merchant, payment) = payment_with_a_fact(&pool).await?;
+    let (merchant, payment) = new_payment(&pool).await?;
     let endpoint = Uuid::now_v7();
     let mut app = runtime_connection(&pool).await?;
     insert_endpoint(&mut app, endpoint, merchant).await?;
-    insert_fact(&mut app, payment, 2).await?;
     let first = Uuid::now_v7();
-    insert_event(&mut app, first, merchant, payment, 1).await?;
+    let mut earlier = runtime_transaction(&pool).await?;
+    insert_fact(&mut earlier, payment, 1).await?;
+    insert_event(&mut earlier, first, merchant, payment, 1).await?;
+    earlier.commit().await?;
 
     // In a later transaction, alone, and after an event of that transaction's own.
     let err = insert_delivery(&mut app, Uuid::now_v7(), first, endpoint, merchant)
@@ -327,6 +346,7 @@ async fn a_delivery_is_written_in_its_events_transaction_or_not_at_all(pool: PgP
     );
     let second = Uuid::now_v7();
     let mut tx = runtime_transaction(&pool).await?;
+    insert_fact(&mut tx, payment, 2).await?;
     insert_event(&mut tx, second, merchant, payment, 2).await?;
     savepoint(&mut tx).await?;
     let err = insert_delivery(&mut tx, Uuid::now_v7(), first, endpoint, merchant)
@@ -359,7 +379,7 @@ async fn a_delivery_is_written_in_its_events_transaction_or_not_at_all(pool: PgP
 
 #[sqlx::test]
 async fn a_delivery_has_a_uuidv7_and_is_one_per_event_and_endpoint(pool: PgPool) -> TestResult {
-    let (merchant, payment) = payment_with_a_fact(&pool).await?;
+    let (merchant, payment) = new_payment(&pool).await?;
     let (endpoint, other) = (Uuid::now_v7(), Uuid::now_v7());
     let mut app = runtime_connection(&pool).await?;
     insert_endpoint(&mut app, endpoint, merchant).await?;
@@ -367,6 +387,7 @@ async fn a_delivery_has_a_uuidv7_and_is_one_per_event_and_endpoint(pool: PgPool)
 
     let (event, delivery) = (Uuid::now_v7(), Uuid::now_v7());
     let mut tx = runtime_transaction(&pool).await?;
+    insert_fact(&mut tx, payment, 1).await?;
     insert_event(&mut tx, event, merchant, payment, 1).await?;
     for id in [Uuid::nil(), Uuid::max(), VERSION_4] {
         savepoint(&mut tx).await?;

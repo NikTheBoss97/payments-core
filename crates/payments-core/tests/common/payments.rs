@@ -243,11 +243,12 @@ impl Step {
         Ok(())
     }
 
-    /// Inserts a step of the PSP's with the fact that makes it and the link between
-    /// them, as the catch-up writes them, so that the step meets the check at COMMIT
-    /// that it has its fact (ADR-0048). The fact's position is the step's sequence
-    /// number: a fixture's history starts with the payment's first step and puts no
-    /// cancel before a step of the PSP's.
+    /// Inserts a step of the PSP's with the fact that makes it, the fact's event and the
+    /// link between the step and the fact, as the catch-up writes them, so that the step
+    /// meets the check at COMMIT that it has its fact (ADR-0048), and the fact the one
+    /// that it has its event (ADR-0049, ADR-0057). The fact's position is the step's
+    /// sequence number: a fixture's history starts with the payment's first step and puts
+    /// no cancel before a step of the PSP's.
     pub async fn insert_with_fact(&self, conn: &mut PgConnection) -> sqlx::Result<()> {
         let previous = self
             .seq
@@ -265,6 +266,15 @@ impl Step {
             format!("fact_{}", self.id.simple()),
             self.kind,
             self.amount
+        )
+        .execute(&mut *conn)
+        .await?;
+        sqlx::query!(
+            "INSERT INTO payment_events (id, merchant_id, payment_id, position) \
+             SELECT $1::uuid, merchant_id, id, $3::integer FROM payments WHERE id = $2",
+            Uuid::now_v7(),
+            self.payment_id,
+            self.seq
         )
         .execute(&mut *conn)
         .await?;
