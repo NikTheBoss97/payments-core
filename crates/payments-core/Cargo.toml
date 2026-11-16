@@ -19,7 +19,8 @@ base64 = "0.23"
 # crate already.
 getrandom = "0.4"
 # The MAC that signs a notification, compared through its constant-time output
-# (ADR-0030). sqlx builds this crate already.
+# (ADR-0030), and each endpoint's secret: HKDF-Expand's one block under the master key
+# (ADR-0051). sqlx builds this crate already.
 hmac = "0.13"
 # Reads the PSP's histories (ADR-0036): the legacy client, with the one retry that it
 # makes by itself switched off, and the body, bounded in size (ADR-0041). Also reads a
