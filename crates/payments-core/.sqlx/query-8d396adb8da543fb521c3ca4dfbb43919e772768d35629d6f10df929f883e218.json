@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT d.xact_id = e.xact_id AS \"same!\"\n             FROM webhook_deliveries d JOIN payment_events e ON e.id = d.event_id\n            WHERE d.id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "same!",
+        "type_info": "Bool",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "8d396adb8da543fb521c3ca4dfbb43919e772768d35629d6f10df929f883e218"
+}

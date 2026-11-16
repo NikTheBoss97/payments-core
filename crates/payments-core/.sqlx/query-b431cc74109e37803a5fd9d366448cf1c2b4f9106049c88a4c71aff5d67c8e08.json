@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO payment_events (id, merchant_id, payment_id, position, recorded_at) VALUES ($1, $2, $3, 1, now())",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "b431cc74109e37803a5fd9d366448cf1c2b4f9106049c88a4c71aff5d67c8e08"
+}

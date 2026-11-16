@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "TRUNCATE webhook_deliveries CASCADE",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "e6c0cdeffbab0358f1453da0e8a285d8fc2e1f030c72495b94eed52b884f82ea"
+}
