@@ -92,6 +92,9 @@ Its type:
 - 2026-11-16: "inside the commands that take `PspWord`" means in the catch-up, beside the
   fact that the event announces. A refusal and a settlement recorded without a step make
   no step, so no such command writes their facts (ADR-0057).
+- 2026-11-16: the body's `timestamp` is written as the API writes its times: RFC 3339 in
+  UTC with `Z`, with as many fractional digits as the instant needs (none, 3 or 6 for the
+  database's microseconds), so every read of one event gives the same bytes.
 
 ## References
 
