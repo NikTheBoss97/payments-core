@@ -79,6 +79,12 @@ analysis.
   vector; a retry signed with a new timestamp; no stored answer holding a secret
   (ADR-0026); a malformed master key stopping the binary.
 
+## Amendments
+
+- 2026-11-16: `webhook-id` is the event's ID as the API writes IDs: 36 characters of
+  lowercase hexadecimal and hyphens. Our own check of a notification's ID, 1 to 255 of
+  `[0-9A-Za-z_-]` (ADR-0030), and the fake merchant's (ADR-0056) accept it.
+
 ## References
 
 - [Standard Webhooks specification](https://github.com/standard-webhooks/standard-webhooks/blob/main/spec/standard-webhooks.md) (v1.0.0): the signature scheme and its keys.
