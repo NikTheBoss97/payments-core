@@ -6,7 +6,8 @@
 //! A catch-up comes in two halves. [`read`] counts the facts that the service holds,
 //! then reads the PSP's history, outside any transaction. [`apply`] takes the payment's
 //! lock, checks that the facts held are the history's first facts, ID for ID, applies
-//! each new fact through the command of its step, and commits once, through the one
+//! each new fact through the command of its step, writes the fact's event and the
+//! event's deliveries (ADR-0049, ADR-0053, ADR-0057), and commits once, through the one
 //! function of ADR-0014. A fact that the service cannot place, or that contradicts what
 //! it holds, stops the payment for an operator at its position, after the facts before
 //! it. [`catch_up`] runs the two halves in a row, and a test runs them in any order.
@@ -26,7 +27,7 @@ use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
 use crate::accounts::{AccountKey, Psp};
-use crate::ids::{PaymentId, TransactionId, TransitionId};
+use crate::ids::{DeliveryId, EventId, PaymentId, TransactionId, TransitionId};
 use crate::lifecycle::{Event, IllegalTransition, PaymentStatus, StepKind};
 use crate::payments::{
     Authorize, Books, Capture, Failed, Failure, Outcome, PlainRefusal, PostingRefusal, Refund,
@@ -335,9 +336,12 @@ pub async fn apply(pool: &PgPool, read: Read) -> Result<CaughtUp, CatchUpError> 
         // facts that a crossing catch-up committed (ADR-0041).
         return Ok(CaughtUp::Current { applied: 0 });
     };
+    let endpoints = enabled_endpoints(&mut tx, payment, held.merchant).await?;
     let mut applying = Applying {
         tx,
         payment,
+        merchant: held.merchant,
+        endpoints,
         psp,
         books: books.as_ref(),
         settled: held.facts.iter().any(|(_, kind)| *kind == FactKind::Settle),
@@ -370,6 +374,8 @@ fn posts(fact: &Fact) -> bool {
 /// What the service holds of a payment, read under its lock, in statements after the
 /// lock's (ADR-0018).
 struct Held {
+    /// The payment's merchant, which its events and their deliveries repeat.
+    merchant: Uuid,
     stopped: bool,
     /// The PSP's ID and the kind of each fact held, by position.
     facts: Vec<(String, FactKind)>,
@@ -390,8 +396,9 @@ async fn read_held(
     payment: PaymentId,
 ) -> Result<Option<Held>, CatchUpError> {
     let failed = |source| database(payment, source);
-    let Some(stopped) = sqlx::query_scalar!(
-        r#"SELECT EXISTS (SELECT 1 FROM payment_stops s WHERE s.payment_id = p.id)
+    let Some(payment_row) = sqlx::query!(
+        r#"SELECT p.merchant_id,
+                  EXISTS (SELECT 1 FROM payment_stops s WHERE s.payment_id = p.id)
                   AS "stopped!"
              FROM payments p
             WHERE p.id = $1"#,
@@ -439,10 +446,31 @@ async fn read_held(
     })
     .collect();
     Ok(Some(Held {
-        stopped,
+        merchant: payment_row.merchant_id,
+        stopped: payment_row.stopped,
         facts,
         requests,
     }))
+}
+
+/// The merchant's endpoints that are enabled, those without a disablement, read once
+/// under the payment's lock, before the first new fact: every event of the catch-up goes
+/// to them (ADR-0053, ADR-0057).
+async fn enabled_endpoints(
+    tx: &mut Transaction<'static, Postgres>,
+    payment: PaymentId,
+    merchant: Uuid,
+) -> Result<Vec<Uuid>, CatchUpError> {
+    sqlx::query_scalar!(
+        "SELECT e.id FROM webhook_endpoints e
+          WHERE e.merchant_id = $1
+            AND NOT EXISTS (SELECT 1 FROM webhook_endpoint_disablements d
+                             WHERE d.endpoint_id = e.id)",
+        merchant
+    )
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(|source| database(payment, source))
 }
 
 /// The first position at which the history and the facts held disagree (ADR-0041): one
@@ -481,6 +509,9 @@ const NEEDED: &str = "the books of a new capture or refund, read before the lock
 struct Applying<'a> {
     tx: Transaction<'static, Postgres>,
     payment: PaymentId,
+    merchant: Uuid,
+    /// The endpoints that each event goes to.
+    endpoints: Vec<Uuid>,
     psp: Psp,
     books: Option<&'a Books>,
     requests: HashMap<Uuid, HeldRequest>,
@@ -490,9 +521,10 @@ struct Applying<'a> {
 }
 
 impl Applying<'_> {
-    /// Applies one new fact, with its step if it makes one, and records it; or names the
-    /// reason that stops the payment at it, in the order of ADR-0041: a fact that cannot
-    /// be placed, a decision that contradicts the requests, then the table of moves.
+    /// Applies one new fact, with its step if it makes one, and records it with its event;
+    /// or names the reason that stops the payment at it, in the order of ADR-0041: a fact
+    /// that cannot be placed, a decision that contradicts the requests, then the table of
+    /// moves.
     async fn place(&mut self, fact: &Fact) -> Result<Option<StopReason>, CatchUpError> {
         let Ok(detail) = fact.detail() else {
             return Ok(Some(StopReason::NoPlace));
@@ -520,6 +552,7 @@ impl Applying<'_> {
                 asked.decided = true;
             }
         }
+        self.insert_event(fact.position()).await?;
         self.settled |= detail == FactDetail::Settled;
         self.applied = self
             .applied
@@ -709,6 +742,45 @@ impl Applying<'_> {
             kind.as_str(),
             position,
             fact_kind.as_str()
+        )
+        .execute(&mut *self.tx)
+        .await
+        .map_err(|source| database(payment, source))?;
+        Ok(())
+    }
+
+    /// Announces the fact at `position` with its event, and writes the event's
+    /// deliveries, one for each endpoint, in one statement whose IDs Rust made
+    /// (ADR-0005, ADR-0057).
+    async fn insert_event(&mut self, position: i32) -> Result<(), CatchUpError> {
+        let payment = self.payment;
+        let event = EventId::now_v7().get();
+        sqlx::query!(
+            "INSERT INTO payment_events (id, merchant_id, payment_id, position)
+             VALUES ($1, $2, $3, $4)",
+            event,
+            self.merchant,
+            payment.get(),
+            position
+        )
+        .execute(&mut *self.tx)
+        .await
+        .map_err(|source| database(payment, source))?;
+        // One list makes both arrays, so they always have one length, and unnest never
+        // pads one with NULL.
+        let deliveries: Vec<Uuid> = self
+            .endpoints
+            .iter()
+            .map(|_| DeliveryId::now_v7().get())
+            .collect();
+        sqlx::query!(
+            "INSERT INTO webhook_deliveries (id, event_id, endpoint_id, merchant_id)
+             SELECT d.id, $3::uuid, d.endpoint_id, $4::uuid
+               FROM unnest($1::uuid[], $2::uuid[]) AS d (id, endpoint_id)",
+            &deliveries,
+            &self.endpoints,
+            event,
+            self.merchant
         )
         .execute(&mut *self.tx)
         .await

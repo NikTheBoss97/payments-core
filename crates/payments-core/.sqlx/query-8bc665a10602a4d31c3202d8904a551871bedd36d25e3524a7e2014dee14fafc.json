@@ -1,0 +1,40 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT position, merchant_id FROM payment_events WHERE payment_id = $1 ORDER BY position",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "position",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "payment_events",
+            "name": "position"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "merchant_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "payment_events",
+            "name": "merchant_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "8bc665a10602a4d31c3202d8904a551871bedd36d25e3524a7e2014dee14fafc"
+}

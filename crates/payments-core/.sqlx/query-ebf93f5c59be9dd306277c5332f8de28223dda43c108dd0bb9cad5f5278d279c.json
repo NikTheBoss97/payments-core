@@ -1,0 +1,62 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT e.payment_id, e.position, d.endpoint_id, d.merchant_id\n           FROM webhook_deliveries d\n           JOIN payment_events e ON e.id = d.event_id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "payment_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "payment_events",
+            "name": "payment_id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "position",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "payment_events",
+            "name": "position"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "endpoint_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "webhook_deliveries",
+            "name": "endpoint_id"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "merchant_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "webhook_deliveries",
+            "name": "merchant_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "ebf93f5c59be9dd306277c5332f8de28223dda43c108dd0bb9cad5f5278d279c"
+}
