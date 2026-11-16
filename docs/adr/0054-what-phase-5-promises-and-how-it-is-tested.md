@@ -101,6 +101,12 @@ The fake merchant:
 - `payments-core` gains a second fake under `[dev-dependencies]`, and the workspace a third
   crate.
 
+## Amendments
+
+- 2026-11-16: "The binary answers everything with a `2xx`" means every delivery that
+  passes the fake's checks. One that does not is a `400`, as a merchant would answer it,
+  and is never taken (ADR-0056).
+
 ## References
 
 - J. H. Saltzer, D. P. Reed and D. D. Clark, [End-to-End Arguments in System Design](https://doi.org/10.1145/357401.357402) (ACM Transactions on Computer Systems, 1984).
