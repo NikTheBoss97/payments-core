@@ -22,5 +22,6 @@ pub mod psp;
 pub mod requests;
 pub mod retries;
 pub mod sender;
+pub mod signing;
 pub mod tenancy;
 pub mod times;

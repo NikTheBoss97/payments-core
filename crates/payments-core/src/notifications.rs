@@ -19,10 +19,9 @@ use std::fmt;
 use axum::http::HeaderMap;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
+use hmac::Mac;
 use hmac::digest::Output;
-use hmac::{Hmac, KeyInit, Mac};
 use serde::Deserialize;
-use sha2::Sha256;
 use sqlx::PgPool;
 use sqlx::types::chrono::{DateTime, Utc};
 use uuid::Uuid;
@@ -30,11 +29,7 @@ use uuid::Uuid;
 use crate::accounts::Psp;
 use crate::db::{CommitError, code_and_constraint, commit};
 use crate::ids::PaymentId;
-
-type HmacSha256 = Hmac<Sha256>;
-
-/// How a key is written: the specification's prefix, then base64.
-const PREFIX: &str = "whsec_";
+use crate::signing::{self, HmacSha256, KeyError};
 
 /// How far a notification's timestamp may be from the service's clock, either way, in
 /// seconds: the tolerance of the specification's reference library (ADR-0030). The
@@ -45,19 +40,6 @@ pub const TOLERANCE_SECONDS: i64 = 5 * 60;
 /// next (ADR-0030). They are secrets, so they print none of their bytes.
 #[derive(Clone)]
 pub struct SigningKeys(Vec<Vec<u8>>);
-
-/// Why a list of keys was refused. No message repeats what it read.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub enum KeyError {
-    #[error("it lists no key")]
-    None,
-    #[error("a key does not start with whsec_")]
-    Prefix,
-    #[error("a key is not base64 after its prefix")]
-    Base64,
-    #[error("a key has {0} bytes, not 24 to 64")]
-    Length(usize),
-}
 
 impl SigningKeys {
     /// Reads keys separated by spaces, each written `whsec_` and base64, of 24 to 64
@@ -79,10 +61,9 @@ impl SigningKeys {
     }
 }
 
-/// One key's bytes, from `whsec_` and base64.
+/// One key's bytes, from `whsec_` and base64, of 24 to 64.
 fn key(written: &str) -> Result<Vec<u8>, KeyError> {
-    let encoded = written.strip_prefix(PREFIX).ok_or(KeyError::Prefix)?;
-    let bytes = STANDARD.decode(encoded).map_err(|_| KeyError::Base64)?;
+    let bytes = signing::decode(written)?;
     if !(24..=64).contains(&bytes.len()) {
         return Err(KeyError::Length(bytes.len()));
     }
@@ -207,15 +188,7 @@ fn signed(keys: &SigningKeys, id: &str, timestamp: &str, body: &[u8], listed: &s
     let macs: Vec<HmacSha256> = keys
         .0
         .iter()
-        .map(|key| {
-            let mut mac = HmacSha256::new_from_slice(key).expect("HMAC takes a key of any length");
-            mac.update(id.as_bytes());
-            mac.update(b".");
-            mac.update(timestamp.as_bytes());
-            mac.update(b".");
-            mac.update(body);
-            mac
-        })
+        .map(|key| signing::mac(key, id, timestamp, body))
         .collect();
     listed
         .split(' ')
