@@ -1,0 +1,52 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT e.payment_id, e.recorded_at, d.request_id AS \"request_id?\"\n             FROM payment_events e\n             LEFT JOIN payment_request_decisions d\n                    ON d.payment_id = e.payment_id AND d.position = e.position\n            WHERE e.id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "payment_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "payment_events",
+            "name": "payment_id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "recorded_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "payment_events",
+            "name": "recorded_at"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "request_id?",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "payment_request_decisions",
+            "name": "request_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "c5920b1a5f2058b15754a543705d2c86b047eff7e5c5dc985d4994dbf2dd8030"
+}

@@ -952,6 +952,7 @@ dependencies = [
  "hmac",
  "http-body-util",
  "hyper-util",
+ "mock-merchant",
  "mock-psp",
  "proptest",
  "serde",
