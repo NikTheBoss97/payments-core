@@ -2,7 +2,7 @@
 
 # ADR-0051: Signing deliveries with derived keys
 
-- Status: accepted
+- Status: accepted; partly superseded by ADR-0058
 - Date: 2026-11-15
 
 ## Context
@@ -84,6 +84,9 @@ analysis.
 - 2026-11-16: `webhook-id` is the event's ID as the API writes IDs: 36 characters of
   lowercase hexadecimal and hyphens. Our own check of a notification's ID, 1 to 255 of
   `[0-9A-Za-z_-]` (ADR-0030), and the fake merchant's (ADR-0056) accept it.
+- 2026-11-16: ADR-0058 supersedes "**Dependency:** `hkdf`, which `sqlx-postgres` builds
+  already." The secret is HKDF-Expand's one block of 32 bytes, computed with `hmac`, so no
+  buffer is filled for CodeQL to read as a hard-coded key.
 
 ## References
 
