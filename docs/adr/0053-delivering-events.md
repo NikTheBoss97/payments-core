@@ -125,6 +125,13 @@ How the tokens are shared:
   leaving tokens for another endpoint's retries; the semaphore of 4; a crash between a
   `2xx` and its record, which repeats the delivery.
 
+## Amendments
+
+- 2026-11-16: "enabled when its statement runs" means enabled when the catch-up reads the
+  merchant's endpoints, once, under the payment's lock, before its first new fact. The
+  deliveries' IDs are made in Rust (ADR-0005), so reading the endpoints and writing the
+  deliveries are two statements (ADR-0057).
+
 ## References
 
 - [Standard Webhooks specification](https://github.com/standard-webhooks/standard-webhooks/blob/main/spec/standard-webhooks.md) (v1.0.0): delivery success and failure, request timeouts, deliverability and reliability.

@@ -87,6 +87,12 @@ Its type:
 - Tests: one event per applied fact, and none for a creation or a cancellation; `LG008`
   rolling back a fact written alone; the same body at every attempt.
 
+## Amendments
+
+- 2026-11-16: "inside the commands that take `PspWord`" means in the catch-up, beside the
+  fact that the event announces. A refusal and a settlement recorded without a step make
+  no step, so no such command writes their facts (ADR-0057).
+
 ## References
 
 - Martin Fowler, [What do you mean by "Event-Driven"?](https://martinfowler.com/articles/201701-event-driven.html) (2017).
