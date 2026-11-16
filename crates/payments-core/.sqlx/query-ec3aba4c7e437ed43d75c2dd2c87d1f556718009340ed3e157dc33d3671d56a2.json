@@ -1,0 +1,21 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "WITH fact AS ( INSERT INTO payment_facts (payment_id, position, prev_position, psp, psp_fact_id, kind, amount) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING payment_id, position) INSERT INTO payment_events (id, merchant_id, payment_id, position) SELECT $8::uuid, p.merchant_id, fact.payment_id, fact.position FROM fact JOIN payments p ON p.id = fact.payment_id",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Int4",
+        "Int4",
+        "Text",
+        "Text",
+        "Text",
+        "Int8",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "ec3aba4c7e437ed43d75c2dd2c87d1f556718009340ed3e157dc33d3671d56a2"
+}

@@ -81,18 +81,28 @@ impl Fact {
         }
     }
 
+    /// Inserts the fact with the event that announces it, in one statement, since a
+    /// fact commits only with its event, even alone on a connection without a
+    /// transaction (ADR-0049, ADR-0057). A fact that breaks a rule is still refused
+    /// under its own constraint, which the tests below assert.
     async fn insert(&self, conn: &mut PgConnection) -> sqlx::Result<()> {
         sqlx::query!(
-            "INSERT INTO payment_facts \
-                 (payment_id, position, prev_position, psp, psp_fact_id, kind, amount) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7)",
+            "WITH fact AS ( \
+                 INSERT INTO payment_facts \
+                     (payment_id, position, prev_position, psp, psp_fact_id, kind, amount) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7) \
+                 RETURNING payment_id, position) \
+             INSERT INTO payment_events (id, merchant_id, payment_id, position) \
+             SELECT $8::uuid, p.merchant_id, fact.payment_id, fact.position \
+               FROM fact JOIN payments p ON p.id = fact.payment_id",
             self.payment_id,
             self.position,
             self.prev_position,
             self.psp,
             self.psp_fact_id,
             self.kind,
-            self.amount
+            self.amount,
+            Uuid::now_v7()
         )
         .execute(conn)
         .await?;
