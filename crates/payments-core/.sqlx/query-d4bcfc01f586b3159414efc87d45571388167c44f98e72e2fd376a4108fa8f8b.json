@@ -1,0 +1,38 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT pg_current_xact_id()::text AS \"current!\",\n                  (SELECT xact_id::text FROM payment_events WHERE id = $1) AS \"event!\",\n                  (SELECT xact_id::text FROM webhook_deliveries WHERE id = $2) AS \"delivery!\"",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "current!",
+        "type_info": "Text",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 1,
+        "name": "event!",
+        "type_info": "Text",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 2,
+        "name": "delivery!",
+        "type_info": "Text",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "d4bcfc01f586b3159414efc87d45571388167c44f98e72e2fd376a4108fa8f8b"
+}

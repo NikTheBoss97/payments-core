@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO payment_events (id, merchant_id, payment_id, position, xact_id) VALUES ($1, $2, $3, 1, pg_current_xact_id())",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "1d24c8a0c0f41600a167906e138853c90d3ba6ce4d4279331339d4c981c68c7a"
+}

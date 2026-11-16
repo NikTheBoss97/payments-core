@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO webhook_deliveries (id, event_id, endpoint_id, merchant_id, xact_id) VALUES ($1, $2, $3, $4, pg_current_xact_id())",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "5c463ce71b2f4e059ea2e51fc4dac6a5488cb95ee570620b413099422ba7cfc6"
+}

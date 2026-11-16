@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE payment_events SET position = position",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "40cfcf6ed9d38ca56fb911679784d5550227f8be3e77d60ec66fd1dd5ef0fa93"
+}
