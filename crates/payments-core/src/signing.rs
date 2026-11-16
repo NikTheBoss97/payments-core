@@ -14,8 +14,9 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use hmac::{Hmac, KeyInit, Mac};
 use sha2::Sha256;
+use sqlx::types::chrono::{DateTime, Utc};
 
-use crate::ids::EndpointId;
+use crate::ids::{EndpointId, EventId};
 
 /// The MAC of `v1`.
 pub(crate) type HmacSha256 = Hmac<Sha256>;
@@ -116,6 +117,39 @@ impl fmt::Debug for EndpointSecret {
     }
 }
 
+/// The three headers of one attempt to deliver an event (ADR-0051).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Signed {
+    /// `webhook-id`: the event's ID as the API writes IDs, the same at every attempt and at
+    /// every endpoint, by which a merchant drops copies.
+    pub id: String,
+    /// `webhook-timestamp`: the attempt's time, in whole seconds.
+    pub timestamp: String,
+    /// `webhook-signature`: `v1,` and the base64 of the MAC.
+    pub signature: String,
+}
+
+/// Signs one attempt to deliver an event's body, its bytes as sent, to the endpoint whose
+/// secret this is. `at` is the attempt's own time, which a receiver checks against its
+/// clock, so a retry is signed afresh (ADR-0051, ADR-0056).
+#[must_use]
+pub fn sign(secret: &EndpointSecret, event: EventId, at: DateTime<Utc>, body: &[u8]) -> Signed {
+    let id = event.to_string();
+    let timestamp = at.timestamp().to_string();
+    let signature = signature(&secret.0, &id, &timestamp, body);
+    Signed {
+        id,
+        timestamp,
+        signature,
+    }
+}
+
+/// The `v1` entry of `webhook-signature`: `v1,` and the base64 of the MAC.
+fn signature(key: &[u8], id: &str, timestamp: &str, body: &[u8]) -> String {
+    let tag = mac(key, id, timestamp, body).finalize().into_bytes();
+    format!("v1,{}", STANDARD.encode(tag))
+}
+
 /// HKDF-Expand with SHA-256 for 32 bytes out (RFC 5869, section 2.3), with `info` given in
 /// parts: the first block alone, `T(1) = HMAC-Hash(PRK, T(0) | info | 0x01)` with `T(0)`
 /// empty. It is computed with `hmac` rather than `hkdf`, whose output fills a zeroed buffer
@@ -131,7 +165,116 @@ fn expand(prk: &[u8; 32], info: &[&[u8]]) -> [u8; 32] {
 
 #[cfg(test)]
 mod tests {
+    use axum::http::{HeaderMap, HeaderValue};
+
     use super::*;
+    use crate::notifications::{Notification, Refusal, SigningKeys, verify};
+
+    /// The specification's test vector: `test_sign` in its Rust reference library.
+    const VECTOR_KEY: &str = "whsec_C2FVsBQIhrscChlQIMV+b5sSYspob7oD";
+    const VECTOR_ID: &str = "msg_27UH4WbU6Z5A5EzD8u03UvzRbpk";
+    const VECTOR_TIMESTAMP: &str = "1649367553";
+    const VECTOR_BODY: &[u8] = br#"{"email":"test@example.com","username":"test_user"}"#;
+    const VECTOR_SIGNATURE: &str = "v1,tZ1I4/hDygAJgO5TYxiSd6Sd0kDW6hPenDe+bTa3Kkw=";
+
+    /// An event's body, which names its payment, as the PSP's notifications do.
+    const PAYMENT: &str = "0196a5b4-c3d2-7e8f-9a0b-1c2d3e4f5a6b";
+    const BODY: &[u8] = br#"{"type":"payment.updated","timestamp":"2026-01-01T00:00:00.123456Z","data":{"payment_id":"0196a5b4-c3d2-7e8f-9a0b-1c2d3e4f5a6b"}}"#;
+
+    /// 2026-01-01T00:00:00.654321Z: an attempt's time, with a fraction of a second.
+    fn attempt() -> DateTime<Utc> {
+        DateTime::from_timestamp_micros(1_767_225_600_654_321).expect("a time in range")
+    }
+
+    /// The headers of a signed attempt, as a receiver gets them.
+    fn headers(signed: &Signed) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        for (name, value) in [
+            ("webhook-id", &signed.id),
+            ("webhook-timestamp", &signed.timestamp),
+            ("webhook-signature", &signed.signature),
+        ] {
+            headers.insert(name, HeaderValue::from_str(value).expect("a header value"));
+        }
+        headers
+    }
+
+    /// Whether our own check of the PSP's notifications reads this attempt as signed under
+    /// `secret` at `now`.
+    fn verified(
+        signed: &Signed,
+        secret: &EndpointSecret,
+        now: DateTime<Utc>,
+    ) -> Result<Notification, Refusal> {
+        let keys = SigningKeys::parse(&secret.written()).expect("a secret of 32 bytes");
+        verify(&headers(signed), BODY, &keys, now)
+    }
+
+    #[test]
+    fn the_specifications_test_vector_is_signed() {
+        let key = decode(VECTOR_KEY).expect("the vector's key");
+        assert!(
+            signature(&key, VECTOR_ID, VECTOR_TIMESTAMP, VECTOR_BODY) == VECTOR_SIGNATURE,
+            "the specification's test vector"
+        );
+    }
+
+    #[test]
+    fn an_attempt_carries_the_events_id_and_its_own_time() {
+        let secret = master().secret_of(EndpointId::now_v7());
+        let event = EventId::now_v7();
+        let signed = sign(&secret, event, attempt(), BODY);
+        // The event's ID as the API writes IDs, and the attempt's whole seconds (ADR-0051).
+        assert_eq!(signed.id, event.to_string());
+        assert_eq!(signed.timestamp, "1767225600");
+        let read = verified(&signed, &secret, attempt())
+            .map(|notification| (notification.event_id, notification.payment.to_string()));
+        assert_eq!(read, Ok((event.to_string(), PAYMENT.to_owned())));
+    }
+
+    #[test]
+    fn a_retry_is_signed_afresh_under_the_same_id() {
+        let secret = master().secret_of(EndpointId::now_v7());
+        let event = EventId::now_v7();
+        // Half an hour later.
+        let later =
+            DateTime::from_timestamp_micros(1_767_227_400_654_321).expect("a time in range");
+        let first = sign(&secret, event, attempt(), BODY);
+        let retry = sign(&secret, event, later, BODY);
+        assert_eq!(retry.id, first.id);
+        assert_eq!(retry.timestamp, "1767227400");
+        assert!(retry.signature != first.signature, "a new signature");
+        // Each passes a receiver's window at its own time, which the first would not.
+        assert!(
+            verified(&retry, &secret, later).is_ok(),
+            "the retry, when it is sent"
+        );
+        assert!(
+            verified(&first, &secret, later) == Err(Refusal::Window),
+            "the first attempt, half an hour later"
+        );
+    }
+
+    #[test]
+    fn each_endpoint_signs_under_its_own_secret() {
+        let master = master();
+        let (ours, theirs) = (
+            master.secret_of(EndpointId::now_v7()),
+            master.secret_of(EndpointId::now_v7()),
+        );
+        let event = EventId::now_v7();
+        let signed = sign(&ours, event, attempt(), BODY);
+        let elsewhere = sign(&theirs, event, attempt(), BODY);
+        assert!(elsewhere.signature != signed.signature, "another signature");
+        assert!(
+            verified(&signed, &ours, attempt()).is_ok(),
+            "under its own secret"
+        );
+        assert!(
+            verified(&signed, &theirs, attempt()) == Err(Refusal::Signature),
+            "under another endpoint's secret"
+        );
+    }
 
     /// `length` bytes from the operating system, and how a key of them is written. Tests make
     /// their keys at runtime: the only fixed ones are published test vectors.
