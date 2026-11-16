@@ -62,6 +62,10 @@ uuid = { version = "1.28", features = ["serde", "v7"] }
 # the default features would add the futures-macro crate. sqlx builds this
 # crate already.
 futures-util = { version = "0.3.34", default-features = false, features = ["alloc"] }
+# The fake merchant, which checks a delivery's signature with code of its own (ADR-0054,
+# ADR-0056). Only here, as the fake PSP is, so the two share the wire format and no code.
+# The version keeps cargo-deny from reading the path as a wildcard (ADR-0027).
+mock-merchant = { path = "../mock-merchant", version = "0.1.0" }
 # The fake PSP, which each test starts and scripts (ADR-0029). Only here, so the
 # server reaches it only over HTTP, and the two share the wire format and no code. The
 # version keeps cargo-deny from reading the path as a wildcard (ADR-0027).
