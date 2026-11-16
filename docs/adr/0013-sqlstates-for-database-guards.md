@@ -93,6 +93,9 @@ constraints use one code per kind of constraint, such as `23514` for every
   `payment_transitions_fact_check`: a payment step of kind `authorize`,
   `decline`, `capture`, `void`, `expire`, `settle` or `refund` that no fact
   of the PSP's is tied to.
+- 2026-11-16: the registry gains `LG008` (ADR-0049), raised at `COMMIT` by
+  `payment_facts_event_check`: a fact of the PSP's that no event announces
+  (ADR-0057).
 
 ## References
 
