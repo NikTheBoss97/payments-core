@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE webhook_endpoint_disablements SET reason = reason",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "39d7d2234b3ccf174504419fb0b151343fcf0f0044e29e53ebc59112b9fe7ba3"
+}

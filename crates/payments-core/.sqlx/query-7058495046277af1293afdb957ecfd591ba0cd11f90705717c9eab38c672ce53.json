@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM webhook_endpoint_disablements",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "7058495046277af1293afdb957ecfd591ba0cd11f90705717c9eab38c672ce53"
+}

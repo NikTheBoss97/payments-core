@@ -177,6 +177,13 @@ async fn the_runtime_role_has_exactly_the_expected_privileges(pool: PgPool) -> s
             "psp_notifications.event_id INSERT",
             "psp_notifications.payment_id INSERT",
             "psp_notifications.psp INSERT",
+            "webhook_endpoint_disablements SELECT",
+            "webhook_endpoint_disablements.endpoint_id INSERT",
+            "webhook_endpoint_disablements.reason INSERT",
+            "webhook_endpoints SELECT",
+            "webhook_endpoints.id INSERT",
+            "webhook_endpoints.merchant_id INSERT",
+            "webhook_endpoints.url INSERT",
         ]
     );
     Ok(())
@@ -596,6 +603,26 @@ async fn every_guard_trigger_fires_always(pool: PgPool) -> sqlx::Result<()> {
             "psp_notifications_no_truncate",
             "reject_change",
         ),
+        (
+            "webhook_endpoint_disablements",
+            "webhook_endpoint_disablements_append_only",
+            "reject_change",
+        ),
+        (
+            "webhook_endpoint_disablements",
+            "webhook_endpoint_disablements_no_truncate",
+            "reject_change",
+        ),
+        (
+            "webhook_endpoints",
+            "webhook_endpoints_append_only",
+            "reject_change",
+        ),
+        (
+            "webhook_endpoints",
+            "webhook_endpoints_no_truncate",
+            "reject_change",
+        ),
     ]
     .into_iter()
     .map(|(table, trigger, function)| [table.into(), trigger.into(), "A".into(), function.into()])
@@ -814,6 +841,13 @@ async fn every_column_has_its_type_and_is_not_null(pool: PgPool) -> sqlx::Result
             "psp_notifications.payment_id uuid not null",
             "psp_notifications.psp text not null",
             "psp_notifications.recorded_at timestamp with time zone not null",
+            "webhook_endpoint_disablements.endpoint_id uuid not null",
+            "webhook_endpoint_disablements.reason text not null",
+            "webhook_endpoint_disablements.recorded_at timestamp with time zone not null",
+            "webhook_endpoints.id uuid not null",
+            "webhook_endpoints.merchant_id uuid not null",
+            "webhook_endpoints.recorded_at timestamp with time zone not null",
+            "webhook_endpoints.url text not null",
         ]
     );
     Ok(())
@@ -863,6 +897,8 @@ async fn every_default_keeps_its_expression(pool: PgPool) -> sqlx::Result<()> {
             format!("payment_transitions.recorded_at {stamped}"),
             format!("payments.recorded_at {stamped}"),
             format!("psp_notifications.recorded_at {stamped}"),
+            format!("webhook_endpoint_disablements.recorded_at {stamped}"),
+            format!("webhook_endpoints.recorded_at {stamped}"),
         ]
     );
     Ok(())
@@ -1015,6 +1051,14 @@ async fn every_constraint_keeps_its_name(pool: PgPool) -> sqlx::Result<()> {
             "psp_notifications_event_id_check",
             "psp_notifications_pkey",
             "psp_notifications_psp_check",
+            "webhook_endpoint_disablements_endpoint_fkey",
+            "webhook_endpoint_disablements_pkey",
+            "webhook_endpoint_disablements_reason_check",
+            "webhook_endpoints_id_check",
+            "webhook_endpoints_id_merchant_key",
+            "webhook_endpoints_merchant_fkey",
+            "webhook_endpoints_pkey",
+            "webhook_endpoints_url_check",
         ]
     );
     Ok(())

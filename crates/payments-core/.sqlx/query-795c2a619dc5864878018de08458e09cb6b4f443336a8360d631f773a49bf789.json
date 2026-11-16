@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "TRUNCATE webhook_endpoint_disablements",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "795c2a619dc5864878018de08458e09cb6b4f443336a8360d631f773a49bf789"
+}
