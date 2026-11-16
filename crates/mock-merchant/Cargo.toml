@@ -9,21 +9,25 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
-# The headers of a delivery, as the routes will read them.
+# The fake's route (ADR-0056), served as the server's own are: HTTP/1.1 only, and none of
+# the default extractors.
 axum = { version = "0.8.9", default-features = false, features = ["http1", "tokio"] }
 # A delivery's signature (ADR-0051, ADR-0056): the secret's base64, the MAC and its hash.
 # The server and the mock PSP build these crates already.
 base64 = "0.23"
 hmac = "0.13"
 sha2 = { version = "0.11", default-features = false }
-# The window around the fake's clock, and the event's time in RFC 3339. sqlx builds this
-# crate already.
-chrono = { version = "0.4.45", default-features = false, features = ["serde", "std"] }
+# The fake's clock and the window around it, and the event's time in RFC 3339. sqlx
+# builds this crate already, with its clock.
+chrono = { version = "0.4.45", default-features = false, features = ["now", "serde", "std"] }
 # The event's body, read strictly (ADR-0049). sqlx builds these crates already.
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # Derives Display and Error for the error types. sqlx depends on it too.
 thiserror = "2.0.21"
+# Serves the route, waits out a delayed answer, and stops the server on its handle's
+# signal.
+tokio = { version = "1.54.1", features = ["net", "rt", "sync", "time"] }
 # The payment and the request that an event names. sqlx builds this crate already.
 uuid = { version = "1.28", features = ["serde"] }
 
@@ -31,6 +35,13 @@ uuid = { version = "1.28", features = ["serde"] }
 # Secrets from the operating system, made at runtime as every test's keys are (ADR-0030).
 # uuid builds this crate already.
 getrandom = "0.4"
+# Delivering to the fake as the relay will (ADR-0036): the legacy client, with the one
+# retry that it makes by itself switched off, and the body that it sends. The mock PSP
+# builds these crates already.
+http-body-util = "0.1"
+hyper-util = { version = "0.1.21", features = ["client-legacy", "http1", "tokio"] }
+# The tests' runtime. Cargo adds this feature to the one above.
+tokio = { version = "1.54.1", features = ["macros"] }
 
 [lints]
 workspace = true

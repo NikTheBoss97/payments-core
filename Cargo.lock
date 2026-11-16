@@ -850,10 +850,13 @@ dependencies = [
  "chrono",
  "getrandom",
  "hmac",
+ "http-body-util",
+ "hyper-util",
  "serde",
  "serde_json",
  "sha2",
  "thiserror",
+ "tokio",
  "uuid",
 ]
 
