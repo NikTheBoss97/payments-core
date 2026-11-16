@@ -380,6 +380,38 @@ impl fmt::Display for DeliveryId {
     }
 }
 
+/// The ID of a merchant's webhook endpoint (ADR-0050). `Copy`, because each delivery to the
+/// endpoint repeats it, and the endpoint's secret is derived from its 16 bytes (ADR-0051).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct EndpointId(Uuid);
+
+impl EndpointId {
+    /// A new ID from the system clock, through [`Uuid::now_v7`].
+    #[must_use]
+    pub fn now_v7() -> Self {
+        Self(Uuid::now_v7())
+    }
+
+    /// The inner UUID, to bind in SQL.
+    pub fn get(self) -> Uuid {
+        self.0
+    }
+}
+
+impl TryFrom<Uuid> for EndpointId {
+    type Error = InvalidId;
+
+    fn try_from(id: Uuid) -> Result<Self, Self::Error> {
+        check(id).map(Self)
+    }
+}
+
+impl fmt::Display for EndpointId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(&self.0, f)
+    }
+}
+
 /// The database's rule, `uuid_extract_version(id) IS NOT DISTINCT FROM 7`:
 /// `uuid_extract_version` returns NULL for any variant other than RFC 9562's.
 /// `get_version_num` alone reads the version nibble whatever the variant.
@@ -412,6 +444,7 @@ mod tests {
         assert_eq!(RequestId::try_from(V7).map(|id| id.get()), Ok(V7));
         assert_eq!(EventId::try_from(V7).map(EventId::get), Ok(V7));
         assert_eq!(DeliveryId::try_from(V7).map(DeliveryId::get), Ok(V7));
+        assert_eq!(EndpointId::try_from(V7).map(EndpointId::get), Ok(V7));
     }
 
     #[test]
@@ -439,6 +472,7 @@ mod tests {
             assert_eq!(RequestId::try_from(uuid), Err(InvalidId(uuid)));
             assert_eq!(EventId::try_from(uuid), Err(InvalidId(uuid)));
             assert_eq!(DeliveryId::try_from(uuid), Err(InvalidId(uuid)));
+            assert_eq!(EndpointId::try_from(uuid), Err(InvalidId(uuid)));
         }
     }
 
@@ -453,6 +487,7 @@ mod tests {
         let requests: Vec<Uuid> = (0..1000).map(|_| RequestId::now_v7().get()).collect();
         let events: Vec<Uuid> = (0..1000).map(|_| EventId::now_v7().get()).collect();
         let deliveries: Vec<Uuid> = (0..1000).map(|_| DeliveryId::now_v7().get()).collect();
+        let endpoints: Vec<Uuid> = (0..1000).map(|_| EndpointId::now_v7().get()).collect();
         let all = [
             accounts,
             transactions,
@@ -463,6 +498,7 @@ mod tests {
             requests,
             events,
             deliveries,
+            endpoints,
         ]
         .concat();
         for id in &all {
@@ -475,11 +511,12 @@ mod tests {
             assert_eq!(RequestId::try_from(*id).map(|r| r.get()), Ok(*id));
             assert_eq!(EventId::try_from(*id).map(EventId::get), Ok(*id));
             assert_eq!(DeliveryId::try_from(*id).map(DeliveryId::get), Ok(*id));
+            assert_eq!(EndpointId::try_from(*id).map(EndpointId::get), Ok(*id));
         }
         // One process-wide generator serves every type (ADR-0005), so no ID
         // repeats across them either.
         let distinct: HashSet<&Uuid> = all.iter().collect();
-        assert_eq!(distinct.len(), 9000);
+        assert_eq!(distinct.len(), 10000);
     }
 
     #[test]
@@ -494,6 +531,7 @@ mod tests {
         let request = RequestId::try_from(V7).expect("valid ID");
         let event = EventId::try_from(V7).expect("valid ID");
         let delivery = DeliveryId::try_from(V7).expect("valid ID");
+        let endpoint = EndpointId::try_from(V7).expect("valid ID");
         assert_eq!(account.to_string(), text);
         assert_eq!(transaction.to_string(), text);
         assert_eq!(payment.to_string(), text);
@@ -503,6 +541,7 @@ mod tests {
         assert_eq!(request.to_string(), text);
         assert_eq!(event.to_string(), text);
         assert_eq!(delivery.to_string(), text);
+        assert_eq!(endpoint.to_string(), text);
         assert_eq!(
             InvalidId(Uuid::nil()).to_string(),
             "00000000-0000-0000-0000-000000000000 is not a UUIDv7 of the RFC 9562 variant"
@@ -537,6 +576,7 @@ mod tests {
             prop_assert_eq!(RequestId::try_from(uuid).is_ok(), valid);
             prop_assert_eq!(EventId::try_from(uuid).is_ok(), valid);
             prop_assert_eq!(DeliveryId::try_from(uuid).is_ok(), valid);
+            prop_assert_eq!(EndpointId::try_from(uuid).is_ok(), valid);
         }
     }
 }
