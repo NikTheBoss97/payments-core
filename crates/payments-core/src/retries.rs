@@ -47,6 +47,24 @@ fn millis(duration: Duration) -> u64 {
     u64::try_from(duration.as_millis()).expect("the base and the cap are an hour at most")
 }
 
+/// `delay` after `now`.
+pub(crate) fn after(now: OffsetDateTime, delay: Duration) -> OffsetDateTime {
+    let micros = i64::try_from(delay.as_micros())
+        .expect("a delay of at most u32 seconds is an i64 of microseconds");
+    unix_micros(now)
+        .checked_add(micros)
+        .and_then(from_unix_micros)
+        .expect("a time at most u32 seconds after now is in range")
+}
+
+/// How long since `first`, or nothing for a time after `now`.
+pub(crate) fn waited(first: OffsetDateTime, now: OffsetDateTime) -> Duration {
+    unix_micros(now)
+        .checked_sub(unix_micros(first))
+        .and_then(|micros| u64::try_from(micros).ok())
+        .map_or(Duration::ZERO, Duration::from_micros)
+}
+
 /// The one budget for the process's retries (ADR-0032, ADR-0042): a token bucket that
 /// holds up to `capacity` tokens and gains one every `every`, counted from the times
 /// that the steps give it. A retry spends a token, and one that finds none waits for a

@@ -29,7 +29,6 @@ use crate::money::Currency;
 use crate::psp::{Outgoing, PspClient, ReadError, SendError};
 use crate::requests::RequestKind;
 use crate::retries::{self, RetryBudget};
-use crate::times::{from_unix_micros, unix_micros};
 
 /// How long a request may wait for its acknowledgement, from its first attempt in this
 /// process, before a step's report flags it for an operator (ADR-0032, ADR-0042).
@@ -209,7 +208,7 @@ impl Sender {
             .filter(|(_, pending)| {
                 pending
                     .first_tried
-                    .is_some_and(|first| waited(first, now) >= FLAG_AFTER)
+                    .is_some_and(|first| retries::waited(first, now) >= FLAG_AFTER)
             })
             .map(|(&request, _)| request)
             .collect();
@@ -254,7 +253,7 @@ impl Sender {
             let (retry, due) = match known {
                 Some(known) => (known.retry, known.due),
                 None if fresh => (0, now),
-                None => (1, after(now, retries::delay(1, None, random()))),
+                None => (1, retries::after(now, retries::delay(1, None, random()))),
             };
             pending.insert(
                 found.request,
@@ -400,7 +399,7 @@ impl Sender {
     ) {
         if let Some(pending) = self.pending.get_mut(&request) {
             pending.retry = pending.retry.saturating_add(1);
-            pending.due = after(now, retries::delay(pending.retry, retry_after, random()));
+            pending.due = retries::after(now, retries::delay(pending.retry, retry_after, random()));
         }
     }
 }
@@ -495,24 +494,6 @@ fn asked_later(failed: &CatchUpError) -> Option<u32> {
         } => *retry_after,
         _ => None,
     }
-}
-
-/// `delay` after `now`.
-fn after(now: OffsetDateTime, delay: Duration) -> OffsetDateTime {
-    let micros = i64::try_from(delay.as_micros())
-        .expect("a delay of at most u32 seconds is an i64 of microseconds");
-    unix_micros(now)
-        .checked_add(micros)
-        .and_then(from_unix_micros)
-        .expect("a time at most u32 seconds after now is in range")
-}
-
-/// How long since `first`, or nothing for a time after `now`.
-fn waited(first: OffsetDateTime, now: OffsetDateTime) -> Duration {
-    unix_micros(now)
-        .checked_sub(unix_micros(first))
-        .and_then(|micros| u64::try_from(micros).ok())
-        .map_or(Duration::ZERO, Duration::from_micros)
 }
 
 /// A random number from the operating system, for the jitter in production (ADR-0042).
