@@ -24,7 +24,9 @@ use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::rt::TokioExecutor;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
-use sqlx::types::chrono::{DateTime, Utc};
+use sqlx::types::chrono::DateTime;
+use time::OffsetDateTime;
+use time::format_description::well_known::Rfc3339;
 use uuid::Uuid;
 
 use crate::accounts::Psp;
@@ -766,11 +768,13 @@ fn amount_of(minor: i64) -> Result<PositiveAmount, Unplaced> {
 }
 
 /// An RFC 3339 time, as PostgreSQL stores it: anything finer than a microsecond is
-/// dropped (ADR-0022).
+/// dropped (ADR-0022). time reads a leap second only in the last second of a month in
+/// UTC, as that month's last nanosecond, and refuses one anywhere else (ADR-0059).
 fn time_of(text: &str) -> Result<BusinessTime, Unplaced> {
-    DateTime::parse_from_rfc3339(text)
+    OffsetDateTime::parse(text, &Rfc3339)
         .ok()
-        .and_then(|time| BusinessTime::new(time.with_timezone(&Utc)).ok())
+        .and_then(|time| DateTime::from_timestamp(time.unix_timestamp(), time.nanosecond()))
+        .and_then(|time| BusinessTime::new(time).ok())
         .ok_or_else(|| Unplaced::Time(text.to_owned()))
 }
 
@@ -995,6 +999,41 @@ mod tests {
             let fields = json!({"kind": "authorized", "request_id": request, "amount": 1,
                                 "expires_at": text});
             assert_eq!(detail_of(fields), Err(Unplaced::Time(text.to_owned())));
+        }
+    }
+
+    #[test]
+    fn a_leap_second_reads_as_its_months_last_microsecond() {
+        // As time reads one (ADR-0059): in the last second of a month in UTC, whatever
+        // the offset, and with the leap second's own fraction lost.
+        let fields = |text: &str| {
+            json!({"kind": "authorized", "request_id": REQUEST, "amount": 1,
+                   "expires_at": text})
+        };
+        for (text, expected) in [
+            ("2016-12-31T23:59:60Z", "2016-12-31T23:59:59.999999Z"),
+            ("2016-12-31T23:59:60.5Z", "2016-12-31T23:59:59.999999Z"),
+            ("2016-12-31T18:59:60.5-05:00", "2016-12-31T23:59:59.999999Z"),
+            ("2015-06-30T23:59:60Z", "2015-06-30T23:59:59.999999Z"),
+            ("9999-12-31T23:59:60Z", "9999-12-31T23:59:59.999999Z"),
+        ] {
+            let written = match detail_of(fields(text)) {
+                Ok(FactDetail::Authorized { expires_at, .. }) => Ok(expires_at.written()),
+                other => Err(other),
+            };
+            assert_eq!(written, Ok(expected.to_owned()), "{text}");
+        }
+        // Anywhere else, a leap second is unreadable.
+        for text in [
+            "2016-12-30T23:59:60Z",
+            "2016-12-31T23:58:60Z",
+            "2016-12-31T23:59:60+01:00",
+        ] {
+            assert_eq!(
+                detail_of(fields(text)),
+                Err(Unplaced::Time(text.to_owned())),
+                "{text}"
+            );
         }
     }
 
