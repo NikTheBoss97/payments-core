@@ -20,6 +20,7 @@ pub mod operator;
 pub mod payments;
 pub mod posting;
 pub mod psp;
+pub mod relay;
 pub mod requests;
 pub mod retries;
 pub mod sender;
