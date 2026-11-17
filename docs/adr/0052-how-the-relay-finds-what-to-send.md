@@ -81,6 +81,17 @@ recorded (ADR-0042).
   full search; the mark's rule as a pure function under random inputs; a delivery written
   in a later transaction than its event's, as `payments_app`, refused by its foreign key.
 
+## Amendments
+
+- 2026-11-17: "One that the relay does not know ... is due after a jittered delay" reads
+  as a retry: due after ADR-0053's delay for a first retry, and costing a token, as
+  ADR-0042 treats a request that was not handed over. After a restart every unfinished
+  delivery is one, so a backlog drains at the bucket's pace and never reaches a dead
+  endpoint outside it. A delivery handed over while a search runs is kept when that search
+  misses it, and one that a search no longer returns is finished and forgotten. The mark
+  never falls: it becomes the higher of itself and the lower of that `xmin` and the
+  smallest transaction ID among the unfinished deliveries found.
+
 ## References
 
 - PostgreSQL 18, [System Information Functions and Operators](https://www.postgresql.org/docs/18/functions-info.html): transaction ID and snapshot information functions.
