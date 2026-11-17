@@ -11,7 +11,7 @@ publication: its title, authors, year and link.
 
 | Topic | What it covers | Entries |
 |---|---|---|
-| [Ledgers and accounting](ledgers-and-accounting.md) | Double-entry bookkeeping, ledgers as immutable logs, and recording time. | 20 |
+| [Ledgers and accounting](ledgers-and-accounting.md) | Double-entry bookkeeping, ledgers as immutable logs, and recording time. | 22 |
 | [Money and identifiers](money-and-identifiers.md) | Representing amounts and currencies exactly, splitting them without losing a unit, and generating identifiers. | 10 |
 | [Schema design and database errors](schema-and-errors.md) | Constraints, privileges and operator resolution in PostgreSQL, NULLs and keys, and error codes that programs can act on. | 15 |
 | [Transactions and concurrency](transactions-and-concurrency.md) | Isolation levels, locking, coordination and what a database transaction guarantees. | 14 |
@@ -21,4 +21,4 @@ publication: its title, authors, year and link.
 | [Testing for correctness](testing.md) | Property-based testing, mutation testing, failure injection and testing database guarantees. | 16 |
 | [Modelling the domain in Rust](rust.md) | Types that carry their invariants, and making illegal states unrepresentable. | 7 |
 | [Benchmarking](benchmarking.md) | Measuring latency and throughput without fooling yourself. | 8 |
-| [Engineering practice](engineering-practice.md) | Continuous integration, the software supply chain, code scanning and recording decisions. | 18 |
+| [Engineering practice](engineering-practice.md) | Continuous integration, the software supply chain, code scanning and recording decisions. | 20 |
