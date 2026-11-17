@@ -2,7 +2,7 @@
 
 # ADR-0022: Business times
 
-- Status: accepted
+- Status: accepted; partly superseded by ADR-0059
 - Date: 2026-10-28
 
 ## Context
@@ -116,6 +116,12 @@ so a lock entry that is never built costs nothing.
   advisory against one of chrono's unbuilt helpers raises an alert and fails CI
   until someone decides. That is rare enough to leave the choice of chrono as it
   was, and such an advisory would be ignored with that reason.
+- 2026-11-17: ADR-0059 moves times from chrono to time. It supersedes **One
+  type** and **The feature** above, and in the 2026-11-02 amendment **How a
+  time is normalised**, **Its range** and the bounds in **What the database
+  holds**. With chrono gone, the 2026-11-04 amendment no longer applies. The
+  rest stands: times supplied by the caller and compared on a retry, whole
+  microseconds, and columns that refuse what the type cannot hold.
 
 ## References
 

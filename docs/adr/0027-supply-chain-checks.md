@@ -236,6 +236,10 @@ Catching SQL built at run time, which CodeQL misses:
   line holds an error's chain and nothing of the request, and tests on the real binary assert
   that its log holds no credential. CodeQL still sees an ID from a path, and SQL or a secret
   written in the forms it models.
+- 2026-11-17: **Bans** names `time` as the one crate that a ban could target. Since
+  ADR-0059 the crate in use is time, so the candidate is `chrono`, and it needs no ban
+  either: RUSTSEC-2026-0543 fails this check wherever chrono returns, and enabling
+  sqlx's `chrono` next to `time` fails the build.
 
 ## References
 

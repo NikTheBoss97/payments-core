@@ -86,6 +86,7 @@ never their real recording time.
   step carry no `recorded_at`, because the step's is the same instant;
   `merchants`, `payments` and the history carry one, as this ADR's "later
   tables that record facts".
+- 2026-11-17: The crate is now time, not `chrono` (ADR-0059).
 
 ## References
 
