@@ -27,7 +27,7 @@ use payments_core::requests::{Ask, RecordRequest, record_request};
 use payments_core::sender::Sender;
 use payments_core::tenancy::Tenant;
 use sqlx::PgPool;
-use sqlx::types::chrono::Utc;
+use sqlx::types::time::OffsetDateTime;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio::time::sleep;
@@ -91,7 +91,7 @@ impl World {
 
     /// The task, and the routes' end of its handovers.
     fn handing_over(&self, cadence: Cadence) -> (JoinHandle<Infallible>, mpsc::Sender<RequestId>) {
-        let sender = Sender::new(client_of(&self.fake), Utc::now());
+        let sender = Sender::new(client_of(&self.fake), OffsetDateTime::now_utc());
         let (handovers, handed_over) = mpsc::channel(HANDOVERS);
         let task = tokio::spawn(run(self.system.clone(), sender, cadence, handed_over));
         (task, handovers)

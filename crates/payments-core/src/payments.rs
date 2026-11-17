@@ -18,7 +18,7 @@
 
 #![forbid(clippy::arithmetic_side_effects, clippy::as_conversions)]
 
-use sqlx::types::chrono::{DateTime, Utc};
+use sqlx::types::time::OffsetDateTime;
 use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
@@ -1448,7 +1448,7 @@ async fn read_state<R>(
 /// kind that carries data has its record (LG004).
 const HAS_RECORD: &str = "LG004 keeps the record of a step that carries data";
 
-pub(crate) fn stored_time(time: DateTime<Utc>) -> BusinessTime {
+pub(crate) fn stored_time(time: OffsetDateTime) -> BusinessTime {
     BusinessTime::new(time).expect("a time read from the database can be stored")
 }
 

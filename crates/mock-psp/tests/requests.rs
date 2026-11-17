@@ -77,11 +77,11 @@ async fn the_daily_pruning_forgets_only_keys_a_day_old() {
     let psp = fake().await;
     let capture = request(Uuid::now_v7(), "capture", 100);
     send(&psp, &capture).await;
-    let taken_at = chrono::Utc::now();
-    psp.prune_keys(taken_at + chrono::TimeDelta::hours(23));
+    let taken_at = time::OffsetDateTime::now_utc();
+    psp.prune_keys(taken_at + time::Duration::hours(23));
     send(&psp, &capture).await;
     assert_eq!(psp.times_taken(id_of(&capture)), 1);
-    psp.prune_keys(taken_at + chrono::TimeDelta::days(1));
+    psp.prune_keys(taken_at + time::Duration::days(1));
     send(&psp, &capture).await;
     assert_eq!(psp.times_taken(id_of(&capture)), 2);
 }

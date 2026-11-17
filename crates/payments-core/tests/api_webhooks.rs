@@ -41,7 +41,7 @@ use payments_core::psp::PspClient;
 use payments_core::requests::{Ask, RecordRequest, record_request};
 use payments_core::tenancy::Tenant;
 use sqlx::PgPool;
-use sqlx::types::chrono::Utc;
+use sqlx::types::time::OffsetDateTime;
 use tokio::net::TcpListener;
 use uuid::Uuid;
 
@@ -193,7 +193,7 @@ fn body_naming(payment: Uuid) -> Vec<u8> {
 
 /// A notification, signed now with `key`, as a PSP sends it.
 fn signed(key: &SigningKey, id: &str, body: &[u8]) -> Request<Body> {
-    let now = Utc::now().timestamp();
+    let now = OffsetDateTime::now_utc().unix_timestamp();
     Request::builder()
         .method(Method::POST)
         .uri("/webhooks/mock")
@@ -254,7 +254,7 @@ async fn a_spoiled_notification_is_refused_with_400_and_recorded_nowhere(
     let payment = world.payment(1).await?;
     let event = world.notify(payment.get());
     // Times well outside the window: its ends are tested with a fixed clock.
-    let now = Utc::now().timestamp();
+    let now = OffsetDateTime::now_utc().unix_timestamp();
     for tamper in [
         Tamper::WrongKey,
         Tamper::Timestamp(now - 400),

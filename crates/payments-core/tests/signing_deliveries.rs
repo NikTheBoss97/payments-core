@@ -35,7 +35,7 @@ use payments_core::signing::{MasterKey, Signed, sign};
 use payments_core::tenancy::Tenant;
 use payments_core::times::BusinessTime;
 use sqlx::PgPool;
-use sqlx::types::chrono::{DateTime, Utc};
+use sqlx::types::time::OffsetDateTime;
 use uuid::Uuid;
 
 type TestResult = Result<(), Box<dyn Error>>;
@@ -128,7 +128,7 @@ impl World {
 async fn events_of(
     pool: &PgPool,
     payment: PaymentId,
-) -> Result<Vec<(EventId, DateTime<Utc>)>, Box<dyn Error>> {
+) -> Result<Vec<(EventId, OffsetDateTime)>, Box<dyn Error>> {
     let rows = sqlx::query!(
         "SELECT id, recorded_at FROM payment_events WHERE payment_id = $1 ORDER BY position",
         payment.get()
@@ -142,7 +142,7 @@ async fn events_of(
 
 /// The body that ADR-0049 describes, written out: its fields in that order, the event's
 /// `recorded_at` as the API writes times, and `request_id` only when there is one.
-fn expected(payment: PaymentId, request: Option<Uuid>, recorded_at: DateTime<Utc>) -> String {
+fn expected(payment: PaymentId, request: Option<Uuid>, recorded_at: OffsetDateTime) -> String {
     let timestamp = BusinessTime::new(recorded_at)
         .expect("a time that PostgreSQL stores")
         .written();
@@ -285,7 +285,12 @@ async fn a_merchant_takes_an_event_signed_under_its_endpoints_secret(pool: PgPoo
         .ok_or("the event exists")?;
 
     // Signed at the attempt's own time, which the merchant checks against its clock.
-    let signed = sign(&master.secret_of(endpoint), event, Utc::now(), &sent);
+    let signed = sign(
+        &master.secret_of(endpoint),
+        event,
+        OffsetDateTime::now_utc(),
+        &sent,
+    );
     assert_eq!(
         post(merchant.url(), &signed, sent.clone()).await?,
         StatusCode::OK
@@ -305,7 +310,7 @@ async fn a_merchant_takes_an_event_signed_under_its_endpoints_secret(pool: PgPoo
     let elsewhere = sign(
         &master.secret_of(EndpointId::now_v7()),
         event,
-        Utc::now(),
+        OffsetDateTime::now_utc(),
         &sent,
     );
     assert_eq!(

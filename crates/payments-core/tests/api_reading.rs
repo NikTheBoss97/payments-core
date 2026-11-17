@@ -30,7 +30,8 @@ use payments_core::requests::{Ask, RecordRequest, record_request};
 use payments_core::tenancy::Tenant;
 use serde_json::Value;
 use sqlx::PgPool;
-use sqlx::types::chrono::{DateTime, Utc};
+use sqlx::types::time::OffsetDateTime;
+use time::format_description::well_known::Rfc3339;
 use uuid::Uuid;
 
 type TestResult = Result<(), Box<dyn Error>>;
@@ -94,10 +95,7 @@ async fn a_read_shows_the_authorization_once_the_psp_gives_one(pool: PgPool) -> 
         .as_str()
         .expect("a time is a string");
     assert!(written.ends_with('Z'), "{written}");
-    assert_eq!(
-        DateTime::parse_from_rfc3339(written)?.with_timezone(&Utc),
-        expires_at
-    );
+    assert_eq!(OffsetDateTime::parse(written, &Rfc3339)?, expires_at);
     assert_eq!(
         body["authorization"]
             .as_object()

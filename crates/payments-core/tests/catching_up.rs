@@ -35,9 +35,10 @@ use payments_core::psp::{PspClient, ReadError, Unreadable};
 use payments_core::requests::{Ask, RecordRequest, RequestError, record_request};
 use payments_core::retries::RetryBudget;
 use payments_core::tenancy::Tenant;
+use payments_core::times::{from_unix_micros, unix_micros};
 use serde_json::json;
 use sqlx::PgPool;
-use sqlx::types::chrono::{DateTime, Utc};
+use sqlx::types::time::OffsetDateTime;
 use uuid::Uuid;
 
 type TestResult = Result<(), Box<dyn Error>>;
@@ -50,8 +51,8 @@ fn amount(minor: i64) -> PositiveAmount {
 }
 
 /// 2026-01-01T00:00:00Z, for the facts that a test appends.
-fn at() -> DateTime<Utc> {
-    DateTime::from_timestamp_micros(1_767_225_600_000_000).expect("a time in range")
+fn at() -> OffsetDateTime {
+    OffsetDateTime::from_unix_timestamp_nanos(1_767_225_600_000_000_000).expect("a time in range")
 }
 
 fn step(kind: &str, minor: i64, to: &str) -> StepRow {
@@ -316,7 +317,7 @@ async fn an_authorization_a_capture_and_refunds_make_their_steps_records_and_pos
         ]
     );
     // The records carry the PSP's business times, never a clock of ours (ADR-0022).
-    let times: Vec<DateTime<Utc>> = theirs
+    let times: Vec<OffsetDateTime> = theirs
         .facts
         .iter()
         .map(|fact| match fact.detail {
@@ -979,7 +980,7 @@ async fn a_payment_that_does_not_exist_is_not_found(pool: PgPool) -> TestResult 
 }
 
 /// When the PSP said that the payment's authorization lapses, as its record holds it.
-async fn expires_at(pool: &PgPool, payment: PaymentId) -> sqlx::Result<DateTime<Utc>> {
+async fn expires_at(pool: &PgPool, payment: PaymentId) -> sqlx::Result<OffsetDateTime> {
     sqlx::query_scalar!(
         "SELECT expires_at FROM payment_authorizations WHERE payment_id = $1",
         payment.get()
@@ -1000,16 +1001,15 @@ fn outcomes(swept: Swept) -> Vec<(PaymentId, Result<CaughtUp, String>)> {
 async fn sweep_all(
     pool: &PgPool,
     psp: &PspClient,
-    now: DateTime<Utc>,
+    now: OffsetDateTime,
 ) -> Result<Swept, SweepError> {
     let mut plenty = RetryBudget::new(1_000, Duration::from_secs(1), now);
     sweep(pool, psp, now, &mut plenty, None).await
 }
 
 /// `seconds` after `time`.
-fn after(time: DateTime<Utc>, seconds: i64) -> DateTime<Utc> {
-    DateTime::from_timestamp_micros(time.timestamp_micros() + seconds * 1_000_000)
-        .expect("a time in range")
+fn after(time: OffsetDateTime, seconds: i64) -> OffsetDateTime {
+    from_unix_micros(unix_micros(time) + seconds * 1_000_000).expect("a time in range")
 }
 
 #[sqlx::test]
@@ -1093,7 +1093,7 @@ async fn an_authorization_waits_from_the_moment_it_lapses(pool: PgPool) -> TestR
     world.fake.expire(payment.get());
     let lapses = expires_at(&pool, payment).await?;
     let client = client_of(&world.fake);
-    let before = DateTime::from_timestamp_micros(lapses.timestamp_micros() - 1).expect("in range");
+    let before = from_unix_micros(unix_micros(lapses) - 1).expect("in range");
     assert!(sweep_all(&world.system, &client, before).await?.is_empty());
     assert_eq!(
         outcomes(sweep_all(&world.system, &client, lapses).await?),
@@ -1217,8 +1217,8 @@ async fn a_pass_spends_a_token_a_payment_and_resumes_after_its_last_one(
 }
 
 /// A time after every authorization of the tests has lapsed: 2100-01-01T00:00:00Z.
-fn later() -> DateTime<Utc> {
-    DateTime::from_timestamp_micros(4_102_444_800_000_000).expect("a time in range")
+fn later() -> OffsetDateTime {
+    OffsetDateTime::from_unix_timestamp_nanos(4_102_444_800_000_000_000).expect("a time in range")
 }
 
 /// SplitMix64, as in the model's tests: seeded, so that a failure repeats.

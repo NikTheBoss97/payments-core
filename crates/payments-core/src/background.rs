@@ -15,7 +15,7 @@ use std::convert::Infallible;
 use std::time::Duration;
 
 use sqlx::PgPool;
-use sqlx::types::chrono::Utc;
+use sqlx::types::time::OffsetDateTime;
 use tokio::sync::mpsc;
 use tokio::time::{self, MissedTickBehavior};
 use tracing::Level;
@@ -72,7 +72,7 @@ pub async fn run(
             _ = passes.tick() => Event::Pass,
             Some(request) = handovers.recv() => Event::Handover(request),
         };
-        let now = Utc::now();
+        let now = OffsetDateTime::now_utc();
         let lines = match event {
             Event::Handover(request) => {
                 // Every ID already queued goes into this one step, so that a burst of
@@ -277,7 +277,7 @@ mod tests {
     use axum::http::StatusCode;
     use sqlx::PgPool;
     use sqlx::postgres::PgPoolOptions;
-    use sqlx::types::chrono::{DateTime, Utc};
+    use sqlx::types::time::OffsetDateTime;
 
     use super::*;
     use crate::accounts::Psp;
@@ -334,8 +334,8 @@ mod tests {
         })
     }
 
-    fn now() -> DateTime<Utc> {
-        DateTime::from_timestamp(1_767_225_600, 0).expect("a time in range")
+    fn now() -> OffsetDateTime {
+        OffsetDateTime::from_unix_timestamp(1_767_225_600).expect("a time in range")
     }
 
     /// A pool that is closed, so that every query on it fails at once, and a sender of a

@@ -27,9 +27,10 @@ use payments_core::requests::{Ask, RecordRequest, record_request};
 use payments_core::retries::RetryBudget;
 use payments_core::sender::{Attempt, Report, Sender};
 use payments_core::tenancy::Tenant;
+use payments_core::times::from_unix_micros;
 use serde_json::json;
 use sqlx::PgPool;
-use sqlx::types::chrono::{DateTime, Utc};
+use sqlx::types::time::OffsetDateTime;
 use uuid::Uuid;
 
 type TestResult = Result<(), Box<dyn Error>>;
@@ -39,9 +40,8 @@ fn amount(minor: i64) -> PositiveAmount {
 }
 
 /// `seconds` after 2026-01-01T00:00:00Z.
-fn at(seconds: i64) -> DateTime<Utc> {
-    DateTime::from_timestamp_micros(1_767_225_600_000_000 + seconds * 1_000_000)
-        .expect("a time in range")
+fn at(seconds: i64) -> OffsetDateTime {
+    from_unix_micros(1_767_225_600_000_000 + seconds * 1_000_000).expect("a time in range")
 }
 
 /// SplitMix64, as in the model's tests: seeded jitter, so that a failure repeats.

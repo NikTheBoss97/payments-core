@@ -14,7 +14,7 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use hmac::{Hmac, KeyInit, Mac};
 use sha2::Sha256;
-use sqlx::types::chrono::{DateTime, Utc};
+use sqlx::types::time::OffsetDateTime;
 
 use crate::ids::{EndpointId, EventId};
 
@@ -133,9 +133,9 @@ pub struct Signed {
 /// secret this is. `at` is the attempt's own time, which a receiver checks against its
 /// clock, so a retry is signed afresh (ADR-0051, ADR-0056).
 #[must_use]
-pub fn sign(secret: &EndpointSecret, event: EventId, at: DateTime<Utc>, body: &[u8]) -> Signed {
+pub fn sign(secret: &EndpointSecret, event: EventId, at: OffsetDateTime, body: &[u8]) -> Signed {
     let id = event.to_string();
-    let timestamp = at.timestamp().to_string();
+    let timestamp = at.unix_timestamp().to_string();
     let signature = signature(&secret.0, &id, &timestamp, body);
     Signed {
         id,
@@ -182,8 +182,9 @@ mod tests {
     const BODY: &[u8] = br#"{"type":"payment.updated","timestamp":"2026-01-01T00:00:00.123456Z","data":{"payment_id":"0196a5b4-c3d2-7e8f-9a0b-1c2d3e4f5a6b"}}"#;
 
     /// 2026-01-01T00:00:00.654321Z: an attempt's time, with a fraction of a second.
-    fn attempt() -> DateTime<Utc> {
-        DateTime::from_timestamp_micros(1_767_225_600_654_321).expect("a time in range")
+    fn attempt() -> OffsetDateTime {
+        OffsetDateTime::from_unix_timestamp_nanos(1_767_225_600_654_321_000)
+            .expect("a time in range")
     }
 
     /// The headers of a signed attempt, as a receiver gets them.
@@ -204,7 +205,7 @@ mod tests {
     fn verified(
         signed: &Signed,
         secret: &EndpointSecret,
-        now: DateTime<Utc>,
+        now: OffsetDateTime,
     ) -> Result<Notification, Refusal> {
         let keys = SigningKeys::parse(&secret.written()).expect("a secret of 32 bytes");
         verify(&headers(signed), BODY, &keys, now)
@@ -237,8 +238,8 @@ mod tests {
         let secret = master().secret_of(EndpointId::now_v7());
         let event = EventId::now_v7();
         // Half an hour later.
-        let later =
-            DateTime::from_timestamp_micros(1_767_227_400_654_321).expect("a time in range");
+        let later = OffsetDateTime::from_unix_timestamp_nanos(1_767_227_400_654_321_000)
+            .expect("a time in range");
         let first = sign(&secret, event, attempt(), BODY);
         let retry = sign(&secret, event, later, BODY);
         assert_eq!(retry.id, first.id);

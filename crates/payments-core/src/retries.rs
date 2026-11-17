@@ -10,7 +10,9 @@
 
 use std::time::Duration;
 
-use sqlx::types::chrono::{DateTime, Utc};
+use sqlx::types::time::OffsetDateTime;
+
+use crate::times::{from_unix_micros, unix_micros};
 
 /// The base of the backoff: before the first retry, the delay is at most twice it.
 pub const BASE: Duration = Duration::from_secs(1);
@@ -56,13 +58,13 @@ pub struct RetryBudget {
     every: u64,
     tokens: u32,
     /// The time up to which the tokens are counted.
-    counted_to: DateTime<Utc>,
+    counted_to: OffsetDateTime,
 }
 
 impl RetryBudget {
     /// The budget of ADR-0042: 60 tokens, and one more every second.
     #[must_use]
-    pub fn standard(now: DateTime<Utc>) -> Self {
+    pub fn standard(now: OffsetDateTime) -> Self {
         Self::new(60, Duration::from_secs(1), now)
     }
 
@@ -73,7 +75,7 @@ impl RetryBudget {
     /// When `every` is zero, or more than `u64::MAX` microseconds: a bucket must earn its
     /// tokens at some interval.
     #[must_use]
-    pub fn new(capacity: u32, every: Duration, now: DateTime<Utc>) -> Self {
+    pub fn new(capacity: u32, every: Duration, now: OffsetDateTime) -> Self {
         let every = u64::try_from(every.as_micros())
             .ok()
             .filter(|&micros| micros > 0)
@@ -87,7 +89,7 @@ impl RetryBudget {
     }
 
     /// Spends a token at `now`, if the bucket holds one.
-    pub fn take(&mut self, now: DateTime<Utc>) -> bool {
+    pub fn take(&mut self, now: OffsetDateTime) -> bool {
         self.refill(now);
         match self.tokens.checked_sub(1) {
             Some(left) => {
@@ -101,11 +103,10 @@ impl RetryBudget {
     /// Adds the tokens earned since the count, and keeps the part of one earned so far.
     /// A full bucket earns nothing, and a time before the count adds nothing, since the
     /// steps may come with their times out of order.
-    fn refill(&mut self, now: DateTime<Utc>) {
-        let since = now
-            .timestamp_micros()
-            .checked_sub(self.counted_to.timestamp_micros())
-            .expect("two times in chrono's range are an i64 of microseconds apart");
+    fn refill(&mut self, now: OffsetDateTime) {
+        let since = unix_micros(now)
+            .checked_sub(unix_micros(self.counted_to))
+            .expect("two times in time's range are an i64 of microseconds apart");
         let Ok(elapsed) = u64::try_from(since) else {
             return;
         };
@@ -132,12 +133,10 @@ impl RetryBudget {
                 .expect("at most the elapsed time"),
         )
         .expect("at most the elapsed time, an i64");
-        let counted_to = self
-            .counted_to
-            .timestamp_micros()
+        let counted_to = unix_micros(self.counted_to)
             .checked_add(counted)
             .expect("at most now");
-        self.counted_to = DateTime::from_timestamp_micros(counted_to).expect("at most now");
+        self.counted_to = from_unix_micros(counted_to).expect("at most now");
     }
 }
 
@@ -151,12 +150,12 @@ mod tests {
     const START: i64 = 1_767_225_600_000_000;
 
     /// `millis` milliseconds after [`START`].
-    fn at(millis: i64) -> DateTime<Utc> {
+    fn at(millis: i64) -> OffsetDateTime {
         let micros = millis
             .checked_mul(1_000)
             .and_then(|micros| START.checked_add(micros))
             .expect("a time near the start");
-        DateTime::from_timestamp_micros(micros).expect("in range")
+        from_unix_micros(micros).expect("in range")
     }
 
     #[test]

@@ -11,11 +11,11 @@ mod common;
 use std::time::Duration;
 
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
-use chrono::{DateTime, TimeDelta, Utc};
 use common::{Receiver, header_of, id_of, receiver, request, send, verifies};
 use mock_psp::signing::SigningKey;
 use mock_psp::{Attempt, Config, MessageState, MockPsp, Tamper};
 use serde_json::json;
+use time::{Duration as TimeDelta, OffsetDateTime};
 use tokio::net::TcpListener;
 use uuid::Uuid;
 
@@ -65,7 +65,7 @@ fn the_receivers_check_passes_the_specifications_test_vector() {
 #[tokio::test]
 async fn a_fact_is_announced_thin_and_signed_and_delivered_once() {
     let (psp, receiver, payment, message_id) = one_fact(Config::for_tests()).await;
-    let before = Utc::now().timestamp();
+    let before = OffsetDateTime::now_utc().unix_timestamp();
     let attempt = psp.deliver(&message_id).await;
     assert_eq!(
         attempt,
@@ -81,7 +81,7 @@ async fn a_fact_is_announced_thin_and_signed_and_delivered_once() {
     let timestamp: i64 = header_of(headers, "webhook-timestamp")
         .parse()
         .expect("digits only");
-    assert!((before..=Utc::now().timestamp()).contains(&timestamp));
+    assert!((before..=OffsetDateTime::now_utc().unix_timestamp()).contains(&timestamp));
     assert_eq!(header_of(headers, "content-type"), "application/json");
     let key = &psp.signing_keys()[0];
     assert!(verifies(key, headers, body));
@@ -101,7 +101,7 @@ async fn a_fact_is_announced_thin_and_signed_and_delivered_once() {
     );
     // Delivered, it is due no more.
     assert!(
-        psp.deliver_due(Utc::now() + TimeDelta::days(4))
+        psp.deliver_due(OffsetDateTime::now_utc() + TimeDelta::days(4))
             .await
             .is_empty()
     );
@@ -157,7 +157,7 @@ async fn during_a_rotation_each_key_signs() {
 async fn a_tampered_delivery_fails_the_check_that_it_targets() {
     let (psp, receiver, _, message_id) = one_fact(Config::for_tests()).await;
     let key = psp.signing_keys()[0].clone();
-    let stale = Utc::now().timestamp() - 6 * 60;
+    let stale = OffsetDateTime::now_utc().unix_timestamp() - 6 * 60;
     psp.deliver_tampered(&message_id, Tamper::WrongKey).await;
     psp.deliver_tampered(&message_id, Tamper::ChangedBody).await;
     psp.deliver_tampered(&message_id, Tamper::Timestamp(stale))
@@ -178,7 +178,7 @@ async fn a_tampered_delivery_fails_the_check_that_it_targets() {
     );
 }
 
-fn due_at(psp: &MockPsp) -> DateTime<Utc> {
+fn due_at(psp: &MockPsp) -> OffsetDateTime {
     match psp.notifications()[0].state {
         MessageState::Due(due) => due,
         state => panic!("not due: {state:?}"),
@@ -192,7 +192,7 @@ async fn a_failure_is_due_again_on_the_schedule_and_after_any_retry_after() {
         (StatusCode::INTERNAL_SERVER_ERROR, None),
         (StatusCode::SERVICE_UNAVAILABLE, Some(3_600)),
     ]);
-    let failed_at = Utc::now();
+    let failed_at = OffsetDateTime::now_utc();
     let attempt = psp.deliver(&message_id).await;
     assert_eq!(
         attempt,
@@ -204,7 +204,10 @@ async fn a_failure_is_due_again_on_the_schedule_and_after_any_retry_after() {
     // Five seconds later, and up to a fifth more.
     let due = due_at(&psp);
     assert!(due >= failed_at + TimeDelta::seconds(5), "{due}");
-    assert!(due <= Utc::now() + TimeDelta::seconds(6), "{due}");
+    assert!(
+        due <= OffsetDateTime::now_utc() + TimeDelta::seconds(6),
+        "{due}"
+    );
     assert!(psp.deliver_due(failed_at).await.is_empty());
 
     // The next attempt asks for an hour, more than the schedule's five minutes.
@@ -233,7 +236,7 @@ async fn the_fake_gives_up_after_the_last_attempt_of_the_schedule() {
     receiver.answer([(StatusCode::INTERNAL_SERVER_ERROR, None); 10]);
     // Each step comes at the time the last one set: a failure is recorded at the step's
     // time, so the steps walk through the schedule, as the binary's timer does.
-    let mut at = Utc::now();
+    let mut at = OffsetDateTime::now_utc();
     for attempt in 1..=10 {
         assert_eq!(psp.deliver_due(at).await.len(), 1, "attempt {attempt}");
         if let MessageState::Due(next) = psp.notifications()[0].state {
@@ -254,7 +257,7 @@ async fn a_dropped_notification_is_never_delivered() {
     let (psp, receiver, _, message_id) = one_fact(Config::for_tests()).await;
     psp.drop_notification(&message_id);
     assert!(
-        psp.deliver_due(Utc::now() + TimeDelta::days(4))
+        psp.deliver_due(OffsetDateTime::now_utc() + TimeDelta::days(4))
             .await
             .is_empty()
     );

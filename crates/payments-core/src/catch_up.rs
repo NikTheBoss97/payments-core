@@ -22,7 +22,7 @@
 use std::collections::HashMap;
 use std::convert::Infallible;
 
-use sqlx::types::chrono::{DateTime, Utc};
+use sqlx::types::time::OffsetDateTime;
 use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
@@ -191,7 +191,7 @@ pub struct SweepError {
 pub async fn sweep(
     pool: &PgPool,
     psp: &PspClient,
-    now: DateTime<Utc>,
+    now: OffsetDateTime,
     budget: &mut RetryBudget,
     after: Option<PaymentId>,
 ) -> Result<Swept, SweepError> {

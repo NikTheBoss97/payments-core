@@ -14,7 +14,9 @@ use payments_core::lifecycle::PaymentStatus;
 use payments_core::money::{BasisPoints, Currency, PositiveAmount};
 use payments_core::payments::{AccountCandidates, CreatePayment, find_payment, lock_key};
 use payments_core::times::BusinessTime;
+use sqlx::types::time::OffsetDateTime;
 use sqlx::{PgConnection, PgPool, Postgres, Transaction};
+use time::format_description::well_known::Rfc3339;
 use uuid::{Uuid, uuid};
 
 use super::{account_id, payment_id, runtime_connection, runtime_transaction, transition_id};
@@ -57,13 +59,15 @@ pub fn create_command(n: u32, merchant: MerchantId) -> CreatePayment {
 
 /// When the test authorizations expire (ADR-0022).
 pub fn deadline() -> BusinessTime {
-    let time = "2026-01-08T12:00:00.123456Z".parse().expect("a valid time");
+    let time =
+        OffsetDateTime::parse("2026-01-08T12:00:00.123456Z", &Rfc3339).expect("a valid time");
     BusinessTime::new(time).expect("a time that can be stored")
 }
 
 /// When the test captures took effect.
 pub fn capture_time() -> BusinessTime {
-    let time = "2026-01-05T09:30:00.654321Z".parse().expect("a valid time");
+    let time =
+        OffsetDateTime::parse("2026-01-05T09:30:00.654321Z", &Rfc3339).expect("a valid time");
     BusinessTime::new(time).expect("a time that can be stored")
 }
 

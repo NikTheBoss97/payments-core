@@ -17,9 +17,9 @@ axum = { version = "0.8.9", default-features = false, features = ["http1", "toki
 base64 = "0.23"
 hmac = "0.13"
 sha2 = { version = "0.11", default-features = false }
-# The business times that facts report, in RFC 3339 (ADR-0022), and the time now.
-# sqlx builds this crate already, with its clock.
-chrono = { version = "0.4.45", default-features = false, features = ["now", "serde", "std"] }
+# The business times that facts report, in RFC 3339 (ADR-0022, ADR-0059), and the
+# time now. The server builds this crate already.
+time = { version = "0.3.55", default-features = false, features = ["formatting", "parsing", "serde", "std"] }
 # Keys from the operating system (ADR-0030), and the jitter of the schedule. uuid
 # builds this crate already.
 getrandom = "0.4"

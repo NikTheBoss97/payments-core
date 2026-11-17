@@ -5,8 +5,8 @@
 //! These are the fake's types. The server reads and writes the same format with types of
 //! its own: the two share the format, not code.
 
-use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use time::OffsetDateTime;
 use uuid::Uuid;
 
 /// The cap of a ledger amount (ADR-0003).
@@ -103,7 +103,8 @@ pub enum Detail {
     Authorized {
         request_id: Uuid,
         amount: i64,
-        expires_at: DateTime<Utc>,
+        #[serde(with = "time::serde::rfc3339")]
+        expires_at: OffsetDateTime,
     },
     Declined {
         request_id: Uuid,
@@ -111,7 +112,8 @@ pub enum Detail {
     Captured {
         request_id: Uuid,
         amount: i64,
-        captured_at: DateTime<Utc>,
+        #[serde(with = "time::serde::rfc3339")]
+        captured_at: OffsetDateTime,
     },
     CaptureRefused {
         request_id: Uuid,
@@ -129,7 +131,8 @@ pub enum Detail {
     Refunded {
         request_id: Uuid,
         amount: i64,
-        refunded_at: DateTime<Utc>,
+        #[serde(with = "time::serde::rfc3339")]
+        refunded_at: OffsetDateTime,
     },
     RefundRefused {
         request_id: Uuid,
@@ -146,14 +149,15 @@ pub struct Notification {
     #[serde(rename = "type")]
     pub event_type: String,
     /// When the change happened, which may be long before a delivery.
-    pub timestamp: DateTime<Utc>,
+    #[serde(with = "time::serde::rfc3339")]
+    pub timestamp: OffsetDateTime,
     pub data: Subject,
 }
 
 impl Notification {
     /// That this payment changed at this time.
     #[must_use]
-    pub fn payment_updated(payment_id: Uuid, timestamp: DateTime<Utc>) -> Self {
+    pub fn payment_updated(payment_id: Uuid, timestamp: OffsetDateTime) -> Self {
         Self {
             event_type: EVENT_TYPE.to_owned(),
             timestamp,
@@ -184,8 +188,9 @@ mod tests {
     const PAYMENT: Uuid = Uuid::from_u128(2);
 
     /// 2026-01-01T00:00:00.123456Z.
-    fn at() -> DateTime<Utc> {
-        DateTime::from_timestamp_micros(1_767_225_600_123_456).expect("a time in range")
+    fn at() -> OffsetDateTime {
+        OffsetDateTime::from_unix_timestamp_nanos(1_767_225_600_123_456_000)
+            .expect("a time in range")
     }
 
     /// The JSON of a fact at position 1 with this detail, and the fact read back from it.

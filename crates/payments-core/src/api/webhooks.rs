@@ -18,7 +18,7 @@ use axum::extract::rejection::BytesRejection;
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use sqlx::PgPool;
-use sqlx::types::chrono::Utc;
+use sqlx::types::time::OffsetDateTime;
 use tokio::sync::Semaphore;
 
 use super::AppState;
@@ -112,7 +112,12 @@ pub(super) async fn receive(
     let Ok(body) = body else {
         return Problem::NotificationRefused.into_response();
     };
-    let Ok(notification) = verify(&headers, &body, &state.webhooks.keys, Utc::now()) else {
+    let Ok(notification) = verify(
+        &headers,
+        &body,
+        &state.webhooks.keys,
+        OffsetDateTime::now_utc(),
+    ) else {
         return Problem::NotificationRefused.into_response();
     };
     match record(&state.system, Psp::Mock, &notification).await {

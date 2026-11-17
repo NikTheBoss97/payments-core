@@ -25,7 +25,7 @@ use payments_core::sender::Sender;
 use payments_core::tenancy::Tenant;
 use payments_core::times::BusinessTime;
 use sqlx::PgPool;
-use sqlx::types::chrono::{DateTime, Utc};
+use sqlx::types::time::OffsetDateTime;
 
 type TestResult = Result<(), Box<dyn Error>>;
 
@@ -36,7 +36,7 @@ fn amount(minor: i64) -> PositiveAmount {
     PositiveAmount::new(minor).expect("a positive amount")
 }
 
-fn time(at: DateTime<Utc>) -> BusinessTime {
+fn time(at: OffsetDateTime) -> BusinessTime {
     BusinessTime::new(at).expect("the fake's times are whole microseconds in range")
 }
 
@@ -325,7 +325,7 @@ async fn a_request_that_the_psp_calls_malformed_stays_recorded(pool: PgPool) -> 
         .await?;
     let psp = ScriptedPsp::start().await;
     psp.answer_sends(StatusCode::UNPROCESSABLE_ENTITY, None, Vec::new());
-    let mut sender = Sender::new(psp.client(), Utc::now());
+    let mut sender = Sender::new(psp.client(), OffsetDateTime::now_utc());
     hand_over_and_step(&mut sender, &world.system, &authorize).await;
     let answer = sqlx::query_scalar!(
         "SELECT answer FROM payment_request_answers WHERE request_id = $1",

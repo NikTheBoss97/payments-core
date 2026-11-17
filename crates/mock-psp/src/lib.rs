@@ -26,7 +26,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use axum::http::Uri;
-use chrono::{DateTime, TimeDelta, Utc};
+use time::{Duration as TimeDelta, OffsetDateTime};
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 use uuid::Uuid;
@@ -168,9 +168,10 @@ impl Shared {
 }
 
 /// The time now, in whole microseconds, like every time on the wire (ADR-0022).
-pub(crate) fn now() -> DateTime<Utc> {
-    let now = Utc::now();
-    DateTime::from_timestamp_micros(now.timestamp_micros()).expect("now is in range")
+pub(crate) fn now() -> OffsetDateTime {
+    let now = OffsetDateTime::now_utc();
+    now.replace_nanosecond(now.nanosecond() / 1_000 * 1_000)
+        .expect("whole microseconds are a nanosecond of the second")
 }
 
 /// A fake PSP served on a local port, and the handle that a test drives it through.
@@ -320,13 +321,13 @@ impl MockPsp {
 
     /// Settles every capture made at or before `cutoff` that is not settled yet. The
     /// binary takes this step on a timer, and a test with any time it likes.
-    pub fn settle_captured_by(&self, cutoff: DateTime<Utc>) {
+    pub fn settle_captured_by(&self, cutoff: OffsetDateTime) {
         self.shared.model().settle_captured_by(cutoff, now());
     }
 
     /// Lets lapse every authorization that expires at or before `now`. The binary takes
     /// this step on a timer, and a test with any time it likes.
-    pub fn expire_lapsed(&self, now: DateTime<Utc>) {
+    pub fn expire_lapsed(&self, now: OffsetDateTime) {
         self.shared.model().expire_lapsed(now);
     }
 
@@ -351,7 +352,7 @@ impl MockPsp {
     /// Forgets the idempotency keys taken a day or more before `now`, as Stripe may
     /// (ADR-0028). The binary takes this step on a timer, and a test takes it with any
     /// time it likes, since nothing in the fake reads a clock to decide.
-    pub fn prune_keys(&self, now: DateTime<Utc>) {
+    pub fn prune_keys(&self, now: OffsetDateTime) {
         self.shared.model().prune_keys(now);
     }
 
@@ -423,7 +424,7 @@ impl MockPsp {
     /// # Panics
     ///
     /// Before [`MockPsp::deliver_to`].
-    pub async fn deliver_due(&self, now: DateTime<Utc>) -> Vec<(String, Attempt)> {
+    pub async fn deliver_due(&self, now: OffsetDateTime) -> Vec<(String, Attempt)> {
         let due = self.shared.model().due(now);
         let mut attempts = Vec::with_capacity(due.len());
         for message_id in due {
@@ -450,7 +451,7 @@ impl MockPsp {
         &self,
         message_id: &str,
         tamper: Option<Tamper>,
-        at: DateTime<Utc>,
+        at: OffsetDateTime,
     ) -> Attempt {
         let endpoint = self
             .endpoint()
@@ -465,7 +466,7 @@ impl MockPsp {
         // Each attempt is signed with the time it is made (Standard Webhooks).
         let timestamp = match tamper {
             Some(Tamper::Timestamp(chosen)) => chosen,
-            _ => Utc::now().timestamp(),
+            _ => OffsetDateTime::now_utc().unix_timestamp(),
         };
         let keys = match tamper {
             Some(Tamper::WrongKey) => vec![SigningKey::generate()],

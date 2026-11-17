@@ -14,7 +14,7 @@
 
 use std::collections::HashMap;
 
-use chrono::{DateTime, TimeDelta, Utc};
+use time::{Duration as TimeDelta, OffsetDateTime};
 use uuid::Uuid;
 
 use crate::deliveries::{Attempt, next_attempt};
@@ -69,7 +69,7 @@ enum Stage {
     Created,
     Authorized {
         amount: i64,
-        expires_at: DateTime<Utc>,
+        expires_at: OffsetDateTime,
     },
     Declined,
     Voided,
@@ -78,7 +78,7 @@ enum Stage {
         amount: i64,
         refunded: i64,
         settled: bool,
-        captured_at: DateTime<Utc>,
+        captured_at: OffsetDateTime,
     },
 }
 
@@ -109,7 +109,7 @@ pub struct Message {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MessageState {
     /// Owed, with its next attempt due at this time.
-    Due(DateTime<Utc>),
+    Due(OffsetDateTime),
     /// The receiver took it, with a `2xx`.
     Delivered,
     /// Every attempt of the schedule failed. The sweep finds what it announced
@@ -127,7 +127,7 @@ pub(crate) struct Model {
     authorization_lifetime: TimeDelta,
     payments: HashMap<Uuid, Payment>,
     /// The idempotency cache: each request as first taken, and when.
-    cache: HashMap<Uuid, (Request, DateTime<Utc>)>,
+    cache: HashMap<Uuid, (Request, OffsetDateTime)>,
     /// Every request taken as new, in the order of arrival. An ID here twice means that
     /// the PSP acted twice on one request, which I9 forbids.
     taken: Vec<Request>,
@@ -148,7 +148,7 @@ impl Model {
     }
 
     /// Takes a request, which the caller has checked is well formed.
-    pub(crate) fn take(&mut self, request: Request, now: DateTime<Utc>) -> Taken {
+    pub(crate) fn take(&mut self, request: Request, now: OffsetDateTime) -> Taken {
         if let Some((cached, _)) = self.cache.get(&request.id) {
             return if *cached == request {
                 Taken::Received
@@ -194,7 +194,7 @@ impl Model {
     }
 
     /// Forgets the keys taken more than a day before `now`.
-    pub(crate) fn prune_keys(&mut self, now: DateTime<Utc>) {
+    pub(crate) fn prune_keys(&mut self, now: OffsetDateTime) {
         self.cache
             .retain(|_, (_, taken_at)| now - *taken_at < CACHE_LIFETIME);
     }
@@ -208,7 +208,7 @@ impl Model {
         &mut self,
         request_id: Uuid,
         decision: Decision,
-        now: DateTime<Utc>,
+        now: OffsetDateTime,
     ) -> Result<(), Impossible> {
         let lifetime = self.authorization_lifetime;
         let (payment_id, slot) = self
@@ -242,7 +242,7 @@ impl Model {
     pub(crate) fn settle(
         &mut self,
         payment_id: Uuid,
-        now: DateTime<Utc>,
+        now: OffsetDateTime,
     ) -> Result<(), Impossible> {
         let payment = self.payment_mut(payment_id)?;
         let Stage::Captured {
@@ -269,7 +269,7 @@ impl Model {
 
     /// Settles every capture made at or before `cutoff` and not settled yet, in the order
     /// of the payments' IDs: the binary's timer.
-    pub(crate) fn settle_captured_by(&mut self, cutoff: DateTime<Utc>, now: DateTime<Utc>) {
+    pub(crate) fn settle_captured_by(&mut self, cutoff: OffsetDateTime, now: OffsetDateTime) {
         let mut due: Vec<Uuid> = self
             .payments
             .iter()
@@ -288,7 +288,7 @@ impl Model {
 
     /// Lets lapse every authorization that expires at or before `now`, in the order of
     /// the payments' IDs: the binary's timer.
-    pub(crate) fn expire_lapsed(&mut self, now: DateTime<Utc>) {
+    pub(crate) fn expire_lapsed(&mut self, now: OffsetDateTime) {
         let mut due: Vec<Uuid> = self
             .payments
             .iter()
@@ -312,7 +312,7 @@ impl Model {
     pub(crate) fn expire(
         &mut self,
         payment_id: Uuid,
-        now: DateTime<Utc>,
+        now: OffsetDateTime,
     ) -> Result<(), Impossible> {
         let payment = self.payment_mut(payment_id)?;
         if !matches!(payment.stage, Stage::Authorized { .. }) {
@@ -328,7 +328,7 @@ impl Model {
 
     /// Appends a fact and the notification that announces it. The fact changes nothing
     /// that the fake checks, so a test can write a history that no PSP would.
-    pub(crate) fn append(&mut self, payment_id: Uuid, detail: Detail, now: DateTime<Utc>) {
+    pub(crate) fn append(&mut self, payment_id: Uuid, detail: Detail, now: OffsetDateTime) {
         let payment = self.payments.entry(payment_id).or_default();
         let position = u32::try_from(payment.facts.len() + 1)
             .expect("a history shorter than four billion facts");
@@ -341,7 +341,7 @@ impl Model {
     }
 
     /// Queues a notification that this payment changed, and returns its ID.
-    pub(crate) fn notify(&mut self, payment_id: Uuid, now: DateTime<Utc>) -> String {
+    pub(crate) fn notify(&mut self, payment_id: Uuid, now: OffsetDateTime) -> String {
         let id = format!("msg_{}", Uuid::now_v7().simple());
         self.messages.push(Message {
             id: id.clone(),
@@ -365,7 +365,7 @@ impl Model {
     }
 
     /// The notifications due by `now`, in order.
-    pub(crate) fn due(&self, now: DateTime<Utc>) -> Vec<String> {
+    pub(crate) fn due(&self, now: OffsetDateTime) -> Vec<String> {
         self.messages
             .iter()
             .filter(|message| matches!(message.state, MessageState::Due(due) if due <= now))
@@ -379,7 +379,7 @@ impl Model {
         &mut self,
         message_id: &str,
         attempt: Attempt,
-        at: DateTime<Utc>,
+        at: OffsetDateTime,
         jitter: u16,
     ) {
         let Some(message) = self
@@ -438,7 +438,7 @@ fn outcome(
     stage: Stage,
     request: &Request,
     decision: Decision,
-    now: DateTime<Utc>,
+    now: OffsetDateTime,
     lifetime: TimeDelta,
 ) -> Result<(Stage, Detail), Impossible> {
     let request_id = request.id;
@@ -528,8 +528,9 @@ mod tests {
 
     const PAYMENT: Uuid = Uuid::from_u128(1);
 
-    fn now() -> DateTime<Utc> {
-        DateTime::from_timestamp_micros(1_767_225_600_000_000).expect("a time in range")
+    fn now() -> OffsetDateTime {
+        OffsetDateTime::from_unix_timestamp_nanos(1_767_225_600_000_000_000)
+            .expect("a time in range")
     }
 
     fn request(kind: RequestKind, amount: i64) -> Request {

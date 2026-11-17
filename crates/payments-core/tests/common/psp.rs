@@ -30,7 +30,7 @@ use payments_core::sender::{Report, Sender};
 use payments_core::tenancy::Tenant;
 use serde_json::json;
 use sqlx::PgPool;
-use sqlx::types::chrono::Utc;
+use sqlx::types::time::OffsetDateTime;
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 
@@ -48,7 +48,7 @@ pub fn client_of(psp: &MockPsp) -> PspClient {
 
 /// The sender of this fake, as the server's task holds it (ADR-0042), its budget full now.
 pub fn sender_of(psp: &MockPsp) -> Sender {
-    Sender::new(client_of(psp), Utc::now())
+    Sender::new(client_of(psp), OffsetDateTime::now_utc())
 }
 
 /// Hands `request` over to `sender` and takes a step, as the server does once a route has
@@ -61,7 +61,7 @@ pub async fn hand_over_and_step(
 ) -> Report {
     sender.hand_over(request);
     sender
-        .send_due(system, Utc::now(), &mut || 0)
+        .send_due(system, OffsetDateTime::now_utc(), &mut || 0)
         .await
         .expect("the requests that wait for the PSP can be listed")
 }
@@ -71,7 +71,7 @@ pub async fn hand_over_and_step(
 /// Every jitter is drawn as zero, so nothing waits.
 pub async fn step(sender: &mut Sender, system: &PgPool) -> Report {
     sender
-        .send_due(system, Utc::now(), &mut || 0)
+        .send_due(system, OffsetDateTime::now_utc(), &mut || 0)
         .await
         .expect("the requests that wait for the PSP can be listed")
 }

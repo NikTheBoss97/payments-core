@@ -8,11 +8,11 @@ use std::time::Duration;
 
 use axum::body::Bytes;
 use axum::http::{HeaderMap, Method, Request, header};
-use chrono::{DateTime, TimeDelta, Utc};
 use http_body_util::Full;
 use hyper_util::client::legacy::Client;
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::rt::TokioExecutor;
+use time::{Duration as TimeDelta, OffsetDateTime};
 
 /// The delays before each attempt after the first, which is immediate: the specification's
 /// example schedule, ten attempts over 75 hours and a half.
@@ -61,15 +61,14 @@ impl Attempt {
 /// once, and a `Retry-After` can only delay it further.
 pub(crate) fn next_attempt(
     attempts: u32,
-    failed_at: DateTime<Utc>,
+    failed_at: OffsetDateTime,
     retry_after: Option<u32>,
     jitter: u16,
-) -> Option<DateTime<Utc>> {
+) -> Option<OffsetDateTime> {
     let index = usize::try_from(attempts.checked_sub(1)?).ok()?;
     let delay = *SCHEDULE.get(index)?;
-    let micros = delay
-        .num_microseconds()
-        .expect("a delay of hours fits in microseconds");
+    let micros =
+        i64::try_from(delay.whole_microseconds()).expect("a delay of hours fits in microseconds");
     let jittered = delay + TimeDelta::microseconds(micros * i64::from(jitter.min(999)) / 5_000);
     let asked = TimeDelta::seconds(i64::from(retry_after.unwrap_or(0)));
     Some(failed_at + jittered.max(asked))
@@ -137,19 +136,20 @@ mod tests {
 
     use super::*;
 
-    fn at() -> DateTime<Utc> {
-        DateTime::from_timestamp_micros(1_767_225_600_000_000).expect("a time in range")
+    fn at() -> OffsetDateTime {
+        OffsetDateTime::from_unix_timestamp_nanos(1_767_225_600_000_000_000)
+            .expect("a time in range")
     }
 
     #[test]
     fn the_schedule_is_the_specifications_example() {
         // Its table: 00:00:05, 00:05:05, 00:35:05, 02:35:05, 07:35:05, 17:35:05, 31:35:05,
         // 51:35:05 and 75:35:05 since the first attempt.
-        let mut since_start = TimeDelta::zero();
+        let mut since_start = TimeDelta::ZERO;
         let mut elapsed = Vec::new();
         for delay in SCHEDULE {
             since_start += delay;
-            elapsed.push(since_start.num_seconds());
+            elapsed.push(since_start.whole_seconds());
         }
         let hms = |h: i64, m: i64, s: i64| (h * 60 + m) * 60 + s;
         assert_eq!(
