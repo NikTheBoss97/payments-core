@@ -17,7 +17,7 @@ use payments_core::notifications::SigningKeys;
 use payments_core::psp::{InvalidClient, PspClient};
 use payments_core::sender::Sender;
 use sqlx::PgPool;
-use sqlx::types::chrono::Utc;
+use sqlx::types::time::OffsetDateTime;
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 
@@ -56,7 +56,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
     let tenant = PgPool::connect(&tenant_url).await?;
     let system = PgPool::connect(&system_url).await?;
     let listener = TcpListener::bind(&address).await?;
-    let sender = Sender::new(sender, Utc::now());
+    let sender = Sender::new(sender, OffsetDateTime::now_utc());
     let (handovers, handed_over) = mpsc::channel(background::HANDOVERS);
     let work = tokio::spawn(background::run(
         system.clone(),

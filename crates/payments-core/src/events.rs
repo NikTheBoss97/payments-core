@@ -7,7 +7,7 @@
 
 use serde::Serialize;
 use sqlx::PgPool;
-use sqlx::types::chrono::{DateTime, Utc};
+use sqlx::types::time::OffsetDateTime;
 use uuid::Uuid;
 
 use crate::ids::EventId;
@@ -68,7 +68,7 @@ struct Data {
 }
 
 /// The body's bytes.
-fn written(payment: Uuid, request: Option<Uuid>, recorded_at: DateTime<Utc>) -> Vec<u8> {
+fn written(payment: Uuid, request: Option<Uuid>, recorded_at: OffsetDateTime) -> Vec<u8> {
     let timestamp = BusinessTime::new(recorded_at)
         .expect("a time that PostgreSQL stored is one that it stores")
         .written();

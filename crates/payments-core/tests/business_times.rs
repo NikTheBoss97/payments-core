@@ -11,12 +11,14 @@ use std::error::Error;
 use common::runtime_pool;
 use payments_core::times::BusinessTime;
 use sqlx::PgPool;
-use sqlx::types::chrono::{DateTime, NaiveDate, Utc};
+use sqlx::types::time::{Date, OffsetDateTime, UtcOffset};
+use time::Month;
+use time::format_description::well_known::Rfc3339;
 
 type TestResult = Result<(), Box<dyn Error>>;
 
 /// Sends a time to PostgreSQL as a `timestamptz` and reads it back.
-async fn round_trip(app: &PgPool, time: DateTime<Utc>) -> sqlx::Result<DateTime<Utc>> {
+async fn round_trip(app: &PgPool, time: OffsetDateTime) -> sqlx::Result<OffsetDateTime> {
     sqlx::query_scalar!(r#"SELECT $1::timestamptz AS "time!""#, time)
         .fetch_one(app)
         .await
@@ -36,22 +38,23 @@ impl Rng {
 }
 
 /// `year`-`month`-`day` at `h:m:s` and `nanos`, in UTC.
-fn at(year: i32, month: u32, day: u32, (h, m, s, nanos): (u32, u32, u32, u32)) -> DateTime<Utc> {
-    NaiveDate::from_ymd_opt(year, month, day)
-        .and_then(|date| date.and_hms_nano_opt(h, m, s, nanos))
+fn at(year: i32, month: u8, day: u8, (h, m, s, nanos): (u8, u8, u8, u32)) -> OffsetDateTime {
+    Month::try_from(month)
+        .and_then(|month| Date::from_calendar_date(year, month, day))
+        .and_then(|date| date.with_hms_nano(h, m, s, nanos))
         .expect("a valid time")
-        .and_utc()
+        .assume_utc()
 }
 
 #[sqlx::test]
 async fn every_time_that_can_be_built_comes_back_equal(pool: PgPool) -> TestResult {
     let app = runtime_pool(&pool).await?;
     // From a century before the earliest time that can be built to the latest second.
-    let lowest = i128::from(at(-100, 1, 1, (0, 0, 0, 0)).timestamp());
-    let highest = i128::from(at(9999, 12, 31, (23, 59, 59, 0)).timestamp());
+    let lowest = i128::from(at(-100, 1, 1, (0, 0, 0, 0)).unix_timestamp());
+    let highest = i128::from(at(9999, 12, 31, (23, 59, 59, 0)).unix_timestamp());
     let span = highest - lowest + 1;
     // The awkward ones by name, then a sample of the range.
-    let mut times: Vec<DateTime<Utc>> = [
+    let mut times: Vec<OffsetDateTime> = [
         "2026-01-01T00:00:00.123456789Z",
         "1999-12-31T23:59:59.123456789Z",
         "2000-01-01T00:00:00Z",
@@ -64,13 +67,16 @@ async fn every_time_that_can_be_built_comes_back_equal(pool: PgPool) -> TestResu
         "9999-12-31T23:59:59.999999999Z",
     ]
     .into_iter()
-    .map(|text| text.parse().expect("a valid time"))
+    .map(|text| OffsetDateTime::parse(text, &Rfc3339).expect("a valid time"))
     .collect();
     let mut rng = Rng(0x5EED);
     for _ in 0..1000 {
         let seconds = lowest + i128::from(rng.next()) % span;
         let nanos = u32::try_from(rng.next() % 1_000_000_000)?;
-        times.extend(DateTime::from_timestamp(i64::try_from(seconds)?, nanos));
+        times.push(
+            OffsetDateTime::from_unix_timestamp(i64::try_from(seconds)?)?
+                .replace_nanosecond(nanos)?,
+        );
     }
     let mut built = 0;
     for time in times {
@@ -93,25 +99,25 @@ async fn every_time_that_can_be_built_comes_back_equal(pool: PgPool) -> TestResu
 #[sqlx::test]
 async fn the_bounds_are_rfc_3339s_years(pool: PgPool) -> TestResult {
     // The earliest and the latest time that can be built come back equal. A
-    // microsecond beyond either cannot be built, though PostgreSQL holds it, and the
-    // columns refuse it too (payment_records.rs).
+    // microsecond beyond either cannot be built: before the year 0, though PostgreSQL
+    // holds it, and after 9999, which time holds only in an offset that puts it there.
+    // The columns refuse both (payment_records.rs).
     let app = runtime_pool(&pool).await?;
-    for (bound, beyond) in [
-        (
-            at(0, 1, 1, (0, 0, 0, 0)),
-            at(-1, 12, 31, (23, 59, 59, 999_999_000)),
-        ),
-        (
-            at(9999, 12, 31, (23, 59, 59, 999_999_000)),
-            at(10_000, 1, 1, (0, 0, 0, 0)),
-        ),
+    let before = at(-1, 12, 31, (23, 59, 59, 999_999_000));
+    let after =
+        at(9999, 12, 31, (23, 59, 59, 0)).replace_offset(UtcOffset::from_whole_seconds(-1)?);
+    for bound in [
+        at(0, 1, 1, (0, 0, 0, 0)),
+        at(9999, 12, 31, (23, 59, 59, 999_999_000)),
     ] {
         let built = BusinessTime::new(bound)?.get();
         assert_eq!(built, bound);
         assert_eq!(round_trip(&app, built).await?, bound);
-        assert!(BusinessTime::new(beyond).is_err(), "{beyond:?}");
-        assert_eq!(round_trip(&app, beyond).await?, beyond);
     }
+    for beyond in [before, after] {
+        assert!(BusinessTime::new(beyond).is_err(), "{beyond:?}");
+    }
+    assert_eq!(round_trip(&app, before).await?, before);
     app.close().await;
     Ok(())
 }

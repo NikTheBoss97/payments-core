@@ -23,7 +23,7 @@ use hmac::Mac;
 use hmac::digest::Output;
 use serde::Deserialize;
 use sqlx::PgPool;
-use sqlx::types::chrono::{DateTime, Utc};
+use sqlx::types::time::OffsetDateTime;
 use uuid::Uuid;
 
 use crate::accounts::Psp;
@@ -122,7 +122,7 @@ pub fn verify(
     headers: &HeaderMap,
     body: &[u8],
     keys: &SigningKeys,
-    now: DateTime<Utc>,
+    now: OffsetDateTime,
 ) -> Result<Notification, Refusal> {
     let id = one(headers, "webhook-id")?;
     let timestamp = one(headers, "webhook-timestamp")?;
@@ -173,8 +173,8 @@ fn seconds(timestamp: &str) -> Option<i64> {
 
 /// Whether `seconds` is at most [`TOLERANCE_SECONDS`] from `now`, either way, in whole
 /// seconds, with both ends in, as in the reference library.
-fn within_window(seconds: i64, now: DateTime<Utc>) -> bool {
-    let now = now.timestamp();
+fn within_window(seconds: i64, now: OffsetDateTime) -> bool {
+    let now = now.unix_timestamp();
     (now.saturating_sub(TOLERANCE_SECONDS)..=now.saturating_add(TOLERANCE_SECONDS))
         .contains(&seconds)
 }
@@ -325,12 +325,12 @@ mod tests {
     const PAYMENT: &str = "0196a5b4-c3d2-7e8f-9a0b-1c2d3e4f5a6b";
     const BODY: &[u8] = br#"{"type":"payment.updated","timestamp":"2026-01-01T00:00:00.123456Z","data":{"payment_id":"0196a5b4-c3d2-7e8f-9a0b-1c2d3e4f5a6b"}}"#;
 
-    fn at(seconds: i64) -> DateTime<Utc> {
-        DateTime::from_timestamp(seconds, 0).expect("a time in range")
+    fn at(seconds: i64) -> OffsetDateTime {
+        OffsetDateTime::from_unix_timestamp(seconds).expect("a time in range")
     }
 
     /// The service's clock in these tests.
-    fn now() -> DateTime<Utc> {
+    fn now() -> OffsetDateTime {
         at(1_767_225_600)
     }
 
@@ -383,7 +383,7 @@ mod tests {
     #[test]
     fn a_notification_that_the_fake_signed_is_read() {
         let key = SigningKey::generate();
-        let headers = signed_by(&key, ID, now().timestamp(), BODY);
+        let headers = signed_by(&key, ID, now().unix_timestamp(), BODY);
         assert_eq!(
             verify(&headers, BODY, &keys_of(&[&key]), now()),
             Ok(read(ID))
@@ -394,7 +394,7 @@ mod tests {
     fn every_signed_byte_counts() {
         let key = SigningKey::generate();
         let keys = keys_of(&[&key]);
-        let seconds = now().timestamp();
+        let seconds = now().unix_timestamp();
         let signature = key.sign(ID, seconds, BODY);
         let mut changed = BODY.to_vec();
         changed.push(b' ');
@@ -423,7 +423,7 @@ mod tests {
     fn the_window_holds_its_ends_and_nothing_beyond() {
         let key = SigningKey::generate();
         let keys = keys_of(&[&key]);
-        let seconds = now().timestamp();
+        let seconds = now().unix_timestamp();
         for (offset, verified) in [
             (-TOLERANCE_SECONDS, true),
             (TOLERANCE_SECONDS, true),
@@ -440,8 +440,9 @@ mod tests {
             assert_eq!(verify(&headers, BODY, &keys, now()), expected, "{offset}");
         }
         // A second into the clock's second changes nothing: the window is in whole seconds.
-        let later =
-            DateTime::from_timestamp(now().timestamp(), 999_000_000).expect("a time in range");
+        let later = now()
+            .replace_nanosecond(999_000_000)
+            .expect("a time in range");
         let headers = signed_by(&key, ID, seconds - TOLERANCE_SECONDS, BODY);
         assert_eq!(verify(&headers, BODY, &keys, later), Ok(read(ID)));
     }
@@ -449,7 +450,7 @@ mod tests {
     #[test]
     fn during_a_rotation_either_key_verifies() {
         let (old, new) = (SigningKey::generate(), SigningKey::generate());
-        let seconds = now().timestamp();
+        let seconds = now().unix_timestamp();
         let both = format!(
             "{} {}",
             old.sign(ID, seconds, BODY),
@@ -481,7 +482,7 @@ mod tests {
     fn each_header_appears_once_in_visible_ascii() {
         let key = SigningKey::generate();
         let keys = keys_of(&[&key]);
-        let good = signed_by(&key, ID, now().timestamp(), BODY);
+        let good = signed_by(&key, ID, now().unix_timestamp(), BODY);
         for name in ["webhook-id", "webhook-timestamp", "webhook-signature"] {
             let mut missing = good.clone();
             missing.remove(name);
@@ -515,7 +516,7 @@ mod tests {
     fn an_id_has_one_shape_without_a_dot() {
         let key = SigningKey::generate();
         let keys = keys_of(&[&key]);
-        let seconds = now().timestamp();
+        let seconds = now().unix_timestamp();
         let longest = "a".repeat(255);
         let headers = signed_by(&key, &longest, seconds, BODY);
         assert_eq!(verify(&headers, BODY, &keys, now()), Ok(read(&longest)));
@@ -534,7 +535,7 @@ mod tests {
     fn a_timestamp_is_digits_alone() {
         let key = SigningKey::generate();
         let keys = keys_of(&[&key]);
-        let seconds = now().timestamp();
+        let seconds = now().unix_timestamp();
         for timestamp in [
             String::new(),
             format!("+{seconds}"),
@@ -576,12 +577,12 @@ mod tests {
         // Leading zeros are digits, and the MAC covers them as sent.
         let key = SigningKey::generate();
         let keys = keys_of(&[&key]);
-        let padded = format!("0{}", now().timestamp());
+        let padded = format!("0{}", now().unix_timestamp());
         let signature = format!("v1,{}", STANDARD.encode(mac(&key, ID, &padded, BODY)));
         let headers = headers(ID, &padded, &signature);
         assert_eq!(verify(&headers, BODY, &keys, now()), Ok(read(ID)));
         // A signature over the number without its zero does not cover what was received.
-        let unpadded = key.sign(ID, now().timestamp(), BODY);
+        let unpadded = key.sign(ID, now().unix_timestamp(), BODY);
         let headers = self::headers(ID, &padded, &unpadded);
         assert_eq!(
             verify(&headers, BODY, &keys, now()),
@@ -593,7 +594,7 @@ mod tests {
     fn entries_that_are_no_v1_signature_are_skipped() {
         let key = SigningKey::generate();
         let keys = keys_of(&[&key]);
-        let seconds = now().timestamp();
+        let seconds = now().unix_timestamp();
         let timestamp = seconds.to_string();
         let good = key.sign(ID, seconds, BODY);
         let tag = good.trim_start_matches("v1,");
@@ -633,7 +634,7 @@ mod tests {
     fn a_verified_body_names_its_payment_and_nothing_else_is_checked() {
         let key = SigningKey::generate();
         let keys = keys_of(&[&key]);
-        let seconds = now().timestamp();
+        let seconds = now().unix_timestamp();
         let unreadable: [&[u8]; 5] = [
             b"not json",
             br#"{"data":{}}"#,
@@ -660,7 +661,7 @@ mod tests {
     fn the_first_check_that_fails_refuses_and_the_body_waits_for_the_signature() {
         let key = SigningKey::generate();
         let keys = keys_of(&[&key]);
-        let stale = now().timestamp() - TOLERANCE_SECONDS - 1;
+        let stale = now().unix_timestamp() - TOLERANCE_SECONDS - 1;
         let unsigned = "v1,AAAA";
         // An ID with a dot and a stale time: the ID's shape is checked first.
         let headers = signed_by(&key, "msg.1", stale, BODY);
@@ -669,7 +670,7 @@ mod tests {
         let headers = self::headers(ID, &stale.to_string(), unsigned);
         assert_eq!(verify(&headers, BODY, &keys, now()), Err(Refusal::Window));
         // A body that is not JSON and no valid signature: the body is never parsed.
-        let headers = self::headers(ID, &now().timestamp().to_string(), unsigned);
+        let headers = self::headers(ID, &now().unix_timestamp().to_string(), unsigned);
         assert_eq!(
             verify(&headers, b"not json", &keys, now()),
             Err(Refusal::Signature)

@@ -24,8 +24,7 @@ use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::rt::TokioExecutor;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
-use sqlx::types::chrono::DateTime;
-use time::OffsetDateTime;
+use sqlx::types::time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use uuid::Uuid;
 
@@ -773,7 +772,6 @@ fn amount_of(minor: i64) -> Result<PositiveAmount, Unplaced> {
 fn time_of(text: &str) -> Result<BusinessTime, Unplaced> {
     OffsetDateTime::parse(text, &Rfc3339)
         .ok()
-        .and_then(|time| DateTime::from_timestamp(time.unix_timestamp(), time.nanosecond()))
         .and_then(|time| BusinessTime::new(time).ok())
         .ok_or_else(|| Unplaced::Time(text.to_owned()))
 }
@@ -797,7 +795,8 @@ mod tests {
 
     /// 2026-01-01T00:00:00.123456Z.
     fn at() -> BusinessTime {
-        let time = DateTime::from_timestamp_micros(1_767_225_600_123_456).expect("in range");
+        let time =
+            OffsetDateTime::from_unix_timestamp_nanos(1_767_225_600_123_456_000).expect("in range");
         BusinessTime::new(time).expect("a time that can be stored")
     }
 

@@ -19,9 +19,9 @@ use std::net::SocketAddr;
 use std::process::ExitCode;
 use std::time::Duration;
 
-use chrono::{TimeDelta, Utc};
 use mock_psp::signing::SigningKey;
 use mock_psp::{Config, MockPsp, Policy};
+use time::{Duration as TimeDelta, OffsetDateTime};
 
 /// What the environment configures.
 struct Settings {
@@ -93,7 +93,7 @@ async fn main() -> ExitCode {
     let mut ticks = tokio::time::interval(Duration::from_secs(1));
     loop {
         ticks.tick().await;
-        let now = Utc::now();
+        let now = OffsetDateTime::now_utc();
         for (message_id, attempt) in psp.deliver_due(now).await {
             eprintln!("mock-psp: delivered {message_id}: {attempt:?}");
         }

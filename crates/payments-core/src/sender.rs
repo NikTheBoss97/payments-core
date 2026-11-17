@@ -18,7 +18,7 @@ use std::time::Duration;
 
 use axum::http::StatusCode;
 use sqlx::PgPool;
-use sqlx::types::chrono::{DateTime, Utc};
+use sqlx::types::time::OffsetDateTime;
 use uuid::Uuid;
 
 use crate::accounts::Psp;
@@ -29,6 +29,7 @@ use crate::money::Currency;
 use crate::psp::{Outgoing, PspClient, ReadError, SendError};
 use crate::requests::RequestKind;
 use crate::retries::{self, RetryBudget};
+use crate::times::{from_unix_micros, unix_micros};
 
 /// How long a request may wait for its acknowledgement, from its first attempt in this
 /// process, before a step's report flags it for an operator (ADR-0032, ADR-0042).
@@ -59,9 +60,9 @@ struct Pending {
     /// which needs neither a token nor a lookup.
     retry: u32,
     /// When the next attempt is due.
-    due: DateTime<Utc>,
+    due: OffsetDateTime,
     /// When this process first tried it, for the flag.
-    first_tried: Option<DateTime<Utc>>,
+    first_tried: Option<OffsetDateTime>,
 }
 
 /// The PSP's answer to a send, as `payment_request_answers` stores it (ADR-0037).
@@ -150,7 +151,7 @@ impl Sender {
     /// The sender of the PSP that `client` reads, with the budget of ADR-0042, full at
     /// `now`.
     #[must_use]
-    pub fn new(client: PspClient, now: DateTime<Utc>) -> Self {
+    pub fn new(client: PspClient, now: OffsetDateTime) -> Self {
         Self::with_budget(client, RetryBudget::standard(now))
     }
 
@@ -185,13 +186,13 @@ impl Sender {
     pub async fn send_due(
         &mut self,
         pool: &PgPool,
-        now: DateTime<Utc>,
+        now: OffsetDateTime,
         random: &mut impl FnMut() -> u64,
     ) -> Result<Report, SearchError> {
         let waiting = search(pool, self.client.psp()).await?;
         let mut report = Report::default();
         self.take_in(waiting, now, random, &mut report);
-        let mut due: Vec<(DateTime<Utc>, Uuid)> = self
+        let mut due: Vec<(OffsetDateTime, Uuid)> = self
             .pending
             .iter()
             .filter(|(_, pending)| pending.due <= now)
@@ -221,7 +222,7 @@ impl Sender {
     /// # Errors
     ///
     /// [`SweepError`] when the payments that are due cannot be listed.
-    pub async fn sweep(&mut self, pool: &PgPool, now: DateTime<Utc>) -> Result<Swept, SweepError> {
+    pub async fn sweep(&mut self, pool: &PgPool, now: OffsetDateTime) -> Result<Swept, SweepError> {
         let swept = catch_up::sweep(pool, &self.client, now, &mut self.budget, self.place).await?;
         if let Some(&(last, _)) = swept.last() {
             self.place = Some(last);
@@ -237,7 +238,7 @@ impl Sender {
     fn take_in(
         &mut self,
         waiting: Vec<Waiting>,
-        now: DateTime<Utc>,
+        now: OffsetDateTime,
         random: &mut impl FnMut() -> u64,
         report: &mut Report,
     ) {
@@ -279,7 +280,7 @@ impl Sender {
         &mut self,
         pool: &PgPool,
         request: Uuid,
-        now: DateTime<Utc>,
+        now: OffsetDateTime,
         random: &mut impl FnMut() -> u64,
         report: &mut Report,
     ) -> Attempt {
@@ -370,7 +371,7 @@ impl Sender {
         request: Uuid,
         answer: Answer,
         attempt: Attempt,
-        now: DateTime<Utc>,
+        now: OffsetDateTime,
         random: &mut impl FnMut() -> u64,
     ) -> Attempt {
         let Some(&pending) = self.pending.get(&request) else {
@@ -393,7 +394,7 @@ impl Sender {
     fn later(
         &mut self,
         request: Uuid,
-        now: DateTime<Utc>,
+        now: OffsetDateTime,
         retry_after: Option<u32>,
         random: &mut impl FnMut() -> u64,
     ) {
@@ -497,19 +498,19 @@ fn asked_later(failed: &CatchUpError) -> Option<u32> {
 }
 
 /// `delay` after `now`.
-fn after(now: DateTime<Utc>, delay: Duration) -> DateTime<Utc> {
+fn after(now: OffsetDateTime, delay: Duration) -> OffsetDateTime {
     let micros = i64::try_from(delay.as_micros())
         .expect("a delay of at most u32 seconds is an i64 of microseconds");
-    now.timestamp_micros()
+    unix_micros(now)
         .checked_add(micros)
-        .and_then(DateTime::from_timestamp_micros)
+        .and_then(from_unix_micros)
         .expect("a time at most u32 seconds after now is in range")
 }
 
 /// How long since `first`, or nothing for a time after `now`.
-fn waited(first: DateTime<Utc>, now: DateTime<Utc>) -> Duration {
-    now.timestamp_micros()
-        .checked_sub(first.timestamp_micros())
+fn waited(first: OffsetDateTime, now: OffsetDateTime) -> Duration {
+    unix_micros(now)
+        .checked_sub(unix_micros(first))
         .and_then(|micros| u64::try_from(micros).ok())
         .map_or(Duration::ZERO, Duration::from_micros)
 }

@@ -4,7 +4,7 @@
 //! it (ADR-0022). The library never reads a clock for one. The type is always
 //! the one that sqlx encodes, because it comes through sqlx's own re-export.
 
-use sqlx::types::chrono::{DateTime, Utc};
+use sqlx::types::time::OffsetDateTime;
 
 /// The earliest time that RFC 3339 writes, 0000-01-01T00:00:00Z, in microseconds
 /// since the Unix epoch (ADR-0059).
@@ -16,77 +16,108 @@ const LATEST_MICROS: i64 = 253_402_300_799_999_999;
 /// A time that cannot be stored.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 #[error("{0} is outside the range of times that can be stored")]
-pub struct TimeOutOfRange(DateTime<Utc>);
+pub struct TimeOutOfRange(OffsetDateTime);
 
 /// A time exactly as PostgreSQL stores it, in the years 0000 to 9999 that RFC 3339
-/// writes: whole microseconds, with a leap second folded into the next second. It
-/// comes back from the database equal, so a retry compares equal, and holding one
-/// proves that the database accepts it (ADR-0022, ADR-0059).
+/// writes: whole microseconds, in UTC. It comes back from the database equal, so a
+/// retry compares equal, and holding one proves that the database accepts it
+/// (ADR-0022, ADR-0059).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct BusinessTime(DateTime<Utc>);
+pub struct BusinessTime(OffsetDateTime);
 
 impl BusinessTime {
     /// Converts `time` to what PostgreSQL would store: anything finer than a
-    /// microsecond is dropped, downwards in every era, and a leap second such
-    /// as `23:59:60.5` becomes `00:00:00.5` of the next day.
+    /// microsecond is dropped, downwards in every era, and its offset becomes UTC.
     ///
     /// # Errors
     ///
-    /// [`TimeOutOfRange`] for a time outside the years 0000 to 9999, a leap second
-    /// that folds past the last second of 9999 among them.
-    pub fn new(time: DateTime<Utc>) -> Result<Self, TimeOutOfRange> {
-        let micros = time.timestamp_micros();
-        DateTime::from_timestamp_micros(micros)
-            .filter(|_| (EARLIEST_MICROS..=LATEST_MICROS).contains(&micros))
+    /// [`TimeOutOfRange`] for a time outside the years 0000 to 9999 in UTC.
+    pub fn new(time: OffsetDateTime) -> Result<Self, TimeOutOfRange> {
+        Some(unix_micros(time))
+            .filter(|micros| (EARLIEST_MICROS..=LATEST_MICROS).contains(micros))
+            .and_then(from_unix_micros)
             .map(Self)
             .ok_or(TimeOutOfRange(time))
     }
 
     /// The time, to bind in SQL.
-    pub fn get(self) -> DateTime<Utc> {
+    pub fn get(self) -> OffsetDateTime {
         self.0
     }
 
     /// The time as the API writes it: RFC 3339 in UTC with `Z`, with the fractional digits
-    /// that it needs (ADR-0045).
+    /// that it needs (ADR-0045). Written here, because time's own RFC 3339 drops every
+    /// trailing zero, and stored answers hold this form (ADR-0059).
     #[must_use]
     pub fn written(self) -> String {
-        // `%.f` writes no digits for a whole second, and otherwise 3, 6 or 9, as many
-        // as it takes; a business time has 6 at most (ADR-0022).
-        self.0.format("%Y-%m-%dT%H:%M:%S%.fZ").to_string()
+        let time = self.0;
+        // No digits for a whole second, and otherwise 3 or 6, as many as it takes.
+        let micros = time.microsecond();
+        let fraction = match (micros, micros % 1_000) {
+            (0, _) => String::new(),
+            (_, 0) => format!(".{:03}", micros / 1_000),
+            _ => format!(".{micros:06}"),
+        };
+        format!(
+            "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}{fraction}Z",
+            time.year(),
+            u8::from(time.month()),
+            time.day(),
+            time.hour(),
+            time.minute(),
+            time.second()
+        )
     }
+}
+
+/// A time's whole microseconds since the Unix epoch, rounded down in every era.
+#[must_use]
+pub fn unix_micros(time: OffsetDateTime) -> i64 {
+    i64::try_from(time.unix_timestamp_nanos().div_euclid(1_000))
+        .expect("the years that time holds are an i64 of microseconds")
+}
+
+/// The time `micros` microseconds after the Unix epoch, in UTC, if time can hold it.
+#[must_use]
+pub fn from_unix_micros(micros: i64) -> Option<OffsetDateTime> {
+    i128::from(micros)
+        .checked_mul(1_000)
+        .and_then(|nanos| OffsetDateTime::from_unix_timestamp_nanos(nanos).ok())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use proptest::prelude::*;
-    use sqlx::types::chrono::NaiveDate;
+    use sqlx::types::time::{Date, UtcOffset};
+    use time::Month;
+    use time::format_description::well_known::Rfc3339;
 
-    fn time(text: &str) -> DateTime<Utc> {
-        text.parse().expect("a valid time")
+    fn time(text: &str) -> OffsetDateTime {
+        OffsetDateTime::parse(text, &Rfc3339).expect("a valid time")
     }
 
-    fn at(
-        year: i32,
-        month: u32,
-        day: u32,
-        (h, m, s, nanos): (u32, u32, u32, u32),
-    ) -> DateTime<Utc> {
-        NaiveDate::from_ymd_opt(year, month, day)
-            .and_then(|date| date.and_hms_nano_opt(h, m, s, nanos))
+    fn at(year: i32, month: u8, day: u8, (h, m, s, nanos): (u8, u8, u8, u32)) -> OffsetDateTime {
+        Month::try_from(month)
+            .and_then(|month| Date::from_calendar_date(year, month, day))
+            .and_then(|date| date.with_hms_nano(h, m, s, nanos))
             .expect("a valid time")
-            .and_utc()
+            .assume_utc()
     }
 
-    fn built(value: DateTime<Utc>) -> DateTime<Utc> {
+    /// `time` with its offset set `seconds` behind UTC, the same wall clock: a later instant.
+    fn behind(time: OffsetDateTime, seconds: i32) -> OffsetDateTime {
+        time.replace_offset(UtcOffset::from_whole_seconds(-seconds).expect("an offset"))
+    }
+
+    fn built(value: OffsetDateTime) -> OffsetDateTime {
         BusinessTime::new(value).expect("in range").get()
     }
 
     #[test]
     fn a_time_is_written_in_utc_with_the_digits_that_it_needs() {
         let written_at = |micros: i64| {
-            let time = DateTime::from_timestamp_micros(micros).expect("a time in range");
+            let time = from_unix_micros(micros).expect("a time in range");
             BusinessTime::new(time)
                 .expect("a time that PostgreSQL stores")
                 .written()
@@ -108,6 +139,17 @@ mod tests {
         assert_eq!(written_at(-1), "1969-12-31T23:59:59.999999Z");
         assert_eq!(written_at(-999_000), "1969-12-31T23:59:59.001Z");
         assert_eq!(written_at(1_896_321_906_000_000), "2030-02-03T04:05:06Z");
+    }
+
+    #[test]
+    fn a_time_in_another_offset_is_written_in_utc() {
+        let noon = at(2030, 1, 1, (12, 0, 0, 0));
+        assert_eq!(
+            BusinessTime::new(behind(noon, 3_600))
+                .expect("in range")
+                .written(),
+            "2030-01-01T13:00:00Z"
+        );
     }
 
     #[test]
@@ -135,38 +177,22 @@ mod tests {
     }
 
     #[test]
-    fn a_leap_second_is_folded_into_the_next_second() {
-        // As PostgreSQL does: left as it is, a retry would never compare equal.
-        for (given, expected) in [
-            ("2016-12-31T23:59:60Z", "2017-01-01T00:00:00Z"),
-            ("2016-12-31T23:59:60.5Z", "2017-01-01T00:00:00.5Z"),
-            (
-                "2016-12-31T23:59:60.123456789Z",
-                "2017-01-01T00:00:00.123456Z",
-            ),
-        ] {
-            assert_eq!(built(time(given)), time(expected), "{given}");
-        }
-    }
-
-    #[test]
     fn only_the_years_that_rfc_3339_writes_are_accepted() {
         let earliest = at(0, 1, 1, (0, 0, 0, 0));
-        assert_eq!(earliest.timestamp_micros(), EARLIEST_MICROS);
+        assert_eq!(unix_micros(earliest), EARLIEST_MICROS);
         assert_eq!(built(earliest), earliest);
         let latest = at(9999, 12, 31, (23, 59, 59, 999_999_000));
-        assert_eq!(latest.timestamp_micros(), LATEST_MICROS);
+        assert_eq!(unix_micros(latest), LATEST_MICROS);
         assert_eq!(built(latest), latest);
         assert_eq!(built(at(9999, 12, 31, (23, 59, 59, 999_999_999))), latest);
-        // A microsecond early, a nanosecond early, chrono's earliest, a microsecond
-        // late, chrono's latest, and a leap second that folds beyond the latest.
+        // A microsecond early, a nanosecond early, time's earliest, and two that an
+        // offset takes past 9999 in UTC, the first a microsecond late.
         for out_of_range in [
             at(-1, 12, 31, (23, 59, 59, 999_999_000)),
             at(-1, 12, 31, (23, 59, 59, 999_999_999)),
-            DateTime::<Utc>::MIN_UTC,
-            at(10_000, 1, 1, (0, 0, 0, 0)),
-            DateTime::<Utc>::MAX_UTC,
-            at(9999, 12, 31, (23, 59, 59, 1_500_000_000)),
+            at(-9999, 1, 1, (0, 0, 0, 0)),
+            behind(at(9999, 12, 31, (23, 59, 59, 0)), 1),
+            behind(at(9999, 12, 31, (23, 0, 0, 0)), 3_600),
         ] {
             assert_eq!(
                 BusinessTime::new(out_of_range),
@@ -181,18 +207,19 @@ mod tests {
         let early = at(-4713, 11, 23, (0, 0, 0, 0));
         assert_eq!(
             TimeOutOfRange(early).to_string(),
-            "-4713-11-23 00:00:00 UTC is outside the range of times that can be stored"
+            "-4713-11-23 0:00:00.0 +00:00:00 is outside the range of times that can be stored"
         );
     }
 
-    /// Times from the year -9999 to 9999, about half of which can be built, with a leap
-    /// second among the fractions: nanoseconds from 1e9 are valid only in a second that
-    /// could be the 59th.
-    fn times() -> impl Strategy<Value = DateTime<Utc>> {
-        let seconds = at(-9999, 1, 1, (0, 0, 0, 0)).timestamp()
-            ..=at(9999, 12, 31, (23, 59, 59, 0)).timestamp();
-        (seconds, 0_u32..2_000_000_000).prop_filter_map("a valid time", |(seconds, nanos)| {
-            DateTime::from_timestamp(seconds, nanos)
+    /// Times from the year -9999 to 9999, the range that time holds, about half of which
+    /// can be built.
+    fn times() -> impl Strategy<Value = OffsetDateTime> {
+        let seconds = at(-9999, 1, 1, (0, 0, 0, 0)).unix_timestamp()
+            ..=at(9999, 12, 31, (23, 59, 59, 0)).unix_timestamp();
+        (seconds, 0_u32..1_000_000_000).prop_filter_map("a valid time", |(seconds, nanos)| {
+            OffsetDateTime::from_unix_timestamp(seconds)
+                .and_then(|time| time.replace_nanosecond(nanos))
+                .ok()
         })
     }
 
@@ -200,18 +227,15 @@ mod tests {
         #[test]
         fn a_built_time_is_whole_microseconds_and_stays_as_it_is(value in times()) {
             if let Ok(first) = BusinessTime::new(value) {
-                let nanos = first.get().timestamp_subsec_nanos();
-                prop_assert_eq!(nanos % 1_000, 0);
-                prop_assert!(nanos < 1_000_000_000, "a leap second survived: {:?}", first);
+                prop_assert_eq!(first.get().nanosecond() % 1_000, 0);
                 prop_assert_eq!(BusinessTime::new(first.get()), Ok(first));
             }
         }
 
         #[test]
         fn a_time_is_accepted_exactly_within_the_years_0000_to_9999(value in times()) {
-            prop_assume!(value.timestamp_subsec_nanos() < 1_000_000_000);
-            let in_range = value >= at(0, 1, 1, (0, 0, 0, 0)) && value < at(10_000, 1, 1, (0, 0, 0, 0));
-            prop_assert_eq!(BusinessTime::new(value).is_ok(), in_range, "{:?}", value);
+            let range = at(0, 1, 1, (0, 0, 0, 0))..=at(9999, 12, 31, (23, 59, 59, 999_999_999));
+            prop_assert_eq!(BusinessTime::new(value).is_ok(), range.contains(&value), "{:?}", value);
         }
     }
 }

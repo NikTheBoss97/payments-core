@@ -27,7 +27,8 @@ use payments_core::sender::Sender;
 use payments_core::tenancy::Tenant;
 use serde_json::Value;
 use sqlx::PgPool;
-use sqlx::types::chrono::{DateTime, Utc};
+use sqlx::types::time::OffsetDateTime;
+use time::format_description::well_known::Rfc3339;
 use uuid::Uuid;
 
 type TestResult = Result<(), Box<dyn Error>>;
@@ -48,12 +49,10 @@ fn read(payment: impl Display, request: impl Display, secret: &ApiKeySecret) -> 
 }
 
 /// A time that the API wrote, which must be RFC 3339 in UTC with `Z`.
-fn time_in(value: &Value) -> DateTime<Utc> {
+fn time_in(value: &Value) -> OffsetDateTime {
     let text = value.as_str().expect("a time is a string");
     assert!(text.ends_with('Z'), "{text}");
-    DateTime::parse_from_rfc3339(text)
-        .expect("an RFC 3339 time")
-        .with_timezone(&Utc)
+    OffsetDateTime::parse(text, &Rfc3339).expect("an RFC 3339 time")
 }
 
 /// A merchant with its key, the server's two pools, and a fake PSP with the sender that the
