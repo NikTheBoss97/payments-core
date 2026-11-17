@@ -11,7 +11,7 @@ use axum::extract::State;
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
-use chrono::Utc;
+use time::OffsetDateTime;
 
 use crate::{Answer, Shared};
 
@@ -25,7 +25,7 @@ pub(crate) fn router(shared: Arc<Shared>) -> Router {
 /// that hangs up, which drops this future, undoes nothing that the fake did.
 async fn deliver(State(shared): State<Arc<Shared>>, headers: HeaderMap, body: Bytes) -> Response {
     let _answering = shared.answering();
-    match shared.receive(&headers, body, Utc::now()) {
+    match shared.receive(&headers, body, OffsetDateTime::now_utc()) {
         Answer::Status(status) => status.into_response(),
         Answer::RetryAfter { status, seconds } => {
             (status, [(header::RETRY_AFTER, HeaderValue::from(seconds))]).into_response()

@@ -12,9 +12,9 @@ use std::fmt;
 use axum::http::HeaderMap;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
-use chrono::{DateTime, Utc};
 use hmac::{Hmac, KeyInit, Mac};
 use sha2::Sha256;
+use time::OffsetDateTime;
 
 /// How a secret is written: the specification's prefix, then base64.
 const PREFIX: &str = "whsec_";
@@ -97,7 +97,7 @@ pub fn verify(
     headers: &HeaderMap,
     body: &[u8],
     secrets: &[Secret],
-    now: DateTime<Utc>,
+    now: OffsetDateTime,
 ) -> Result<(), Refusal> {
     let id = one(headers, ID).ok_or(Refusal::Header(ID))?;
     let timestamp = one(headers, TIMESTAMP).ok_or(Refusal::Header(TIMESTAMP))?;
@@ -106,7 +106,7 @@ pub fn verify(
         return Err(Refusal::Id);
     }
     let seconds = seconds(timestamp).ok_or(Refusal::Timestamp)?;
-    let now = now.timestamp();
+    let now = now.unix_timestamp();
     if !(now - TOLERANCE_SECONDS..=now + TOLERANCE_SECONDS).contains(&seconds) {
         return Err(Refusal::Window);
     }
@@ -173,8 +173,8 @@ mod tests {
     /// The vector's time, as the fake's clock.
     const VECTOR_NOW: i64 = 1_649_367_553;
 
-    fn at(seconds: i64) -> DateTime<Utc> {
-        DateTime::from_timestamp(seconds, 0).expect("a time in range")
+    fn at(seconds: i64) -> OffsetDateTime {
+        OffsetDateTime::from_unix_timestamp(seconds).expect("a time in range")
     }
 
     fn vector() -> Vec<Secret> {

@@ -15,7 +15,6 @@ use axum::body::Bytes;
 use axum::http::{HeaderMap, Request, StatusCode};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
-use chrono::{DateTime, NaiveDate, Utc};
 use hmac::{Hmac, KeyInit, Mac};
 use http_body_util::{BodyExt, Full};
 use hyper_util::client::legacy::connect::HttpConnector;
@@ -23,6 +22,7 @@ use hyper_util::client::legacy::{Client, Error};
 use hyper_util::rt::TokioExecutor;
 use mock_merchant::MockMerchant;
 use sha2::Sha256;
+use time::{Date, Month, OffsetDateTime};
 use uuid::Uuid;
 
 /// The legacy client of ADR-0036, with its one retry switched off, as the relay's will be.
@@ -61,11 +61,11 @@ pub fn payment(n: u128) -> Uuid {
 pub const EVENT_TIME: &str = "2026-11-16T10:20:30.123456Z";
 
 /// [`EVENT_TIME`], built apart from any parsing.
-pub fn event_time() -> DateTime<Utc> {
-    NaiveDate::from_ymd_opt(2026, 11, 16)
-        .and_then(|day| day.and_hms_micro_opt(10, 20, 30, 123_456))
+pub fn event_time() -> OffsetDateTime {
+    Date::from_calendar_date(2026, Month::November, 16)
+        .and_then(|day| day.with_hms_micro(10, 20, 30, 123_456))
         .expect("a valid time")
-        .and_utc()
+        .assume_utc()
 }
 
 /// What the relay sends for one event, before it is signed.
@@ -86,7 +86,7 @@ impl Delivery {
         });
         Self {
             id: id.to_owned(),
-            timestamp: Utc::now().timestamp().to_string(),
+            timestamp: OffsetDateTime::now_utc().unix_timestamp().to_string(),
             body: serde_json::to_vec(&body).expect("JSON"),
         }
     }

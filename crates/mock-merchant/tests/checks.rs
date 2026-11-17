@@ -6,10 +6,10 @@
 mod common;
 
 use axum::http::StatusCode;
-use chrono::Utc;
 use common::{Delivery, deliver, merchant, new_secret, payment, post, sender};
 use mock_merchant::signature::{Refusal, Secret, SecretError};
 use mock_merchant::{Answer, Config, MockMerchant, Verdict};
+use time::OffsetDateTime;
 
 const OK: Answer = Answer::Status(StatusCode::OK);
 
@@ -20,7 +20,7 @@ async fn a_delivery_that_fails_a_check_is_answered_400_and_never_taken() {
     let mut changed_body = delivery.body.clone();
     changed_body.push(b' ');
     let stale = Delivery {
-        timestamp: (Utc::now().timestamp() - 600).to_string(),
+        timestamp: (OffsetDateTime::now_utc().unix_timestamp() - 600).to_string(),
         ..delivery.clone()
     };
     let mut unsigned = delivery.headers(&secret);
