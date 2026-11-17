@@ -982,12 +982,15 @@ mod tests {
                                 "captured_at": time});
             assert_eq!(detail_of(fields), Err(Unplaced::Amount(minor)));
         }
-        // Every year that RFC 3339 can write can be stored, so only the form refuses one.
+        // Every time that RFC 3339 writes in UTC can be stored, so the form refuses these,
+        // and the range refuses only a time whose offset takes it past the year 0000 or 9999.
         for text in [
             "yesterday",
             "2026-01-01 00:00:00",
             "2026-01-01T00:00:00",
             "2026-13-01T00:00:00Z",
+            "0000-01-01T00:59:59+01:00",
+            "9999-12-31T23:00:00-01:00",
         ] {
             let fields = json!({"kind": "authorized", "request_id": request, "amount": 1,
                                 "expires_at": text});

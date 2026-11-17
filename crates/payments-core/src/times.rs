@@ -6,20 +6,22 @@
 
 use sqlx::types::chrono::{DateTime, Utc};
 
-/// The earliest time that a `timestamptz` holds, 4714-11-24 BC at midnight UTC,
-/// in microseconds since the Unix epoch. PostgreSQL's latest time is beyond
-/// chrono's, so only this end needs a check.
-const EARLIEST_MICROS: i64 = -210_866_803_200_000_000;
+/// The earliest time that RFC 3339 writes, 0000-01-01T00:00:00Z, in microseconds
+/// since the Unix epoch (ADR-0059).
+const EARLIEST_MICROS: i64 = -62_167_219_200_000_000;
+
+/// The latest, 9999-12-31T23:59:59.999999Z.
+const LATEST_MICROS: i64 = 253_402_300_799_999_999;
 
 /// A time that cannot be stored.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 #[error("{0} is outside the range of times that can be stored")]
 pub struct TimeOutOfRange(DateTime<Utc>);
 
-/// A time exactly as PostgreSQL stores it: whole microseconds, with a leap second
-/// folded into the next second. It comes back from the database equal, so a
-/// retry compares equal, and holding one proves that the database accepts it
-/// (ADR-0022).
+/// A time exactly as PostgreSQL stores it, in the years 0000 to 9999 that RFC 3339
+/// writes: whole microseconds, with a leap second folded into the next second. It
+/// comes back from the database equal, so a retry compares equal, and holding one
+/// proves that the database accepts it (ADR-0022, ADR-0059).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BusinessTime(DateTime<Utc>);
 
@@ -30,12 +32,12 @@ impl BusinessTime {
     ///
     /// # Errors
     ///
-    /// [`TimeOutOfRange`] for a time before 4714-11-24 BC, or a leap second in
-    /// the last second that chrono can represent.
+    /// [`TimeOutOfRange`] for a time outside the years 0000 to 9999, a leap second
+    /// that folds past the last second of 9999 among them.
     pub fn new(time: DateTime<Utc>) -> Result<Self, TimeOutOfRange> {
         let micros = time.timestamp_micros();
         DateTime::from_timestamp_micros(micros)
-            .filter(|_| micros >= EARLIEST_MICROS)
+            .filter(|_| (EARLIEST_MICROS..=LATEST_MICROS).contains(&micros))
             .map(Self)
             .ok_or(TimeOutOfRange(time))
     }
@@ -99,6 +101,13 @@ mod tests {
             written_at(1_893_456_000_000_001),
             "2030-01-01T00:00:00.000001Z"
         );
+        // The first and the last time that can be built, two before 1970, and a date
+        // and a time of one digit each.
+        assert_eq!(written_at(EARLIEST_MICROS), "0000-01-01T00:00:00Z");
+        assert_eq!(written_at(LATEST_MICROS), "9999-12-31T23:59:59.999999Z");
+        assert_eq!(written_at(-1), "1969-12-31T23:59:59.999999Z");
+        assert_eq!(written_at(-999_000), "1969-12-31T23:59:59.001Z");
+        assert_eq!(written_at(1_896_321_906_000_000), "2030-02-03T04:05:06Z");
     }
 
     #[test]
@@ -141,24 +150,28 @@ mod tests {
     }
 
     #[test]
-    fn only_times_that_can_be_stored_are_accepted() {
-        let earliest = at(-4713, 11, 24, (0, 0, 0, 0));
+    fn only_the_years_that_rfc_3339_writes_are_accepted() {
+        let earliest = at(0, 1, 1, (0, 0, 0, 0));
         assert_eq!(earliest.timestamp_micros(), EARLIEST_MICROS);
         assert_eq!(built(earliest), earliest);
-        let last = DateTime::<Utc>::MAX_UTC;
-        assert_eq!(built(last).timestamp_micros(), last.timestamp_micros());
-        // A microsecond early, a nanosecond early, chrono's earliest, and a leap
-        // second that folds beyond chrono's latest.
-        for too_early in [
-            at(-4713, 11, 23, (23, 59, 59, 999_999_000)),
-            at(-4713, 11, 23, (23, 59, 59, 999_999_999)),
+        let latest = at(9999, 12, 31, (23, 59, 59, 999_999_000));
+        assert_eq!(latest.timestamp_micros(), LATEST_MICROS);
+        assert_eq!(built(latest), latest);
+        assert_eq!(built(at(9999, 12, 31, (23, 59, 59, 999_999_999))), latest);
+        // A microsecond early, a nanosecond early, chrono's earliest, a microsecond
+        // late, chrono's latest, and a leap second that folds beyond the latest.
+        for out_of_range in [
+            at(-1, 12, 31, (23, 59, 59, 999_999_000)),
+            at(-1, 12, 31, (23, 59, 59, 999_999_999)),
             DateTime::<Utc>::MIN_UTC,
-            at(262_142, 12, 31, (23, 59, 59, 1_500_000_000)),
+            at(10_000, 1, 1, (0, 0, 0, 0)),
+            DateTime::<Utc>::MAX_UTC,
+            at(9999, 12, 31, (23, 59, 59, 1_500_000_000)),
         ] {
             assert_eq!(
-                BusinessTime::new(too_early),
-                Err(TimeOutOfRange(too_early)),
-                "{too_early:?}"
+                BusinessTime::new(out_of_range),
+                Err(TimeOutOfRange(out_of_range)),
+                "{out_of_range:?}"
             );
         }
     }
@@ -172,10 +185,12 @@ mod tests {
         );
     }
 
-    /// Any time chrono holds, with a leap second among the fractions: nanoseconds
-    /// from 1e9 are valid only in a second that could be the 59th.
+    /// Times from the year -9999 to 9999, about half of which can be built, with a leap
+    /// second among the fractions: nanoseconds from 1e9 are valid only in a second that
+    /// could be the 59th.
     fn times() -> impl Strategy<Value = DateTime<Utc>> {
-        let seconds = DateTime::<Utc>::MIN_UTC.timestamp()..=DateTime::<Utc>::MAX_UTC.timestamp();
+        let seconds = at(-9999, 1, 1, (0, 0, 0, 0)).timestamp()
+            ..=at(9999, 12, 31, (23, 59, 59, 0)).timestamp();
         (seconds, 0_u32..2_000_000_000).prop_filter_map("a valid time", |(seconds, nanos)| {
             DateTime::from_timestamp(seconds, nanos)
         })
@@ -193,9 +208,9 @@ mod tests {
         }
 
         #[test]
-        fn a_time_is_rejected_exactly_below_the_earliest(value in times()) {
+        fn a_time_is_accepted_exactly_within_the_years_0000_to_9999(value in times()) {
             prop_assume!(value.timestamp_subsec_nanos() < 1_000_000_000);
-            let in_range = value.timestamp_micros() >= EARLIEST_MICROS;
+            let in_range = value >= at(0, 1, 1, (0, 0, 0, 0)) && value < at(10_000, 1, 1, (0, 0, 0, 0));
             prop_assert_eq!(BusinessTime::new(value).is_ok(), in_range, "{:?}", value);
         }
     }
