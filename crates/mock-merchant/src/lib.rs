@@ -27,7 +27,7 @@ use std::time::Duration;
 
 use axum::body::Bytes;
 use axum::http::{HeaderMap, StatusCode};
-use chrono::{DateTime, Utc};
+use time::OffsetDateTime;
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
@@ -117,7 +117,7 @@ impl Verdict {
 #[derive(Debug, Clone)]
 pub struct Arrival {
     /// When it arrived, by the fake's clock.
-    pub at: DateTime<Utc>,
+    pub at: OffsetDateTime,
     /// The `webhook-id` as it came, if it came once in visible ASCII.
     pub id: Option<String>,
     /// The `webhook-timestamp` as it came, if it came once in visible ASCII.
@@ -187,7 +187,7 @@ impl Shared {
 
     /// Judges one delivery and records it, and returns the answer to send. It all happens
     /// here, before the route awaits anything, so a client that hangs up cannot undo it.
-    pub(crate) fn receive(&self, headers: &HeaderMap, body: Bytes, at: DateTime<Utc>) -> Answer {
+    pub(crate) fn receive(&self, headers: &HeaderMap, body: Bytes, at: OffsetDateTime) -> Answer {
         let id = signature::one(headers, signature::ID).map(str::to_owned);
         let timestamp = signature::one(headers, signature::TIMESTAMP).map(str::to_owned);
         let mut state = self.state();

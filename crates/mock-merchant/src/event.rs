@@ -3,8 +3,8 @@
 //! What a delivery's body holds: one thin event (ADR-0049), read strictly, so that a body
 //! of any other shape fails a test (ADR-0056).
 
-use chrono::{DateTime, Utc};
 use serde::{Deserialize, Deserializer};
+use time::OffsetDateTime;
 use uuid::Uuid;
 
 /// One event, as the server sends it.
@@ -14,7 +14,8 @@ pub struct Event {
     #[serde(rename = "type")]
     pub kind: Kind,
     /// When the event was recorded: its `recorded_at`.
-    pub timestamp: DateTime<Utc>,
+    #[serde(with = "time::serde::rfc3339")]
+    pub timestamp: OffsetDateTime,
     pub data: Data,
 }
 
@@ -53,18 +54,18 @@ impl Event {
 
 #[cfg(test)]
 mod tests {
-    use chrono::NaiveDate;
+    use time::{Date, Month};
 
     use super::*;
 
     const PAYMENT: Uuid = Uuid::from_u128(0x0196_f6a0_0000_7000_8000_0000_0000_0001);
     const REQUEST: Uuid = Uuid::from_u128(0x0196_f6a0_0000_7000_8000_0000_0000_0002);
 
-    fn utc(hour: u32, minute: u32, second: u32, micro: u32) -> DateTime<Utc> {
-        NaiveDate::from_ymd_opt(2026, 11, 16)
-            .and_then(|day| day.and_hms_micro_opt(hour, minute, second, micro))
+    fn utc(hour: u8, minute: u8, second: u8, micro: u32) -> OffsetDateTime {
+        Date::from_calendar_date(2026, Month::November, 16)
+            .and_then(|day| day.with_hms_micro(hour, minute, second, micro))
             .expect("a valid time")
-            .and_utc()
+            .assume_utc()
     }
 
     #[test]
