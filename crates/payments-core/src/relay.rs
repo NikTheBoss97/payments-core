@@ -10,6 +10,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ops::Bound;
+use std::time::Duration;
 
 use sqlx::types::time::OffsetDateTime;
 use uuid::Uuid;
@@ -19,6 +20,10 @@ use crate::retries::{self, RetryBudget};
 
 /// At most this many attempts at once to one endpoint (ADR-0053).
 pub const AT_ONCE: usize = 4;
+
+/// How long a delivery may go without a success, from its first failed attempt, before
+/// the relay disables its endpoint: three days (ADR-0053).
+pub const FAILING_AFTER: Duration = Duration::from_secs(259_200);
 
 /// What one attempt to deliver got.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -85,6 +90,15 @@ pub enum Effect {
 pub enum Reason {
     /// It answered `410`.
     Gone,
+    /// One of its deliveries has gone [`FAILING_AFTER`] without a success.
+    Failing,
+}
+
+/// What a step asks of the server: the endpoints to disable, then the attempts to start.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Step {
+    pub effects: Vec<Effect>,
+    pub attempts: Vec<Delivery>,
 }
 
 /// A search begun, which can have seen every delivery that the relay learned of before
@@ -122,6 +136,8 @@ struct Known {
     retry: u32,
     /// When the next attempt is due.
     due: OffsetDateTime,
+    /// When an attempt of it first failed in this process, for the three days.
+    first_failure: Option<OffsetDateTime>,
     /// How many searches had begun when the relay learned of it: those can miss it.
     learned: u64,
 }
@@ -195,11 +211,33 @@ impl Relay {
             .retain(|id, known| seen.contains(id) || known.learned > search.number);
     }
 
-    /// The attempts to start at `now` (ADR-0053): every first attempt that is due, then the
-    /// retries that are due, one per endpoint per round, each for a token, in the order of
-    /// the endpoints' IDs from after the one served last, until the tokens or the retries
-    /// run out. An endpoint with [`AT_ONCE`] attempts in flight gets none.
-    pub fn step(&mut self, now: OffsetDateTime) -> Vec<Delivery> {
+    /// One step at `now` (ADR-0053): the endpoints to disable, each one with a delivery
+    /// that has gone [`FAILING_AFTER`] without a success, then the attempts to start: every
+    /// first attempt that is due, then the retries that are due, one per endpoint per
+    /// round, each for a token, in the order of the endpoints' IDs from after the one
+    /// served last, until the tokens or the retries run out. An endpoint with [`AT_ONCE`]
+    /// attempts in flight gets none.
+    pub fn step(&mut self, now: OffsetDateTime) -> Step {
+        let failing: Vec<EndpointId> = self
+            .known
+            .values()
+            .filter(|known| {
+                known
+                    .first_failure
+                    .is_some_and(|first| retries::waited(first, now) >= FAILING_AFTER)
+            })
+            .map(|known| known.delivery.endpoint)
+            .collect();
+        let effects = failing
+            .into_iter()
+            .filter_map(|endpoint| self.disable(endpoint, Reason::Failing))
+            .collect();
+        let attempts = self.attempts(now);
+        Step { effects, attempts }
+    }
+
+    /// The attempts to start at `now`.
+    fn attempts(&mut self, now: OffsetDateTime) -> Vec<Delivery> {
         let mut started = Vec::new();
         let firsts: Vec<Delivery> = self
             .known
@@ -275,6 +313,7 @@ impl Relay {
                         .checked_add(1)
                         .expect("fewer than 2^32 retries of a delivery");
                     known.due = retries::after(now, retries::delay(known.retry, at_least, draw));
+                    known.first_failure.get_or_insert(now);
                 }
                 None
             }
@@ -291,6 +330,7 @@ impl Relay {
             delivery,
             retry,
             due,
+            first_failure: None,
             learned,
         });
     }
@@ -454,7 +494,7 @@ mod tests {
     /// Hands `deliveries` over at `now`, and checks that a step starts them at once.
     fn started(relay: &mut Relay, deliveries: &[Delivery], now: OffsetDateTime) {
         relay.hand_over(deliveries.iter().copied(), now);
-        assert_eq!(relay.step(now), deliveries);
+        assert_eq!(relay.step(now).attempts, deliveries);
     }
 
     /// Starts `deliveries` at [`START`] and fails each with the draw 0, so that each is a
@@ -471,9 +511,9 @@ mod tests {
         let mut relay = broke();
         let first = delivery(1, 1);
         relay.hand_over([first], at(0));
-        assert_eq!(relay.step(at(0)), [first]);
+        assert_eq!(relay.step(at(0)).attempts, [first]);
         // Once: it is in flight.
-        assert_eq!(relay.step(at(0)), []);
+        assert_eq!(relay.step(at(0)).attempts, []);
     }
 
     #[test]
@@ -483,13 +523,13 @@ mod tests {
         let mut relay = holding(1);
         let search = relay.begin_search();
         relay.searched(search, [found], at(0), &mut || 1_500);
-        assert_eq!(relay.step(at(1_499)), []);
-        assert_eq!(relay.step(at(1_500)), [found]);
+        assert_eq!(relay.step(at(1_499)).attempts, []);
+        assert_eq!(relay.step(at(1_500)).attempts, [found]);
         // Without a token, it waits.
         let mut relay = broke();
         let search = relay.begin_search();
         relay.searched(search, [found], at(0), &mut || 1_500);
-        assert_eq!(relay.step(at(60_000)), []);
+        assert_eq!(relay.step(at(60_000)).attempts, []);
     }
 
     #[test]
@@ -499,14 +539,14 @@ mod tests {
         started(&mut relay, &[late], at(0));
         // The first retry's delay is drawn within [0, 2 s], the second's within [0, 4 s].
         assert_eq!(relay.answered(late.id, FAILED, at(10), 1_500), None);
-        assert_eq!(relay.step(at(1_509)), []);
-        assert_eq!(relay.step(at(1_510)), [late]);
+        assert_eq!(relay.step(at(1_509)).attempts, []);
+        assert_eq!(relay.step(at(1_510)).attempts, [late]);
         assert_eq!(
             relay.answered(late.id, Answer::NoAnswer, at(2_000), 3_000),
             None
         );
-        assert_eq!(relay.step(at(4_999)), []);
-        assert_eq!(relay.step(at(5_000)), [late]);
+        assert_eq!(relay.step(at(4_999)).attempts, []);
+        assert_eq!(relay.step(at(5_000)).attempts, [late]);
     }
 
     #[test]
@@ -519,8 +559,8 @@ mod tests {
             retry_after: Some(120),
         };
         assert_eq!(relay.answered(slowed.id, asked, at(0), 0), None);
-        assert_eq!(relay.step(at(119_999)), []);
-        assert_eq!(relay.step(at(120_000)), [slowed]);
+        assert_eq!(relay.step(at(119_999)).attempts, []);
+        assert_eq!(relay.step(at(120_000)).attempts, [slowed]);
     }
 
     #[test]
@@ -528,9 +568,9 @@ mod tests {
         let mut relay = holding(1);
         let (first, second) = (delivery(1, 1), delivery(2, 2));
         failing(&mut relay, &[first, second]);
-        assert_eq!(relay.step(at(0)), [first]);
-        assert_eq!(relay.step(at(999)), []);
-        assert_eq!(relay.step(at(1_000)), [second]);
+        assert_eq!(relay.step(at(0)).attempts, [first]);
+        assert_eq!(relay.step(at(999)).attempts, []);
+        assert_eq!(relay.step(at(1_000)).attempts, [second]);
     }
 
     #[test]
@@ -542,16 +582,19 @@ mod tests {
         let all = [dead[0], dead[1], dead[2], other];
         let mut relay = holding(1);
         failing(&mut relay, &all);
-        assert_eq!(relay.step(at(0)), [dead[0]]);
-        assert_eq!(relay.step(at(1_000)), [other]);
-        assert_eq!(relay.step(at(2_000)), [dead[1]]);
+        assert_eq!(relay.step(at(0)).attempts, [dead[0]]);
+        assert_eq!(relay.step(at(1_000)).attempts, [other]);
+        assert_eq!(relay.step(at(2_000)).attempts, [dead[1]]);
         // A round gives each endpoint one retry, and rounds go on while tokens last.
         let mut relay = holding(2);
         failing(&mut relay, &all);
-        assert_eq!(relay.step(at(0)), [dead[0], other]);
+        assert_eq!(relay.step(at(0)).attempts, [dead[0], other]);
         let mut relay = holding(4);
         failing(&mut relay, &all);
-        assert_eq!(relay.step(at(0)), [dead[0], other, dead[1], dead[2]]);
+        assert_eq!(
+            relay.step(at(0)).attempts,
+            [dead[0], other, dead[1], dead[2]]
+        );
     }
 
     #[test]
@@ -561,15 +604,15 @@ mod tests {
         let other = delivery(2, 6);
         relay.hand_over(busy.into_iter().chain([other]), at(0));
         assert_eq!(
-            relay.step(at(0)),
+            relay.step(at(0)).attempts,
             [busy[0], busy[1], busy[2], busy[3], other]
         );
-        assert_eq!(relay.step(at(0)), []);
+        assert_eq!(relay.step(at(0)).attempts, []);
         assert_eq!(
             relay.answered(busy[0].id, OK, at(0), 0),
             Some(Effect::Record(busy[0].id))
         );
-        assert_eq!(relay.step(at(0)), [busy[4]]);
+        assert_eq!(relay.step(at(0)).attempts, [busy[4]]);
     }
 
     #[test]
@@ -577,17 +620,17 @@ mod tests {
         let mut relay = plenty();
         let gone = [1, 2, 3, 4, 5].map(|n| delivery(1, n));
         relay.hand_over(gone, at(0));
-        assert_eq!(relay.step(at(0)), gone[..4]);
+        assert_eq!(relay.step(at(0)).attempts, gone[..4]);
         assert_eq!(
             relay.answered(gone[0].id, GONE, at(0), 0),
             Some(Effect::Disable(endpoint(1), Reason::Gone))
         );
         // The fifth is finished, and so is any other that arrives for the endpoint.
-        assert_eq!(relay.step(at(0)), []);
+        assert_eq!(relay.step(at(0)).attempts, []);
         relay.hand_over([delivery(1, 6)], at(0));
         let search = relay.begin_search();
         relay.searched(search, [gone[4], delivery(1, 7)], at(0), &mut || 0);
-        assert_eq!(relay.step(at(60_000)), []);
+        assert_eq!(relay.step(at(60_000)).attempts, []);
         // Of the answers still in flight, a 2xx is recorded, and nothing else does anything.
         assert_eq!(
             relay.answered(gone[1].id, OK, at(0), 0),
@@ -606,7 +649,7 @@ mod tests {
             relay.answered(done.id, OK, at(0), 0),
             Some(Effect::Record(done.id))
         );
-        assert_eq!(relay.step(at(60_000)), []);
+        assert_eq!(relay.step(at(60_000)).attempts, []);
         // An answer to no attempt in flight changes nothing.
         assert_eq!(relay.answered(done.id, OK, at(0), 0), None);
     }
@@ -618,7 +661,7 @@ mod tests {
         failing(&mut relay, &[finished, waiting]);
         let search = relay.begin_search();
         relay.searched(search, [waiting], at(0), &mut || 0);
-        assert_eq!(relay.step(at(0)), [waiting]);
+        assert_eq!(relay.step(at(0)).attempts, [waiting]);
     }
 
     #[test]
@@ -628,7 +671,108 @@ mod tests {
         let search = relay.begin_search();
         relay.hand_over([late], at(0));
         relay.searched(search, [], at(0), &mut || 0);
-        assert_eq!(relay.step(at(0)), [late]);
+        assert_eq!(relay.step(at(0)).attempts, [late]);
+    }
+
+    /// `micros` microseconds after `time`, or before it when negative.
+    fn moved(time: OffsetDateTime, micros: i64) -> OffsetDateTime {
+        crate::times::unix_micros(time)
+            .checked_add(micros)
+            .and_then(from_unix_micros)
+            .expect("a time near the start")
+    }
+
+    /// Three days, in milliseconds.
+    const THREE_DAYS: i64 = 259_200_000;
+
+    #[test]
+    fn one_delivery_refused_for_three_days_disables_its_endpoint() {
+        // The endpoint takes every other delivery, and always refuses this one.
+        let mut relay = plenty();
+        let refused = delivery(1, 1);
+        let taken = [delivery(1, 2), delivery(1, 3)];
+        failing(&mut relay, &[refused]);
+        for (n, &delivery) in taken.iter().enumerate() {
+            let when = at(i64::try_from(n)
+                .expect("two")
+                .checked_add(1)
+                .expect("small"));
+            relay.hand_over([delivery], when);
+        }
+        let step = relay.step(at(1_000));
+        assert_eq!(step.effects, []);
+        for attempt in step.attempts {
+            if attempt == refused {
+                assert_eq!(relay.answered(attempt.id, FAILED, at(1_000), 0), None);
+            } else {
+                assert_eq!(
+                    relay.answered(attempt.id, OK, at(1_000), 0),
+                    Some(Effect::Record(attempt.id))
+                );
+            }
+        }
+        // Counted from its first failed attempt, at the start: not a microsecond before.
+        let due = at(THREE_DAYS);
+        let before = relay.step(moved(due, -1));
+        assert_eq!(before.effects, []);
+        assert_eq!(before.attempts, [refused]);
+        let at_three_days = relay.step(due);
+        assert_eq!(
+            at_three_days.effects,
+            [Effect::Disable(endpoint(1), Reason::Failing)]
+        );
+        assert_eq!(at_three_days.attempts, []);
+        // Once: its deliveries leave with it, and none comes back.
+        relay.hand_over([delivery(1, 4)], due);
+        assert_eq!(
+            relay.step(due),
+            Step {
+                effects: vec![],
+                attempts: vec![]
+            }
+        );
+        // The attempt still in flight: a 2xx is still recorded.
+        assert_eq!(
+            relay.answered(refused.id, OK, due, 0),
+            Some(Effect::Record(refused.id))
+        );
+    }
+
+    #[test]
+    fn an_endpoint_that_refuses_everything_is_disabled_after_three_days() {
+        let mut relay = plenty();
+        let refused = [delivery(1, 1), delivery(1, 2)];
+        let elsewhere = delivery(2, 3);
+        failing(&mut relay, &[refused[0], refused[1], elsewhere]);
+        // An hour later the other endpoint's retry succeeds, and the first endpoint's fail.
+        let step = relay.step(at(3_600_000));
+        for attempt in step.attempts {
+            let answer = if attempt == elsewhere { OK } else { FAILED };
+            relay.answered(attempt.id, answer, at(3_600_000), 0);
+        }
+        let due = relay.step(at(THREE_DAYS));
+        assert_eq!(due.effects, [Effect::Disable(endpoint(1), Reason::Failing)]);
+        assert_eq!(due.attempts, []);
+    }
+
+    #[test]
+    fn a_relay_counts_from_its_own_first_failure() {
+        // After a restart the clock starts again: a delivery first refused 71 hours into
+        // the old relay's count, and found by the new relay's search, has three more days.
+        let refused = delivery(1, 1);
+        let mut relay = plenty();
+        let search = relay.begin_search();
+        let restart = at(255_600_000);
+        relay.searched(search, [refused], restart, &mut || 0);
+        assert_eq!(relay.step(restart).attempts, [refused]);
+        assert_eq!(relay.answered(refused.id, FAILED, restart, 0), None);
+        let old_due = relay.step(at(THREE_DAYS));
+        assert_eq!(old_due.effects, []);
+        let new_due = moved(restart, 259_200_000_000);
+        assert_eq!(
+            relay.step(new_due).effects,
+            [Effect::Disable(endpoint(1), Reason::Failing)]
+        );
     }
 
     /// One thing that happens around a relay, in a random run.
@@ -663,6 +807,8 @@ mod tests {
         prop_oneof![
             (1_u128..=3, any::<bool>()).prop_map(|(to, dropped)| Op::Commit { to, dropped }),
             (0_i64..3_000).prop_map(|after| Op::Step { after }),
+            // A day or more, so that the three days pass in a run.
+            (86_400_000_i64..90_000_000).prop_map(|after| Op::Step { after }),
             (any::<usize>(), answer, any::<u64>()).prop_map(|(which, answer, draw)| {
                 Op::Answered {
                     which,
@@ -706,7 +852,15 @@ mod tests {
                 }
                 Op::Step { after } => {
                     now = now.checked_add(after).expect("a short run");
-                    for attempt in relay.step(at(now)) {
+                    let step = relay.step(at(now));
+                    for effect in step.effects {
+                        let Effect::Disable(endpoint, Reason::Failing) = effect else {
+                            return Err(TestCaseError::fail(format!("{effect:?}")));
+                        };
+                        prop_assert!(disabled.insert(endpoint), "disabled twice: {endpoint:?}");
+                        unfinished.retain(|delivery| delivery.endpoint != endpoint);
+                    }
+                    for attempt in step.attempts {
                         prop_assert!(!disabled.contains(&attempt.endpoint), "{attempt:?}");
                         if tokens == 0 {
                             prop_assert!(!attempted.contains(&attempt.id), "a retry: {attempt:?}");
