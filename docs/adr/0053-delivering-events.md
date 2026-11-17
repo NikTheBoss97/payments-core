@@ -131,6 +131,15 @@ How the tokens are shared:
   merchant's endpoints, once, under the payment's lock, before its first new fact. The
   deliveries' IDs are made in Rust (ADR-0005), so reading the endpoints and writing the
   deliveries are two statements (ADR-0057).
+- 2026-11-17: "In turn" is one retry per endpoint per round: at each step the relay gives
+  each endpoint with a retry due one token, in the order of the endpoints' IDs from after
+  the one served last, wrapping round, and repeats the round until the tokens or the due
+  retries run out. A first attempt takes neither a token nor a turn. The semaphore of 4 is
+  the relay's own count of attempts in flight per endpoint, which an answer frees: an
+  attempt due at a full endpoint waits for a later step. "Waits at least that long" needs a
+  length, so a 429, 502 or 504 without `Retry-After` backs off like any other failure. The
+  deliveries of an endpoint that the relay disables leave its memory with it, and an
+  answer that arrives for one of them later is recorded only if it is a `2xx`.
 
 ## References
 
