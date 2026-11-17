@@ -101,11 +101,47 @@ pub struct Step {
     pub attempts: Vec<Delivery>,
 }
 
+/// A transaction's ID as `pg_current_xact_id()` gives it, an `xid8`, which never wraps
+/// around (ADR-0052).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct XactId(u64);
+
+impl XactId {
+    /// The ID that an `xid8` holds.
+    #[must_use]
+    pub const fn new(id: u64) -> Self {
+        Self(id)
+    }
+
+    /// The ID, to bind in SQL.
+    #[must_use]
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+}
+
+/// A delivery that a search found, not finished, with its event's transaction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Found {
+    pub delivery: Delivery,
+    pub xact: XactId,
+}
+
 /// A search begun, which can have seen every delivery that the relay learned of before
 /// it began (ADR-0052).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Search {
     number: u64,
+    from: XactId,
+}
+
+impl Search {
+    /// The mark when the search began: the server reads the deliveries not finished whose
+    /// event's transaction ID is at or above it (ADR-0052).
+    #[must_use]
+    pub fn from(self) -> XactId {
+        self.from
+    }
 }
 
 /// What the relay holds in memory: the deliveries it will attempt, the attempts in flight,
@@ -125,6 +161,8 @@ pub struct Relay {
     last_served: Option<Uuid>,
     /// How many searches have begun.
     searches: u64,
+    /// Below it, every transaction has ended and every delivery is finished (ADR-0052).
+    mark: XactId,
 }
 
 /// What the relay knows of one delivery.
@@ -159,6 +197,7 @@ impl Relay {
             disabled: HashSet::new(),
             last_served: None,
             searches: 0,
+            mark: XactId(0),
         }
     }
 
@@ -175,10 +214,13 @@ impl Relay {
         }
     }
 
-    /// Begins a search: the server reads the deliveries that are not finished after this.
+    /// Begins a search: after this the server reads the snapshot's `xmin` in a statement of
+    /// its own, then the deliveries that are not finished from [`Search::from`] up, in a
+    /// later one (ADR-0052).
     pub fn begin_search(&mut self) -> Search {
         let search = Search {
             number: self.searches,
+            from: self.mark,
         };
         self.searches = self
             .searches
@@ -187,20 +229,24 @@ impl Relay {
         search
     }
 
-    /// What `search` found: the deliveries that are not finished. One that the relay does
-    /// not know may have been attempted before a restart, so it is a retry, due after a
-    /// first retry's delay drawn with `random`, and it costs a token (ADR-0052). One that
-    /// the relay learned of before the search began, and that the search did not return,
-    /// is finished, and forgotten.
+    /// What `search` found, after the server read `xmin`: the deliveries that are not
+    /// finished. One that the relay does not know may have been attempted before a restart,
+    /// so it is a retry, due after a first retry's delay drawn with `random`, and it costs
+    /// a token. One that the relay learned of before the search began, and that the search
+    /// did not return, is finished, and forgotten. The mark then rises to the lower of
+    /// `xmin` and the smallest transaction ID found, and never falls (ADR-0052).
     pub fn searched(
         &mut self,
         search: Search,
-        found: impl IntoIterator<Item = Delivery>,
+        xmin: XactId,
+        found: impl IntoIterator<Item = Found>,
         now: OffsetDateTime,
         random: &mut impl FnMut() -> u64,
     ) {
+        let mut lowest = xmin;
         let mut seen = HashSet::new();
-        for delivery in found {
+        for Found { delivery, xact } in found {
+            lowest = lowest.min(xact);
             seen.insert(delivery.id.get());
             if !self.known.contains_key(&delivery.id.get()) {
                 let due = retries::after(now, retries::delay(1, None, random()));
@@ -209,6 +255,9 @@ impl Relay {
         }
         self.known
             .retain(|id, known| seen.contains(id) || known.learned > search.number);
+        // Every transaction below xmin had ended when the search's snapshot was taken, so
+        // below `lowest` every delivery that exists or will exist was finished.
+        self.mark = self.mark.max(lowest);
     }
 
     /// One step at `now` (ADR-0053): the endpoints to disable, each one with a delivery
@@ -491,6 +540,17 @@ mod tests {
         retry_after: None,
     };
 
+    /// `deliveries` as a search returns them, all from the transaction 1.
+    fn rows(deliveries: impl IntoIterator<Item = Delivery>) -> Vec<Found> {
+        deliveries
+            .into_iter()
+            .map(|delivery| Found {
+                delivery,
+                xact: XactId(1),
+            })
+            .collect()
+    }
+
     /// Hands `deliveries` over at `now`, and checks that a step starts them at once.
     fn started(relay: &mut Relay, deliveries: &[Delivery], now: OffsetDateTime) {
         relay.hand_over(deliveries.iter().copied(), now);
@@ -522,13 +582,13 @@ mod tests {
         let found = delivery(1, 1);
         let mut relay = holding(1);
         let search = relay.begin_search();
-        relay.searched(search, [found], at(0), &mut || 1_500);
+        relay.searched(search, XactId(1), rows([found]), at(0), &mut || 1_500);
         assert_eq!(relay.step(at(1_499)).attempts, []);
         assert_eq!(relay.step(at(1_500)).attempts, [found]);
         // Without a token, it waits.
         let mut relay = broke();
         let search = relay.begin_search();
-        relay.searched(search, [found], at(0), &mut || 1_500);
+        relay.searched(search, XactId(1), rows([found]), at(0), &mut || 1_500);
         assert_eq!(relay.step(at(60_000)).attempts, []);
     }
 
@@ -629,7 +689,13 @@ mod tests {
         assert_eq!(relay.step(at(0)).attempts, []);
         relay.hand_over([delivery(1, 6)], at(0));
         let search = relay.begin_search();
-        relay.searched(search, [gone[4], delivery(1, 7)], at(0), &mut || 0);
+        relay.searched(
+            search,
+            XactId(1),
+            rows([gone[4], delivery(1, 7)]),
+            at(0),
+            &mut || 0,
+        );
         assert_eq!(relay.step(at(60_000)).attempts, []);
         // Of the answers still in flight, a 2xx is recorded, and nothing else does anything.
         assert_eq!(
@@ -660,7 +726,7 @@ mod tests {
         let (finished, waiting) = (delivery(1, 1), delivery(1, 2));
         failing(&mut relay, &[finished, waiting]);
         let search = relay.begin_search();
-        relay.searched(search, [waiting], at(0), &mut || 0);
+        relay.searched(search, XactId(1), rows([waiting]), at(0), &mut || 0);
         assert_eq!(relay.step(at(0)).attempts, [waiting]);
     }
 
@@ -670,7 +736,7 @@ mod tests {
         let late = delivery(1, 1);
         let search = relay.begin_search();
         relay.hand_over([late], at(0));
-        relay.searched(search, [], at(0), &mut || 0);
+        relay.searched(search, XactId(1), rows([]), at(0), &mut || 0);
         assert_eq!(relay.step(at(0)).attempts, [late]);
     }
 
@@ -763,7 +829,7 @@ mod tests {
         let mut relay = plenty();
         let search = relay.begin_search();
         let restart = at(255_600_000);
-        relay.searched(search, [refused], restart, &mut || 0);
+        relay.searched(search, XactId(1), rows([refused]), restart, &mut || 0);
         assert_eq!(relay.step(restart).attempts, [refused]);
         assert_eq!(relay.answered(refused.id, FAILED, restart, 0), None);
         let old_due = relay.step(at(THREE_DAYS));
@@ -773,6 +839,150 @@ mod tests {
             relay.step(new_due).effects,
             [Effect::Disable(endpoint(1), Reason::Failing)]
         );
+    }
+
+    #[test]
+    fn the_mark_rises_to_the_lower_of_xmin_and_the_oldest_unfinished() {
+        let mut relay = plenty();
+        let search = relay.begin_search();
+        assert_eq!(search.from(), XactId(0));
+        let found = [
+            Found {
+                delivery: delivery(1, 1),
+                xact: XactId(70),
+            },
+            Found {
+                delivery: delivery(1, 2),
+                xact: XactId(40),
+            },
+        ];
+        relay.searched(search, XactId(100), found, at(0), &mut || 0);
+        assert_eq!(relay.mark, XactId(40));
+        // With nothing unfinished, up to xmin.
+        let search = relay.begin_search();
+        assert_eq!(search.from(), XactId(40));
+        relay.searched(search, XactId(120), [], at(0), &mut || 0);
+        assert_eq!(relay.mark, XactId(120));
+        // It never falls, whatever a search reads.
+        let search = relay.begin_search();
+        relay.searched(search, XactId(90), rows([delivery(1, 3)]), at(0), &mut || 0);
+        assert_eq!(relay.mark, XactId(120));
+    }
+
+    /// One thing that happens in a model of PostgreSQL's transactions, as far as the mark
+    /// needs them (ADR-0052).
+    #[derive(Debug, Clone)]
+    enum Tx {
+        /// A transaction writes for the first time, and takes the next ID.
+        Begin,
+        /// The open transaction at this place writes an event and one delivery.
+        Write { which: usize },
+        /// The open transaction at this place commits, or rolls back.
+        End { which: usize, commit: bool },
+        /// The unfinished delivery at this place is finished: a transaction of its own
+        /// records its success, or its endpoint's disablement, and commits.
+        Finish { which: usize },
+        /// The relay begins a search and reads the snapshot's `xmin`, in a statement of its
+        /// own.
+        ReadXmin,
+        /// The search reads the deliveries not finished from the mark up, in a later
+        /// snapshot, and the mark moves.
+        Search,
+    }
+
+    fn tx() -> impl Strategy<Value = Tx> {
+        prop_oneof![
+            Just(Tx::Begin),
+            any::<usize>().prop_map(|which| Tx::Write { which }),
+            (any::<usize>(), any::<bool>()).prop_map(|(which, commit)| Tx::End { which, commit }),
+            any::<usize>().prop_map(|which| Tx::Finish { which }),
+            Just(Tx::ReadXmin),
+            Just(Tx::Search),
+        ]
+    }
+
+    /// Where a delivery's row stands in the model.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Row {
+        /// Written by a transaction that is still open.
+        Uncommitted,
+        Unfinished,
+        Finished,
+    }
+
+    proptest! {
+        #[test]
+        fn nothing_below_the_mark_can_still_need_sending(
+            txs in prop::collection::vec(tx(), 1..120)
+        ) {
+            let mut relay = plenty();
+            let mut next = 1_u64;
+            let mut open: Vec<u64> = Vec::new();
+            let mut rows: Vec<(u64, Delivery, Row)> = Vec::new();
+            let mut written = 0_u128;
+            let mut pending: Option<(Search, XactId)> = None;
+            for tx in txs {
+                match tx {
+                    Tx::Begin => {
+                        open.push(next);
+                        next = next.checked_add(1).expect("few transactions");
+                    }
+                    Tx::Write { which } => {
+                        if let Some(place) = which.checked_rem(open.len()) {
+                            written = written.checked_add(1).expect("few deliveries");
+                            rows.push((open[place], delivery(1, written), Row::Uncommitted));
+                        }
+                    }
+                    Tx::End { which, commit } => {
+                        if let Some(place) = which.checked_rem(open.len()) {
+                            let ended = open.remove(place);
+                            rows.retain(|row| commit || row.0 != ended);
+                            for row in rows.iter_mut().filter(|row| row.0 == ended) {
+                                row.2 = Row::Unfinished;
+                            }
+                        }
+                    }
+                    Tx::Finish { which } => {
+                        let unfinished: Vec<usize> = (0..rows.len())
+                            .filter(|place| rows[*place].2 == Row::Unfinished)
+                            .collect();
+                        if let Some(place) = which.checked_rem(unfinished.len()) {
+                            rows[unfinished[place]].2 = Row::Finished;
+                            next = next.checked_add(1).expect("few transactions");
+                        }
+                    }
+                    Tx::ReadXmin => {
+                        if pending.is_none() {
+                            let search = relay.begin_search();
+                            let xmin = open.iter().min().copied().unwrap_or(next);
+                            pending = Some((search, XactId(xmin)));
+                        }
+                    }
+                    Tx::Search => {
+                        if let Some((search, xmin)) = pending.take() {
+                            let found: Vec<Found> = rows
+                                .iter()
+                                .filter(|row| row.2 == Row::Unfinished && row.0 >= search.from().0)
+                                .map(|row| Found { delivery: row.1, xact: XactId(row.0) })
+                                .collect();
+                            relay.searched(search, xmin, found, at(0), &mut || 0);
+                        }
+                    }
+                }
+                // Below the mark no transaction is open or can start, and every delivery
+                // written there is finished: nothing below it can need sending.
+                let mark = relay.mark.0;
+                prop_assert!(next >= mark, "the next transaction {next} below {mark}");
+                for xact in &open {
+                    prop_assert!(*xact >= mark, "the open transaction {xact} below {mark}");
+                }
+                for (xact, delivery, row) in &rows {
+                    if *xact < mark {
+                        prop_assert_eq!(*row, Row::Finished, "{:?} of {} below {}", delivery, xact, mark);
+                    }
+                }
+            }
+        }
     }
 
     /// One thing that happens around a relay, in a random run.
@@ -899,7 +1109,13 @@ mod tests {
                 Op::Search => {
                     let search = relay.begin_search();
                     heard.extend(unfinished.iter().map(|delivery| delivery.id));
-                    relay.searched(search, unfinished.iter().copied(), at(now), &mut || 0);
+                    relay.searched(
+                        search,
+                        XactId(1),
+                        rows(unfinished.iter().copied()),
+                        at(now),
+                        &mut || 0,
+                    );
                 }
             }
             for endpoint in in_flight.iter().map(|attempt| attempt.endpoint) {
