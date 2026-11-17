@@ -44,6 +44,8 @@ subtle = { version = "2.6", default-features = false }
 # Derives Display and Error for the error types (ADR-0015). sqlx depends on
 # it too.
 thiserror = "2.0.21"
+# Reads the PSP's times as RFC 3339, the way time reads a leap second (ADR-0059).
+time = { version = "0.3.55", default-features = false, features = ["parsing"] }
 # The server's runtime (ADR-0023). 1.54.0 has a data race in its timers
 # (GHSA-5wjr-9356-4wc8), so this asks for the release that reverted it. Its timer
 # bounds each call to the PSP (ADR-0036), and its semaphore the catch-ups that
