@@ -1,15 +1,14 @@
 // Author: Nicola Antonello
 
-//! What ADR-0022 promises of a business time, against PostgreSQL: it comes back
-//! from the database equal, so a retry compares equal, and the database accepts
-//! every time that can be built. The bounds are a measurement of PostgreSQL's
-//! range, so a change in its range or in sqlx's encoding fails here.
+//! What ADR-0022 and ADR-0059 promise of a business time, against PostgreSQL: it
+//! comes back from the database equal, so a retry compares equal, and the database
+//! holds every time that can be built, from the year 0000 to 9999.
 
 mod common;
 
 use std::error::Error;
 
-use common::{runtime_pool, sqlstate};
+use common::runtime_pool;
 use payments_core::times::BusinessTime;
 use sqlx::PgPool;
 use sqlx::types::chrono::{DateTime, NaiveDate, Utc};
@@ -36,13 +35,22 @@ impl Rng {
     }
 }
 
+/// `year`-`month`-`day` at `h:m:s` and `nanos`, in UTC.
+fn at(year: i32, month: u32, day: u32, (h, m, s, nanos): (u32, u32, u32, u32)) -> DateTime<Utc> {
+    NaiveDate::from_ymd_opt(year, month, day)
+        .and_then(|date| date.and_hms_nano_opt(h, m, s, nanos))
+        .expect("a valid time")
+        .and_utc()
+}
+
 #[sqlx::test]
 async fn every_time_that_can_be_built_comes_back_equal(pool: PgPool) -> TestResult {
     let app = runtime_pool(&pool).await?;
-    let lowest = i128::from(DateTime::<Utc>::MIN_UTC.timestamp());
-    let highest = i128::from(DateTime::<Utc>::MAX_UTC.timestamp());
+    // From a century before the earliest time that can be built to the latest second.
+    let lowest = i128::from(at(-100, 1, 1, (0, 0, 0, 0)).timestamp());
+    let highest = i128::from(at(9999, 12, 31, (23, 59, 59, 0)).timestamp());
     let span = highest - lowest + 1;
-    // The awkward ones by name, then a sample of the whole range.
+    // The awkward ones by name, then a sample of the range.
     let mut times: Vec<DateTime<Utc>> = [
         "2026-01-01T00:00:00.123456789Z",
         "1999-12-31T23:59:59.123456789Z",
@@ -52,17 +60,12 @@ async fn every_time_that_can_be_built_comes_back_equal(pool: PgPool) -> TestResu
         "2016-12-31T23:59:60Z",
         "2016-12-31T23:59:60.5Z",
         "2016-12-31T23:59:60.123456789Z",
+        "0000-01-01T00:00:00Z",
+        "9999-12-31T23:59:59.999999999Z",
     ]
     .into_iter()
     .map(|text| text.parse().expect("a valid time"))
     .collect();
-    times.push(DateTime::<Utc>::MAX_UTC);
-    times.push(
-        NaiveDate::from_ymd_opt(-4713, 11, 24)
-            .and_then(|date| date.and_hms_opt(0, 0, 0))
-            .expect("a valid time")
-            .and_utc(),
-    );
     let mut rng = Rng(0x5EED);
     for _ in 0..1000 {
         let seconds = lowest + i128::from(rng.next()) % span;
@@ -80,28 +83,35 @@ async fn every_time_that_can_be_built_comes_back_equal(pool: PgPool) -> TestResu
             );
         }
     }
-    // About half of chrono's range is before PostgreSQL's, so about half of the
-    // sample should be built. Far fewer would mean that this tests little.
-    assert!(built > 400, "only {built} of the times were in range");
+    // One century in a hundred lies before the range, so about 99% of the sample
+    // should be built. Far fewer would mean that this tests little.
+    assert!(built > 950, "only {built} of the times were in range");
     app.close().await;
     Ok(())
 }
 
 #[sqlx::test]
-async fn the_bound_is_postgresqls_own(pool: PgPool) -> TestResult {
-    // The earliest time that can be built is accepted, and one microsecond before
-    // it PostgreSQL refuses: the type rejects exactly what the database does.
+async fn the_bounds_are_rfc_3339s_years(pool: PgPool) -> TestResult {
+    // The earliest and the latest time that can be built come back equal. A
+    // microsecond beyond either cannot be built, though PostgreSQL holds it, and the
+    // columns refuse it too (payment_records.rs).
     let app = runtime_pool(&pool).await?;
-    let earliest = NaiveDate::from_ymd_opt(-4713, 11, 24)
-        .and_then(|date| date.and_hms_opt(0, 0, 0))
-        .expect("a valid time")
-        .and_utc();
-    assert_eq!(round_trip(&app, earliest).await?, earliest);
-    let before = DateTime::from_timestamp_micros(earliest.timestamp_micros() - 1)
-        .ok_or("a time chrono holds")?;
-    assert!(BusinessTime::new(before).is_err());
-    let err = round_trip(&app, before).await.unwrap_err();
-    assert_eq!(sqlstate(err), "22008", "datetime_field_overflow");
+    for (bound, beyond) in [
+        (
+            at(0, 1, 1, (0, 0, 0, 0)),
+            at(-1, 12, 31, (23, 59, 59, 999_999_000)),
+        ),
+        (
+            at(9999, 12, 31, (23, 59, 59, 999_999_000)),
+            at(10_000, 1, 1, (0, 0, 0, 0)),
+        ),
+    ] {
+        let built = BusinessTime::new(bound)?.get();
+        assert_eq!(built, bound);
+        assert_eq!(round_trip(&app, built).await?, bound);
+        assert!(BusinessTime::new(beyond).is_err(), "{beyond:?}");
+        assert_eq!(round_trip(&app, beyond).await?, beyond);
+    }
     app.close().await;
     Ok(())
 }

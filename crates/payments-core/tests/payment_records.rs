@@ -387,14 +387,20 @@ async fn a_step_has_one_record(pool: PgPool) -> sqlx::Result<()> {
     tx.rollback().await
 }
 
-/// Times that a `timestamptz` holds and Rust cannot read: sqlx panics when it
-/// decodes one (ADR-0022). They are text here for the same reason.
-const UNREADABLE_TIMES: [&str; 3] = ["infinity", "-infinity", "262143-01-01 00:00:00+00"];
-/// The first and the last time that the business-time type accepts.
-const BOUND_TIMES: [&str; 2] = [
+/// Times that a `timestamptz` holds and a business time cannot be: infinity, which
+/// sqlx panics on when it decodes one (ADR-0022), and times outside the years 0000 to
+/// 9999 (ADR-0059), chrono's former bounds among them. They are text for that reason.
+const REFUSED_TIMES: [&str; 6] = [
+    "infinity",
+    "-infinity",
     "4714-11-24 00:00:00+00 BC",
+    "0002-12-31 23:59:59.999999+00 BC",
+    "10000-01-01 00:00:00+00",
     "262142-12-31 23:59:59.999999+00",
 ];
+/// The first and the last time that the business-time type accepts: `0001-01-01 BC`
+/// is RFC 3339's year 0000.
+const BOUND_TIMES: [&str; 2] = ["0001-01-01 00:00:00+00 BC", "9999-12-31 23:59:59.999999+00"];
 
 /// Asserts that a record's insert held a bound time and refused any other.
 #[track_caller]
@@ -425,7 +431,7 @@ async fn a_records_time_is_one_that_rust_can_read(pool: PgPool) -> sqlx::Result<
         .then("refund", "refunded", AUTHORIZED, 0);
     refund.insert(&mut tx).await?;
     let refund_posting = write_posting(&mut tx, &books.refund_lines(AUTHORIZED)).await?;
-    for time in UNREADABLE_TIMES.into_iter().chain(BOUND_TIMES) {
+    for time in REFUSED_TIMES.into_iter().chain(BOUND_TIMES) {
         savepoint(&mut tx).await?;
         let result = sqlx::query!(
             "INSERT INTO payment_authorizations \
