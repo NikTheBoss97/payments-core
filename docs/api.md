@@ -316,7 +316,7 @@ again:
 ```json
 {
   "endpoint_id": "019b76da-a800-7000-8000-000000000003",
-  "secret": "whsec_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+  "secret": "whsec_<the base64 of 32 bytes>"
 }
 ```
 
