@@ -323,6 +323,19 @@ again:
 A retry under the same key gets the endpoint's ID alone. If the first answer was lost, register
 another endpoint.
 
+### `POST /webhook-endpoints/{id}/disable`
+
+Disables an endpoint for good
+([ADR-0050](adr/0050-webhook-endpoints-registered-by-the-operator.md)). It takes no body, not
+even `{}`.
+
+`200`, also if the endpoint was already disabled, by the operator or by the service, because what
+the request asks for already holds:
+
+```json
+{ "endpoint_id": "019b76da-a800-7000-8000-000000000003" }
+```
+
 ## The provider's notifications
 
 `POST /webhooks/mock` takes the payment provider's notifications, signed as Standard

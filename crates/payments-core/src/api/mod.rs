@@ -84,6 +84,10 @@ pub fn router(state: AppState) -> Router {
             post(operator::register_endpoint),
         )
         .route("/api-keys/{id}/revoke", post(operator::revoke_key))
+        .route(
+            "/webhook-endpoints/{id}/disable",
+            post(operator::disable_endpoint),
+        )
         .route("/payments", post(payments::create))
         .route("/payments/{id}", get(payments::read_payment))
         .route("/payments/{id}/authorize", post(payments::authorize))

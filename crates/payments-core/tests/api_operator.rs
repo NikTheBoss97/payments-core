@@ -1,7 +1,8 @@
 // Author: Nicola Antonello
 
 //! The operator's routes (ADR-0024): registering merchants, issuing and revoking their API
-//! keys, and registering their webhook endpoints (ADR-0050), behind a credential of its own
+//! keys, and registering and disabling their webhook endpoints (ADR-0050), behind a
+//! credential of its own
 //! and under idempotency keys of its own (ADR-0026). A secret is shown once, and nothing
 //! stores it.
 
@@ -18,7 +19,7 @@ use common::api::{
 use common::crashes::{install_crash_points, plan_death};
 use common::keys::issued_key;
 use common::payments::VERSION_4;
-use common::{api_key_id, merchant_id, runtime_pool_of_one};
+use common::{api_key_id, endpoint_id, merchant_id, runtime_pool_of_one};
 use futures_util::future::join_all;
 use payments_core::api::problem::Problem;
 use payments_core::api::{AppState, router};
@@ -56,6 +57,11 @@ async fn register_endpoint(pools: &Pools, merchant: &str, key: &str) -> Reply {
     .await
 }
 
+async fn disable_endpoint(pools: &Pools, endpoint: &str, key: &str) -> Reply {
+    let path = format!("/webhook-endpoints/{endpoint}/disable");
+    send(router(pools.state()), post(&path, &pools.operator, key, "")).await
+}
+
 /// A text member of a reply's JSON.
 #[track_caller]
 fn member(reply: &Reply, name: &str) -> String {
@@ -71,6 +77,13 @@ async fn registered(pools: &Pools, key: &str) -> String {
     let reply = register(pools, key, FEE).await;
     assert_eq!(reply.status, StatusCode::CREATED, "{reply:?}");
     member(&reply, "merchant_id")
+}
+
+/// An endpoint that the operator registered for this merchant: its ID.
+async fn registered_endpoint(pools: &Pools, merchant: &str) -> String {
+    let reply = register_endpoint(pools, merchant, "endpoint").await;
+    assert_eq!(reply.status, StatusCode::CREATED, "{reply:?}");
+    member(&reply, "endpoint_id")
 }
 
 /// A key that the operator issued to this merchant: its ID and its secret.
@@ -117,6 +130,12 @@ async fn endpoints(pool: &PgPool) -> sqlx::Result<i64> {
         .await
 }
 
+async fn disablements(pool: &PgPool) -> sqlx::Result<i64> {
+    sqlx::query_scalar!(r#"SELECT count(*) AS "count!" FROM webhook_endpoint_disablements"#)
+        .fetch_one(pool)
+        .await
+}
+
 async fn operator_records(pool: &PgPool) -> sqlx::Result<i64> {
     sqlx::query_scalar!(r#"SELECT count(*) AS "count!" FROM operator_idempotency_records"#)
         .fetch_one(pool)
@@ -124,12 +143,13 @@ async fn operator_records(pool: &PgPool) -> sqlx::Result<i64> {
 }
 
 /// How many rows hold what an operator's request writes.
-async fn stored(pool: &PgPool) -> sqlx::Result<[i64; 5]> {
+async fn stored(pool: &PgPool) -> sqlx::Result<[i64; 6]> {
     Ok([
         merchants(pool).await?,
         api_keys(pool).await?,
         revocations(pool).await?,
         endpoints(pool).await?,
+        disablements(pool).await?,
         operator_records(pool).await?,
     ])
 }
@@ -452,7 +472,7 @@ async fn a_key_is_for_one_request_and_the_first_answer_stands(pool: PgPool) -> T
         assert_eq!(reply.status, StatusCode::UNPROCESSABLE_ENTITY, "{reply:?}");
         assert_eq!(reply.body, Problem::KeyReused.body());
     }
-    assert_eq!(stored(&pool).await?, [1, 1, 0, 0, 2]);
+    assert_eq!(stored(&pool).await?, [1, 1, 0, 0, 0, 2]);
     assert_eq!(register(&pools, "k", FEE).await.body, first.body);
 
     // Another merchant under the same route.
@@ -501,6 +521,7 @@ async fn every_bad_credential_gets_one_answer_on_every_operator_route_and_runs_n
     let revoked = issued_key(&pools.system, merchant, 2).await?;
     let reply = revoke(&pools, &api_key_id(2).to_string(), "revoke").await;
     assert_eq!(reply.status, StatusCode::OK, "{reply:?}");
+    let endpoint = registered_endpoint(&pools, &merchant.to_string()).await;
     let before = stored(&pool).await?;
 
     let good = format!("Bearer {}", pools.operator.expose());
@@ -529,11 +550,12 @@ async fn every_bad_credential_gets_one_answer_on_every_operator_route_and_runs_n
         // Which of two is meant cannot be known, even if each is good on its own.
         ("twice", vec![good.as_bytes(), good.as_bytes()]),
     ];
-    let routes: [(String, &'static str); 4] = [
+    let routes: [(String, &'static str); 5] = [
         ("/merchants".to_owned(), FEE),
         (format!("/merchants/{merchant}/api-keys"), ""),
         (format!("/api-keys/{}/revoke", api_key_id(1)), ""),
         (format!("/merchants/{merchant}/webhook-endpoints"), ENDPOINT),
+        (format!("/webhook-endpoints/{endpoint}/disable"), ""),
     ];
     for (path, body) in &routes {
         for (what, values) in &cases {
@@ -661,7 +683,7 @@ async fn a_body_that_cannot_be_used_is_refused_and_leaves_the_key_free(pool: PgP
         assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{body:?}: {reply:?}");
         assert_eq!(reply.body, Problem::MalformedBody.body(), "{body:?}");
     }
-    assert_eq!(stored(&pool).await?, [0, 0, 0, 0, 0]);
+    assert_eq!(stored(&pool).await?, [0, 0, 0, 0, 0, 0]);
 
     let reply = register(&pools, "k", FEE).await;
     assert_eq!(reply.status, StatusCode::CREATED, "{reply:?}");
@@ -678,10 +700,12 @@ async fn a_route_that_takes_no_body_refuses_one_and_leaves_the_key_free(
     let pools = Pools::login(&pool).await?;
     let merchant = registered(&pools, "register").await;
     let (api_key, _) = issued(&pools, &merchant, "issue").await;
+    let endpoint = registered_endpoint(&pools, &merchant).await;
     let before = stored(&pool).await?;
     let routes = [
         format!("/merchants/{merchant}/api-keys"),
         format!("/api-keys/{api_key}/revoke"),
+        format!("/webhook-endpoints/{endpoint}/disable"),
     ];
     for path in &routes {
         for body in ["{}", "null", " ", "\n", "anything"] {
@@ -725,12 +749,14 @@ async fn every_operator_route_refuses_a_request_with_no_key_and_runs_nothing(
     let pools = Pools::login(&pool).await?;
     let merchant = registered(&pools, "register").await;
     let (api_key, _) = issued(&pools, &merchant, "issue").await;
+    let endpoint = registered_endpoint(&pools, &merchant).await;
     let before = stored(&pool).await?;
-    let routes: [(String, &'static str); 4] = [
+    let routes: [(String, &'static str); 5] = [
         ("/merchants".to_owned(), FEE),
         (format!("/merchants/{merchant}/api-keys"), ""),
         (format!("/api-keys/{api_key}/revoke"), ""),
         (format!("/merchants/{merchant}/webhook-endpoints"), ENDPOINT),
+        (format!("/webhook-endpoints/{endpoint}/disable"), ""),
     ];
     for (path, body) in &routes {
         for keys in [&[][..], &["bare-token"], &["\"a\"", "\"b\""]] {
@@ -750,12 +776,14 @@ async fn an_id_that_is_not_one_reads_as_no_such_thing_and_runs_nothing(pool: PgP
     let pools = Pools::login(&pool).await?;
     let merchant = registered(&pools, "register").await;
     let (api_key, _) = issued(&pools, &merchant, "issue").await;
+    let endpoint = registered_endpoint(&pools, &merchant).await;
     let before = stored(&pool).await?;
 
     for (route, real) in [
         ("/merchants/{}/api-keys", &merchant),
         ("/api-keys/{}/revoke", &api_key),
         ("/merchants/{}/webhook-endpoints", &merchant),
+        ("/webhook-endpoints/{}/disable", &endpoint),
     ] {
         for text in [
             "nothing".to_owned(),
@@ -792,7 +820,7 @@ async fn no_such_merchant_or_api_key_is_a_404_and_leaves_the_key_free(pool: PgPo
         assert_eq!(reply.status, StatusCode::NOT_FOUND, "{reply:?}");
         assert_eq!(reply.body, Problem::NotFound.body());
     }
-    assert_eq!(stored(&pool).await?, [0, 0, 0, 0, 0]);
+    assert_eq!(stored(&pool).await?, [0, 0, 0, 0, 0, 0]);
 
     let reply = register(&pools, "k", FEE).await;
     assert_eq!(reply.status, StatusCode::CREATED, "{reply:?}");
@@ -833,6 +861,7 @@ async fn an_operator_route_takes_post_and_nothing_else(pool: PgPool) -> TestResu
         format!("/merchants/{id}/api-keys"),
         format!("/api-keys/{id}/revoke"),
         format!("/merchants/{id}/webhook-endpoints"),
+        format!("/webhook-endpoints/{id}/disable"),
     ] {
         for method in [Method::GET, Method::PUT, Method::DELETE] {
             let request = Request::builder()
@@ -850,7 +879,11 @@ async fn an_operator_route_takes_post_and_nothing_else(pool: PgPool) -> TestResu
             assert_eq!(reply.body, Problem::MethodNotAllowed.body());
         }
     }
-    for path in [format!("/merchants/{id}"), format!("/api-keys/{id}")] {
+    for path in [
+        format!("/merchants/{id}"),
+        format!("/api-keys/{id}"),
+        format!("/webhook-endpoints/{id}"),
+    ] {
         let request = get_with_authorization(&path, &bearer(&pools.operator));
         let reply = send(router(pools.state()), request).await;
         assert_eq!(reply.status, StatusCode::NOT_FOUND, "{path}: {reply:?}");
@@ -900,7 +933,7 @@ async fn a_command_that_cannot_be_confirmed_is_a_503_and_the_retry_settles_it(
 
     let reply = killed_then_retried(&pool, &pools, &system, "/merchants", FEE).await?;
     assert_eq!(reply.status, StatusCode::CREATED, "{reply:?}");
-    assert_eq!(stored(&pool).await?, [1, 0, 0, 0, 1]);
+    assert_eq!(stored(&pool).await?, [1, 0, 0, 0, 0, 1]);
 
     let endpoints = format!(
         "/merchants/{}/webhook-endpoints",
@@ -909,7 +942,7 @@ async fn a_command_that_cannot_be_confirmed_is_a_503_and_the_retry_settles_it(
     let keys = format!("/merchants/{}/api-keys", member(&reply, "merchant_id"));
     let reply = killed_then_retried(&pool, &pools, &system, &keys, "").await?;
     assert_eq!(reply.status, StatusCode::CREATED, "{reply:?}");
-    assert_eq!(stored(&pool).await?, [1, 1, 0, 0, 2]);
+    assert_eq!(stored(&pool).await?, [1, 1, 0, 0, 0, 2]);
     // The attempt that died left nothing, so this answer is the first, and shows the secret.
     let secret = member(&reply, "secret");
     let revoking = format!("/api-keys/{}/revoke", member(&reply, "api_key_id"));
@@ -918,15 +951,23 @@ async fn a_command_that_cannot_be_confirmed_is_a_503_and_the_retry_settles_it(
 
     let reply = killed_then_retried(&pool, &pools, &system, &revoking, "").await?;
     assert_eq!(reply.status, StatusCode::OK, "{reply:?}");
-    assert_eq!(stored(&pool).await?, [1, 1, 1, 0, 3]);
+    assert_eq!(stored(&pool).await?, [1, 1, 1, 0, 0, 3]);
     let reply = create_payment(&pools, &secret, "after").await;
     assert_eq!(reply.status, StatusCode::UNAUTHORIZED, "{reply:?}");
 
     let reply = killed_then_retried(&pool, &pools, &system, &endpoints, ENDPOINT).await?;
     assert_eq!(reply.status, StatusCode::CREATED, "{reply:?}");
-    assert_eq!(stored(&pool).await?, [1, 1, 1, 1, 4]);
+    assert_eq!(stored(&pool).await?, [1, 1, 1, 1, 0, 4]);
     // The attempt that died left nothing, so this answer is the first, and shows the secret.
     assert!(reply.body.contains("whsec_"), "the answer shows no secret");
+
+    let disabling = format!(
+        "/webhook-endpoints/{}/disable",
+        member(&reply, "endpoint_id")
+    );
+    let reply = killed_then_retried(&pool, &pools, &system, &disabling, "").await?;
+    assert_eq!(reply.status, StatusCode::OK, "{reply:?}");
+    assert_eq!(stored(&pool).await?, [1, 1, 1, 1, 1, 5]);
     system.close().await;
     pools.close().await;
     Ok(())
@@ -941,6 +982,7 @@ async fn a_statement_the_database_refuses_is_a_500_and_leaves_the_key_free(
     let pools = Pools::login(&pool).await?;
     let merchant = registered(&pools, "register").await;
     let (api_key, _) = issued(&pools, &merchant, "issue").await;
+    let endpoint = registered_endpoint(&pools, &merchant).await;
     let before = stored(&pool).await?;
     sqlx::query!("ALTER TABLE merchants ADD CONSTRAINT refuses_all CHECK (fee_bps < 0) NOT VALID")
         .execute(&pool)
@@ -962,12 +1004,19 @@ async fn a_statement_the_database_refuses_is_a_500_and_leaves_the_key_free(
     )
     .execute(&pool)
     .await?;
+    sqlx::query!(
+        "ALTER TABLE webhook_endpoint_disablements ADD CONSTRAINT refuses_all \
+         CHECK (recorded_at IS NULL) NOT VALID"
+    )
+    .execute(&pool)
+    .await?;
 
     for reply in [
         register(&pools, "k", FEE).await,
         issue(&pools, &merchant, "k").await,
         revoke(&pools, &api_key, "k").await,
         register_endpoint(&pools, &merchant, "k").await,
+        disable_endpoint(&pools, &endpoint, "k").await,
     ] {
         assert_eq!(reply.status, StatusCode::INTERNAL_SERVER_ERROR, "{reply:?}");
         assert_eq!(reply.body, Problem::Internal.body());
@@ -986,6 +1035,9 @@ async fn a_statement_the_database_refuses_is_a_500_and_leaves_the_key_free(
     sqlx::query!("ALTER TABLE webhook_endpoints DROP CONSTRAINT refuses_all")
         .execute(&pool)
         .await?;
+    sqlx::query!("ALTER TABLE webhook_endpoint_disablements DROP CONSTRAINT refuses_all")
+        .execute(&pool)
+        .await?;
     assert_eq!(register(&pools, "k", FEE).await.status, StatusCode::CREATED);
     assert_eq!(
         issue(&pools, &merchant, "k-issue").await.status,
@@ -1000,6 +1052,12 @@ async fn a_statement_the_database_refuses_is_a_500_and_leaves_the_key_free(
             .await
             .status,
         StatusCode::CREATED
+    );
+    assert_eq!(
+        disable_endpoint(&pools, &endpoint, "k-disable")
+            .await
+            .status,
+        StatusCode::OK
     );
     pools.close().await;
     Ok(())
@@ -1022,6 +1080,7 @@ async fn nothing_runs_when_a_key_cannot_be_looked_up(pool: PgPool) -> TestResult
         issue(&pools, &merchant.to_string(), "k").await,
         revoke(&pools, &api_key_id(1).to_string(), "k").await,
         register_endpoint(&pools, &merchant.to_string(), "k").await,
+        disable_endpoint(&pools, &endpoint_id(1).to_string(), "k").await,
     ] {
         assert_eq!(reply.status, StatusCode::SERVICE_UNAVAILABLE, "{reply:?}");
         assert_eq!(reply.body, Problem::Unavailable.body());
@@ -1031,9 +1090,10 @@ async fn nothing_runs_when_a_key_cannot_be_looked_up(pool: PgPool) -> TestResult
             merchants(&pool).await?,
             api_keys(&pool).await?,
             revocations(&pool).await?,
-            endpoints(&pool).await?
+            endpoints(&pool).await?,
+            disablements(&pool).await?
         ],
-        before[..4]
+        before[..5]
     );
     pools.close().await;
     Ok(())
