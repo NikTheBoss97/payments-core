@@ -15,9 +15,12 @@ use super::payments::json_text;
 use super::problem::Problem;
 use crate::credentials::ApiKeySecret;
 use crate::idempotency::Answer;
-use crate::ids::{ApiKeyId, MerchantId};
+use crate::ids::{ApiKeyId, EndpointId, MerchantId};
 use crate::money::BasisPoints;
-use crate::operator::{OperatorError, issue_api_key, register_merchant_sealed, revoke_api_key};
+use crate::operator::{
+    EndpointUrl, OperatorError, UrlRefusal, issue_api_key, register_merchant_sealed,
+    register_webhook_endpoint, revoke_api_key,
+};
 
 /// What a command came to, and the answer that it gives if it applied.
 fn settled(result: Result<(), OperatorError>, answer: Answer) -> Result<Attempt, Problem> {
@@ -116,6 +119,74 @@ async fn attempt_issue(
             body: json_text(&NewKey {
                 api_key_id: id.to_string(),
                 secret: secret.expose(),
+            }),
+        },
+    )
+}
+
+/// The body of `POST /merchants/{id}/webhook-endpoints` (ADR-0050).
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EndpointBody {
+    url: String,
+}
+
+/// What `POST /merchants/{id}/webhook-endpoints` stores, and what a retry gets. It has no
+/// field for the secret, so that no replay can show one (ADR-0050).
+#[derive(Serialize)]
+struct RegisteredEndpoint {
+    endpoint_id: String,
+}
+
+/// What the first answer to `POST /merchants/{id}/webhook-endpoints` shows, and the only
+/// time that the endpoint's secret is shown (ADR-0050, ADR-0051).
+#[derive(Serialize)]
+struct NewEndpoint {
+    endpoint_id: String,
+    secret: String,
+}
+
+/// `POST /merchants/{id}/webhook-endpoints`.
+pub(super) async fn register_endpoint(
+    operator: Operator,
+    PathId(merchant): PathId<MerchantId>,
+    request: KeyedRequest,
+) -> Response {
+    request
+        .answer_operator(operator.pool(), || {
+            attempt_register_endpoint(&operator, merchant, &request)
+        })
+        .await
+}
+
+async fn attempt_register_endpoint(
+    operator: &Operator,
+    merchant: MerchantId,
+    request: &KeyedRequest,
+) -> Result<Attempt, Problem> {
+    let body: EndpointBody = request.body_as()?;
+    // Text that is not an absolute URL is a malformed body, and an absolute URL that the
+    // rules refuse is unusable (ADR-0060).
+    let url = EndpointUrl::parse(&body.url).map_err(|refusal| match refusal {
+        UrlRefusal::NotAbsolute => Problem::MalformedBody,
+        UrlRefusal::Unusable => Problem::UnusableUrl,
+    })?;
+    let id = EndpointId::now_v7();
+    let stored = Answer {
+        status: 201,
+        body: json_text(&RegisteredEndpoint {
+            endpoint_id: id.to_string(),
+        }),
+    };
+    let seal = request.operator_seal(&stored);
+    let result = register_webhook_endpoint(operator.pool(), &seal, id, merchant, &url).await;
+    settled(
+        result,
+        Answer {
+            status: 201,
+            body: json_text(&NewEndpoint {
+                endpoint_id: id.to_string(),
+                secret: operator.master().secret_of(id).written(),
             }),
         },
     )

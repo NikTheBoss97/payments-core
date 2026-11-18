@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "ALTER TABLE webhook_endpoints ADD CONSTRAINT refuses_all CHECK (octet_length(url) < 0) NOT VALID",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "aa647c716010e3ea40bb0f0409120db86addf6c9b53339d6cf96f35b3e055b52"
+}

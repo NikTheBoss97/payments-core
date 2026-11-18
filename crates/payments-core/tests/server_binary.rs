@@ -13,7 +13,8 @@ use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use common::api::{Pools, written};
+use base64::Engine;
+use common::api::{Pools, new_master_key, written};
 use common::crashes::{assert_books_are_whole, balances};
 use common::keys::issued_key;
 use common::payments::{
@@ -85,6 +86,7 @@ fn configured(pool: &PgPool, operator: &ApiKeySecret) -> Command {
         .env("MOCK_PSP_URL", "http://127.0.0.1:9")
         .env("MOCK_PSP_API_KEY", new_api_key())
         .env("MOCK_PSP_SIGNING_KEYS", SigningKey::generate().written())
+        .env("WEBHOOK_MASTER_KEY", new_master_key())
         .env("BIND_ADDRESS", "127.0.0.1:0")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -1026,6 +1028,7 @@ async fn the_binary_stops_at_once_without_its_configuration(pool: PgPool) -> Tes
         "MOCK_PSP_URL",
         "MOCK_PSP_API_KEY",
         "MOCK_PSP_SIGNING_KEYS",
+        "WEBHOOK_MASTER_KEY",
     ] {
         let mut command = configured(&pool, &ApiKeySecret::generate());
         command.env_remove(name);
@@ -1187,6 +1190,34 @@ async fn the_binary_stops_at_once_on_a_psp_that_it_cannot_call_and_never_shows_t
     assert!(!succeeded, "{said}");
     assert!(said.contains("MOCK_PSP_API_KEY"), "{said}");
     assert!(!said.contains(&key), "{said}");
+    Ok(())
+}
+
+#[sqlx::test]
+async fn the_binary_stops_at_once_on_a_master_key_that_it_cannot_use_and_never_shows_it(
+    pool: PgPool,
+) -> TestResult {
+    let encoded = |length: usize| {
+        let mut bytes = vec![0_u8; length];
+        getrandom::fill(&mut bytes).expect("the operating system's random bytes");
+        base64::engine::general_purpose::STANDARD.encode(bytes)
+    };
+    let (short, long, unprefixed) = (encoded(31), encoded(33), encoded(32));
+    // Cut short, made longer, without its prefix, and not base64.
+    for (key, hidden) in [
+        (format!("whsec_{short}"), short.clone()),
+        (format!("whsec_{long}"), long.clone()),
+        (unprefixed.clone(), unprefixed.clone()),
+        (format!("whsec_!{unprefixed}"), unprefixed.clone()),
+    ] {
+        let mut command = configured(&pool, &ApiKeySecret::generate());
+        command.env("WEBHOOK_MASTER_KEY", &key);
+        let (succeeded, said) = refused(command).await?;
+        assert!(!succeeded, "{said}");
+        assert!(said.contains("WEBHOOK_MASTER_KEY"), "{said}");
+        assert!(!said.contains(&hidden), "the key is shown: {said}");
+        assert!(!said.contains("listening on"), "{said}");
+    }
     Ok(())
 }
 

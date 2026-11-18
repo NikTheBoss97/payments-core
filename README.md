@@ -53,7 +53,8 @@ sqlx migrate run --source crates/payments-core/migrations
 
 The operator is one secret, of which the server holds only the digest. The payment provider issues
 the key that the server's calls to it carry, and signs its notifications with a key that the server
-holds too. Make all three for this shell, and start the mock provider and the server there:
+holds too. Each merchant endpoint's secret is derived from a master key. Make all four for this
+shell, and start the mock provider and the server there:
 
 ```sh
 set -a; . ./.env; set +a
@@ -61,6 +62,7 @@ operator="pck_$(openssl rand -hex 32)"
 export OPERATOR_KEY_SHA256="$(printf %s "$operator" | openssl dgst -sha256 -r | cut -d' ' -f1)"
 export MOCK_PSP_API_KEY="mock_sk_$(openssl rand -hex 32)"
 export MOCK_PSP_SIGNING_KEYS="whsec_$(openssl rand -base64 32)"
+export WEBHOOK_MASTER_KEY="whsec_$(openssl rand -base64 32)"
 cargo run -p mock-psp &
 cargo run -p payments-core &
 ```

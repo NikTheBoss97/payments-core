@@ -11,12 +11,14 @@
 //! classifier. Never wrap a command in a client-side timeout or `select!`: a dropped
 //! `COMMIT` is a lost one (ADR-0014).
 
+use axum::http::Uri;
+use axum::http::uri::{Authority, Scheme};
 use sqlx::{PgPool, Postgres, Transaction};
 
 use crate::credentials::SecretDigest;
 use crate::db::{CommitError, code_and_constraint, commit};
 use crate::idempotency::OperatorSeal;
-use crate::ids::{ApiKeyId, MerchantId};
+use crate::ids::{ApiKeyId, EndpointId, MerchantId};
 use crate::money::BasisPoints;
 use crate::payments::{Failure, classify};
 
@@ -24,9 +26,9 @@ use crate::payments::{Failure, classify};
 /// may have stored it.
 #[derive(Debug, thiserror::Error)]
 pub enum OperatorError {
-    /// What the request names does not exist: no merchant to issue a key to, or no key
-    /// to revoke. Nothing is stored, because IDs are made by the server, so this cannot
-    /// become true later (ADR-0023).
+    /// What the request names does not exist: no merchant to issue a key to or to
+    /// register an endpoint for, or no key to revoke. Nothing is stored, because IDs are
+    /// made by the server, so this cannot become true later (ADR-0023).
     #[error("no such merchant or API key")]
     NotFound,
     /// The idempotency key already holds an answer, so this attempt rolled back whole.
@@ -41,6 +43,75 @@ pub enum OperatorError {
     /// fresh IDs if it is unused (ADR-0026).
     #[error("the operator's request may or may not be stored: look its key up")]
     NotConfirmed(#[source] sqlx::Error),
+}
+
+/// An endpoint's URL as ADR-0050 and ADR-0060 take it: absolute and `http`, with a host and
+/// any port as a client reads them, without user information or a fragment, and with its
+/// scheme in lowercase, as the database's check wants it (ADR-0055).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EndpointUrl(String);
+
+/// Why the server refuses an endpoint's URL (ADR-0060).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum UrlRefusal {
+    /// The text is not an absolute URL, or its host is empty, or its port is not one that
+    /// a client reads: a malformed body.
+    #[error("the text is not an absolute URL")]
+    NotAbsolute,
+    /// An absolute URL that an endpoint cannot have: another scheme, user information or a
+    /// fragment.
+    #[error("an endpoint cannot have this URL")]
+    Unusable,
+}
+
+impl EndpointUrl {
+    /// Reads an endpoint's URL (ADR-0060).
+    ///
+    /// # Errors
+    ///
+    /// See [`UrlRefusal`].
+    pub fn parse(text: &str) -> Result<Self, UrlRefusal> {
+        let uri: Uri = text.parse().map_err(|_| UrlRefusal::NotAbsolute)?;
+        let (Some(scheme), Some(authority)) = (uri.scheme(), uri.authority()) else {
+            return Err(UrlRefusal::NotAbsolute);
+        };
+        if !names_a_host_and_its_port(authority) {
+            return Err(UrlRefusal::NotAbsolute);
+        }
+        // The parser drops a fragment, so the text itself is read for one.
+        if *scheme != Scheme::HTTP || authority.as_str().contains('@') || text.contains('#') {
+            return Err(UrlRefusal::Unusable);
+        }
+        // The text starts with its scheme, which has four letters in any case.
+        let rest = text.get(4..).expect("the text starts with its scheme");
+        Ok(Self(format!("http{rest}")))
+    }
+
+    /// The URL, as it is stored.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// Whether an authority names a host, and after it nothing, or a colon and a port in decimal
+/// digits that fits in 16 bits, an empty one meaning port 80 (RFC 9110, section 4.2.1;
+/// RFC 3986, section 3.2.3). The parser takes an empty host, and any text after the host,
+/// whose port a client cannot read and replaces with 80 (ADR-0060).
+fn names_a_host_and_its_port(authority: &Authority) -> bool {
+    let host = authority.host();
+    let fits = |digits: &str| {
+        digits.is_empty()
+            || (digits.bytes().all(|byte| byte.is_ascii_digit()) && digits.parse::<u16>().is_ok())
+    };
+    let after_host = authority
+        .as_str()
+        .rsplit('@')
+        .next()
+        .and_then(|host_and_port| host_and_port.strip_prefix(host));
+    !host.is_empty()
+        && after_host
+            .is_some_and(|rest| rest.is_empty() || rest.strip_prefix(':').is_some_and(fits))
 }
 
 /// Which statement of a command failed.
@@ -141,6 +212,33 @@ pub async fn issue_api_key(
     finish(tx, seal).await
 }
 
+/// Registers a merchant's webhook endpoint at this URL, under one of the operator's keys
+/// (ADR-0050). Its secret is derived from the master key, and never stored (ADR-0051).
+///
+/// # Errors
+///
+/// See [`OperatorError`].
+pub async fn register_webhook_endpoint(
+    pool: &PgPool,
+    seal: &OperatorSeal<'_>,
+    id: EndpointId,
+    merchant: MerchantId,
+    url: &EndpointUrl,
+) -> Result<(), OperatorError> {
+    let effect = |source| OperatorError::at(Stage::Effect, source);
+    let mut tx = pool.begin().await.map_err(effect)?;
+    sqlx::query!(
+        "INSERT INTO webhook_endpoints (id, merchant_id, url) VALUES ($1, $2, $3)",
+        id.get(),
+        merchant.get(),
+        url.as_str()
+    )
+    .execute(&mut *tx)
+    .await
+    .map_err(effect)?;
+    finish(tx, seal).await
+}
+
 /// Revokes an API key, under one of the operator's keys. The key stops working on its
 /// next request (ADR-0024). Revoking it again changes nothing and answers too: what the
 /// request asks for already holds.
@@ -185,6 +283,84 @@ async fn finish(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_endpoints_url_is_absolute_http_without_user_information_or_a_fragment() {
+        // Taken, with the scheme in lowercase and the rest as written.
+        for (given, stored) in [
+            ("http://merchant.example", "http://merchant.example"),
+            (
+                "http://merchant.example:8000/hooks?from=payments",
+                "http://merchant.example:8000/hooks?from=payments",
+            ),
+            (
+                "HTTP://Merchant.Example/Hooks",
+                "http://Merchant.Example/Hooks",
+            ),
+            ("hTtP://127.0.0.1:9/", "http://127.0.0.1:9/"),
+            ("http://[::1]:8080/hooks", "http://[::1]:8080/hooks"),
+            ("http://[::1]/hooks", "http://[::1]/hooks"),
+            // The largest port, and an empty one, which means port 80.
+            (
+                "http://merchant.example:65535/",
+                "http://merchant.example:65535/",
+            ),
+            (
+                "http://merchant.example:/hooks",
+                "http://merchant.example:/hooks",
+            ),
+        ] {
+            assert_eq!(
+                EndpointUrl::parse(given).map(|url| url.as_str().to_owned()),
+                Ok(stored.to_owned()),
+                "{given}"
+            );
+        }
+        // Not an absolute URL: a malformed body.
+        for given in [
+            "",
+            "not a url",
+            "merchant.example",
+            "/hooks",
+            "http:///hooks",
+            "http://merchant .example/",
+            "http://merchant.example/a b",
+            "http://merchant.example:port/",
+            "http://merchant.example/\u{7}",
+            // A host that is empty, and a port that a client would not go to.
+            "http://:80/",
+            "http://merchant.example:65536/",
+            "http://merchant.example:+80/",
+            "http://[::1]x/",
+            "http://[::1]:x/",
+            // Not a URL, even though it breaks a rule as well.
+            "http://user@merchant.example:port/",
+            "https://merchant.example:port/",
+        ] {
+            assert_eq!(
+                EndpointUrl::parse(given),
+                Err(UrlRefusal::NotAbsolute),
+                "{given:?}"
+            );
+        }
+        // An absolute URL that the rules refuse.
+        for given in [
+            "https://merchant.example/",
+            "HTTPS://merchant.example/",
+            "ftp://merchant.example/",
+            "http://user@merchant.example/",
+            "http://user:secret@merchant.example/",
+            "http://merchant.example/hooks#part",
+            "http://merchant.example#part",
+            "http://merchant.example/?query#",
+        ] {
+            assert_eq!(
+                EndpointUrl::parse(given),
+                Err(UrlRefusal::Unusable),
+                "{given}"
+            );
+        }
+    }
 
     #[test]
     fn a_failed_statement_is_read_by_its_stage_and_its_code() {

@@ -317,6 +317,7 @@ async fn a_recorded_request_is_handed_over_once_and_never_by_a_replay(pool: PgPo
         world.pools.tenant.clone(),
         world.pools.system.clone(),
         world.pools.operator.digest(),
+        world.pools.master.clone(),
         unused_webhooks(),
         handovers,
     );
@@ -790,6 +791,7 @@ async fn a_command_that_cannot_be_confirmed_is_a_503_and_the_retry_settles_it(
         tenant.clone(),
         world.pools.system.clone(),
         world.pools.operator.digest(),
+        world.pools.master.clone(),
         unused_webhooks(),
         unused_handovers(),
     );

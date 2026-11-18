@@ -410,6 +410,7 @@ async fn a_command_that_cannot_be_confirmed_is_a_503_and_the_retry_settles_it(
         tenant.clone(),
         pools.system.clone(),
         pools.operator.digest(),
+        pools.master.clone(),
         unused_webhooks(),
         common::api::unused_handovers(),
     );

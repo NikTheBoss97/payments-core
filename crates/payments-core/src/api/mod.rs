@@ -20,6 +20,7 @@ use tokio::sync::mpsc;
 
 use crate::credentials::SecretDigest;
 use crate::ids::RequestId;
+use crate::signing::MasterKey;
 pub use credential::Merchant;
 pub use keyed::KeyedRequest;
 pub use payments::OwnPayment;
@@ -34,6 +35,7 @@ pub struct AppState {
     tenant: PgPool,
     system: PgPool,
     operator: SecretDigest,
+    master: MasterKey,
     webhooks: Webhooks,
     handovers: mpsc::Sender<RequestId>,
 }
@@ -41,13 +43,15 @@ pub struct AppState {
 impl AppState {
     /// The pool that merchant routes hold, whose role sees nothing until a transaction
     /// names its merchant, the system role's, for looking a key up, for the operator's
-    /// commands and for the PSP's notifications, the digest of the operator's secret, what
-    /// the PSP's route holds, and where the routes hand a recorded request over.
+    /// commands and for the PSP's notifications, the digest of the operator's secret, the
+    /// master key of the endpoints' secrets, what the PSP's route holds, and where the routes
+    /// hand a recorded request over.
     #[must_use]
     pub fn new(
         tenant: PgPool,
         system: PgPool,
         operator: SecretDigest,
+        master: MasterKey,
         webhooks: Webhooks,
         handovers: mpsc::Sender<RequestId>,
     ) -> Self {
@@ -55,6 +59,7 @@ impl AppState {
             tenant,
             system,
             operator,
+            master,
             webhooks,
             handovers,
         }
@@ -74,6 +79,10 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/merchants", post(operator::register))
         .route("/merchants/{id}/api-keys", post(operator::issue_key))
+        .route(
+            "/merchants/{id}/webhook-endpoints",
+            post(operator::register_endpoint),
+        )
         .route("/api-keys/{id}/revoke", post(operator::revoke_key))
         .route("/payments", post(payments::create))
         .route("/payments/{id}", get(payments::read_payment))

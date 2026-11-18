@@ -16,6 +16,7 @@ use super::AppState;
 use super::problem::Problem;
 use crate::credentials::{SecretDigest, authenticate};
 use crate::ids::MerchantId;
+use crate::signing::MasterKey;
 use crate::tenancy::Tenant;
 
 /// The merchant that a request's credential names, and its one way to the database. It
@@ -61,11 +62,17 @@ impl FromRequestParts<AppState> for Merchant {
 #[derive(Debug, Clone)]
 pub(super) struct Operator {
     pool: PgPool,
+    master: MasterKey,
 }
 
 impl Operator {
     pub(super) fn pool(&self) -> &PgPool {
         &self.pool
+    }
+
+    /// The key from which each endpoint's secret is derived (ADR-0051).
+    pub(super) fn master(&self) -> &MasterKey {
+        &self.master
     }
 }
 
@@ -81,6 +88,7 @@ impl FromRequestParts<AppState> for Operator {
         if SecretDigest::of(secret).matches(&state.operator) {
             Ok(Self {
                 pool: state.system.clone(),
+                master: state.master.clone(),
             })
         } else {
             Err(Problem::Unauthorized)
