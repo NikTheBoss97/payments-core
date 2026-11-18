@@ -67,6 +67,8 @@ digits.
 
 - 2026-11-18: An empty IP literal, as in `http://[]/`, is an empty host: RFC 3986's IP
   literal holds an address (section 3.2.2). The `http` crate parses it, with the host `[]`.
+- 2026-11-18: ADR-0061 makes the database's check read the host and the port, so it no
+  longer takes `http://:80/` or `http://merchant.example:port/`.
 
 ## References
 
