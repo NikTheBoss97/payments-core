@@ -16,6 +16,7 @@ use common::{
     APPEND_ONLY, CHECK_VIOLATION, FOREIGN_KEY_VIOLATION, INSUFFICIENT_PRIVILEGE, UNIQUE_VIOLATION,
     assert_guard, assert_violation, runtime_connection, sqlstate, tenant_login,
 };
+use payments_core::operator::{EndpointUrl, UrlRefusal};
 use sqlx::{Connection, PgConnection, PgPool};
 use uuid::Uuid;
 
@@ -129,6 +130,62 @@ async fn an_endpoint_is_an_absolute_http_url_without_a_credential_or_a_fragment(
         "http://merchant.test/\u{7f}",
     ] {
         let err = insert_endpoint(&mut app, Uuid::now_v7(), merchant, url)
+            .await
+            .unwrap_err();
+        assert_violation(err, CHECK_VIOLATION, "webhook_endpoints_url_check");
+    }
+    Ok(())
+}
+
+#[sqlx::test]
+async fn the_check_reads_the_host_and_the_port_as_the_route_does(pool: PgPool) -> sqlx::Result<()> {
+    // The route's parser decides each case (ADR-0060), and the check follows it on the
+    // host and the port (ADR-0061): it takes each URL that the parser stores, and refuses
+    // each host and port that the parser refuses.
+    let mut app = runtime_connection(&pool).await?;
+    let merchant = register_merchant(&mut app).await?;
+    for given in [
+        "http://merchant.example",
+        "http://merchant.example:8000/hooks?from=payments",
+        "HTTP://Merchant.Example/Hooks",
+        "hTtP://127.0.0.1:9/",
+        "http://[::1]:8080/hooks",
+        "http://[::1]/hooks",
+        "http://[fe80::1%25eth0]:8080/",
+        // The largest port, one written with zeros before it, and an empty one, which
+        // means port 80.
+        "http://merchant.example:65535/",
+        "http://merchant.example:0080/",
+        "http://merchant.example:/hooks",
+        "http://merchant.example:",
+        "http://merchant.example?from=payments",
+        // A colon after the authority belongs to the path.
+        "http://merchant.example/a:b/c:99999",
+    ] {
+        let url = EndpointUrl::parse(given).unwrap_or_else(|refusal| panic!("{given}: {refusal}"));
+        insert_endpoint(&mut app, Uuid::now_v7(), merchant, url.as_str()).await?;
+    }
+    for given in [
+        // A host that is empty.
+        "http://:80/",
+        "http://:/",
+        "http://[]/",
+        "http://[]:80/",
+        // A port that a client would not go to.
+        "http://merchant.example:port/",
+        "http://merchant.example:65536/",
+        "http://merchant.example:99999999999999999999/",
+        "http://merchant.example:+80/",
+        "http://merchant.example:80:90/",
+        "http://[::1]x/",
+        "http://[::1]:x/",
+    ] {
+        assert_eq!(
+            EndpointUrl::parse(given),
+            Err(UrlRefusal::NotAbsolute),
+            "{given}"
+        );
+        let err = insert_endpoint(&mut app, Uuid::now_v7(), merchant, given)
             .await
             .unwrap_err();
         assert_violation(err, CHECK_VIOLATION, "webhook_endpoints_url_check");
