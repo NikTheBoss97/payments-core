@@ -2,7 +2,7 @@
 
 # ADR-0050: Webhook endpoints, registered by the operator
 
-- Status: accepted
+- Status: accepted; partly superseded by ADR-0060
 - Date: 2026-11-15
 - Supersedes: in ADR-0024, "It opens only the three operator routes of ADR-0023": the
   operator's key also opens the two routes below.
@@ -78,6 +78,12 @@ and services", for example through a dedicated proxy.
 - Tests: a replayed registration without its secret; disabling twice; an unknown
   endpoint; each kind of malformed URL, and an `https` one; the merchant's role refused on
   both tables; a merchant's key refused on both routes.
+
+## Amendments
+
+- 2026-11-18: ADR-0060 supersedes "Anything else is a malformed body." Text that is not an
+  absolute URL is still `400 malformed-body`; an absolute URL that these rules refuse is
+  `422 unusable-url`.
 
 ## References
 
