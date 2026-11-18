@@ -27,9 +27,10 @@ use crate::payments::{Failure, classify};
 #[derive(Debug, thiserror::Error)]
 pub enum OperatorError {
     /// What the request names does not exist: no merchant to issue a key to or to
-    /// register an endpoint for, or no key to revoke. Nothing is stored, because IDs are
-    /// made by the server, so this cannot become true later (ADR-0023).
-    #[error("no such merchant or API key")]
+    /// register an endpoint for, no key to revoke, or no endpoint to disable. Nothing is
+    /// stored, because IDs are made by the server, so this cannot become true later
+    /// (ADR-0023).
+    #[error("no such merchant, API key or endpoint")]
     NotFound,
     /// The idempotency key already holds an answer, so this attempt rolled back whole.
     /// Look the key up for the answer (ADR-0026).
@@ -232,6 +233,36 @@ pub async fn register_webhook_endpoint(
         id.get(),
         merchant.get(),
         url.as_str()
+    )
+    .execute(&mut *tx)
+    .await
+    .map_err(effect)?;
+    finish(tx, seal).await
+}
+
+/// The reason that a disablement by the operator stores. The relay's reasons are its own
+/// (ADR-0053), and SQL binds each rather than spelling it (ADR-0009).
+const BY_THE_OPERATOR: &str = "operator";
+
+/// Disables a webhook endpoint, under one of the operator's keys (ADR-0050). Disabling it
+/// again changes nothing, whatever disabled it first, and answers too: what the request
+/// asks for already holds.
+///
+/// # Errors
+///
+/// See [`OperatorError`].
+pub async fn disable_webhook_endpoint(
+    pool: &PgPool,
+    seal: &OperatorSeal<'_>,
+    id: EndpointId,
+) -> Result<(), OperatorError> {
+    let effect = |source| OperatorError::at(Stage::Effect, source);
+    let mut tx = pool.begin().await.map_err(effect)?;
+    sqlx::query!(
+        "INSERT INTO webhook_endpoint_disablements (endpoint_id, reason) VALUES ($1, $2) \
+         ON CONFLICT (endpoint_id) DO NOTHING",
+        id.get(),
+        BY_THE_OPERATOR
     )
     .execute(&mut *tx)
     .await

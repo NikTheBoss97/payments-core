@@ -18,8 +18,8 @@ use crate::idempotency::Answer;
 use crate::ids::{ApiKeyId, EndpointId, MerchantId};
 use crate::money::BasisPoints;
 use crate::operator::{
-    EndpointUrl, OperatorError, UrlRefusal, issue_api_key, register_merchant_sealed,
-    register_webhook_endpoint, revoke_api_key,
+    EndpointUrl, OperatorError, UrlRefusal, disable_webhook_endpoint, issue_api_key,
+    register_merchant_sealed, register_webhook_endpoint, revoke_api_key,
 };
 
 /// What a command came to, and the answer that it gives if it applied.
@@ -190,6 +190,41 @@ async fn attempt_register_endpoint(
             }),
         },
     )
+}
+
+/// What `POST /webhook-endpoints/{id}/disable` answers.
+#[derive(Serialize)]
+struct DisabledEndpoint {
+    endpoint_id: String,
+}
+
+/// `POST /webhook-endpoints/{id}/disable`. Disabling a disabled endpoint answers too: what
+/// the request asks for already holds.
+pub(super) async fn disable_endpoint(
+    operator: Operator,
+    PathId(id): PathId<EndpointId>,
+    request: KeyedRequest,
+) -> Response {
+    request
+        .answer_operator(operator.pool(), || attempt_disable(&operator, id, &request))
+        .await
+}
+
+async fn attempt_disable(
+    operator: &Operator,
+    id: EndpointId,
+    request: &KeyedRequest,
+) -> Result<Attempt, Problem> {
+    request.no_body()?;
+    let answer = Answer {
+        status: 200,
+        body: json_text(&DisabledEndpoint {
+            endpoint_id: id.to_string(),
+        }),
+    };
+    let seal = request.operator_seal(&answer);
+    let result = disable_webhook_endpoint(operator.pool(), &seal, id).await;
+    settled(result, answer)
 }
 
 /// What `POST /api-keys/{id}/revoke` answers.

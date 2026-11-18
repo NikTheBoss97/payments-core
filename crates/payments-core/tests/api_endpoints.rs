@@ -2,8 +2,8 @@
 
 //! The operator's routes for a merchant's webhook endpoints (ADR-0050): registering one,
 //! whose secret is derived from the master key and shown once (ADR-0051), with a URL that
-//! the server refuses by what is wrong with it (ADR-0060), under the operator's credential
-//! and idempotency keys (ADR-0026).
+//! the server refuses by what is wrong with it (ADR-0060), and disabling one, under the
+//! operator's credential and idempotency keys (ADR-0026).
 
 mod common;
 
@@ -66,6 +66,33 @@ async fn operator_records(pool: &PgPool) -> sqlx::Result<i64> {
     sqlx::query_scalar!(r#"SELECT count(*) AS "count!" FROM operator_idempotency_records"#)
         .fetch_one(pool)
         .await
+}
+
+/// An endpoint that the operator registered, for a merchant that it registered: its ID.
+async fn endpoint(pools: &Pools) -> String {
+    let merchant = merchant(pools, "merchant").await;
+    let body = with_url("http://a.example/hooks");
+    let reply = register(pools, &merchant, "endpoint", &body).await;
+    assert_eq!(reply.status, StatusCode::CREATED, "{reply:?}");
+    member(&reply, "endpoint_id")
+}
+
+async fn disable(pools: &Pools, endpoint: &str, key: &str) -> Reply {
+    let path = format!("/webhook-endpoints/{endpoint}/disable");
+    send(router(pools.state()), post(&path, &pools.operator, key, "")).await
+}
+
+/// Every disablement held: its endpoint and its reason.
+async fn disablements(pool: &PgPool) -> sqlx::Result<Vec<(Uuid, String)>> {
+    let rows = sqlx::query!(
+        "SELECT endpoint_id, reason FROM webhook_endpoint_disablements ORDER BY endpoint_id"
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|row| (row.endpoint_id, row.reason))
+        .collect())
 }
 
 /// The problem type that a reply names.
@@ -266,6 +293,90 @@ async fn the_database_refuses_another_scheme_user_information_or_a_fragment(
     // The control: a URL that the rules take is stored.
     insert(99, "http://merchant.example/hooks").await?;
     app.close().await;
+    pools.close().await;
+    Ok(())
+}
+
+#[sqlx::test]
+async fn disabling_an_endpoint_answers_200_and_again_once_it_is_disabled(
+    pool: PgPool,
+) -> TestResult {
+    let pools = Pools::login(&pool).await?;
+    let endpoint = endpoint(&pools).await;
+    let id = Uuid::parse_str(&endpoint)?;
+    let first = disable(&pools, &endpoint, "disable").await;
+    assert_eq!(first.status, StatusCode::OK, "{first:?}");
+    assert_eq!(first.body, format!(r#"{{"endpoint_id":"{endpoint}"}}"#));
+    assert_eq!(disablements(&pool).await?, [(id, "operator".to_owned())]);
+    // A retry gets the first answer, and another request on the disabled endpoint gets the
+    // same: what it asks for already holds.
+    for key in ["disable", "again"] {
+        let reply = disable(&pools, &endpoint, key).await;
+        assert_eq!(
+            (reply.status, &reply.body),
+            (first.status, &first.body),
+            "{key}"
+        );
+    }
+    assert_eq!(disablements(&pool).await?, [(id, "operator".to_owned())]);
+    // The merchant's, the endpoint's and the two disablements' keys hold answers.
+    assert_eq!(operator_records(&pool).await?, 4);
+    pools.close().await;
+    Ok(())
+}
+
+#[sqlx::test]
+async fn an_endpoint_that_the_relay_disabled_keeps_its_reason(pool: PgPool) -> TestResult {
+    // A disabled endpoint stays disabled, for the reason that disabled it first (ADR-0050).
+    let pools = Pools::login(&pool).await?;
+    let endpoint = endpoint(&pools).await;
+    let id = Uuid::parse_str(&endpoint)?;
+    // The relay's disablement on a 410 (ADR-0053), as the runtime role writes it.
+    sqlx::query!(
+        "INSERT INTO webhook_endpoint_disablements (endpoint_id, reason) VALUES ($1, $2)",
+        id,
+        "gone"
+    )
+    .execute(&pools.system)
+    .await?;
+    let reply = disable(&pools, &endpoint, "disable").await;
+    assert_eq!(reply.status, StatusCode::OK, "{reply:?}");
+    assert_eq!(disablements(&pool).await?, [(id, "gone".to_owned())]);
+    pools.close().await;
+    Ok(())
+}
+
+#[sqlx::test]
+async fn disabling_an_unknown_endpoint_is_a_404_and_stores_nothing(pool: PgPool) -> TestResult {
+    let pools = Pools::login(&pool).await?;
+    // The control: the route disables an endpoint that it holds.
+    let known = endpoint(&pools).await;
+    let reply = disable(&pools, &known, "known").await;
+    assert_eq!(reply.status, StatusCode::OK, "{reply:?}");
+    let reply = disable(&pools, &endpoint_id(99).to_string(), "unknown").await;
+    assert_eq!(reply.status, StatusCode::NOT_FOUND, "{reply:?}");
+    assert_eq!(problem(&reply), "not-found");
+    assert_eq!(disablements(&pool).await?.len(), 1);
+    // The merchant's, the endpoint's and the known disablement's keys hold answers.
+    assert_eq!(operator_records(&pool).await?, 3);
+    pools.close().await;
+    Ok(())
+}
+
+#[sqlx::test]
+async fn disablements_racing_under_their_own_keys_disable_the_endpoint_once(
+    pool: PgPool,
+) -> TestResult {
+    let pools = Pools::login(&pool).await?;
+    let endpoint = endpoint(&pools).await;
+    let keys: Vec<String> = (0..8).map(|n| format!("disable-{n}")).collect();
+    let replies = join_all(keys.iter().map(|key| disable(&pools, &endpoint, key))).await;
+    for reply in &replies {
+        assert_eq!(reply.status, StatusCode::OK, "{reply:?}");
+        assert_eq!(reply.body, replies[0].body);
+    }
+    let id = Uuid::parse_str(&endpoint)?;
+    assert_eq!(disablements(&pool).await?, [(id, "operator".to_owned())]);
     pools.close().await;
     Ok(())
 }

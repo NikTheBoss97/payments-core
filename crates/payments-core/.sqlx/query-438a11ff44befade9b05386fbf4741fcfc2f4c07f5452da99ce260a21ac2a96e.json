@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "ALTER TABLE webhook_endpoint_disablements DROP CONSTRAINT refuses_all",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "438a11ff44befade9b05386fbf4741fcfc2f4c07f5452da99ce260a21ac2a96e"
+}

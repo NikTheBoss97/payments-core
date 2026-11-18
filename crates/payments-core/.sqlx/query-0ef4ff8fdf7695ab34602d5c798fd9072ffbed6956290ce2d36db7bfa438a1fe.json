@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "ALTER TABLE webhook_endpoint_disablements ADD CONSTRAINT refuses_all CHECK (recorded_at IS NULL) NOT VALID",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "0ef4ff8fdf7695ab34602d5c798fd9072ffbed6956290ce2d36db7bfa438a1fe"
+}
