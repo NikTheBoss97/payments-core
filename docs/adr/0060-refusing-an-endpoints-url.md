@@ -63,6 +63,11 @@ digits.
   the check takes `http://:80/` and `http://merchant.example:port/`, which only the route
   refuses.
 
+## Amendments
+
+- 2026-11-18: An empty IP literal, as in `http://[]/`, is an empty host: RFC 3986's IP
+  literal holds an address (section 3.2.2). The `http` crate parses it, with the host `[]`.
+
 ## References
 
 - R. Fielding, M. Nottingham and J. Reschke, [RFC 9110: HTTP Semantics](https://www.rfc-editor.org/rfc/rfc9110.html) (IETF, 2022), sections 4.2.1 (the `http` URI), 15.5.1 (400) and 15.5.21 (422).

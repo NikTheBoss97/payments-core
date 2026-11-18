@@ -97,8 +97,9 @@ impl EndpointUrl {
 
 /// Whether an authority names a host, and after it nothing, or a colon and a port in decimal
 /// digits that fits in 16 bits, an empty one meaning port 80 (RFC 9110, section 4.2.1;
-/// RFC 3986, section 3.2.3). The parser takes an empty host, and any text after the host,
-/// whose port a client cannot read and replaces with 80 (ADR-0060).
+/// RFC 3986, sections 3.2.2 and 3.2.3). The parser takes an empty host, even an empty IP
+/// literal, `[]`, and any text after the host, whose port a client cannot read and replaces
+/// with 80 (ADR-0060).
 fn names_a_host_and_its_port(authority: &Authority) -> bool {
     let host = authority.host();
     let fits = |digits: &str| {
@@ -110,7 +111,8 @@ fn names_a_host_and_its_port(authority: &Authority) -> bool {
         .rsplit('@')
         .next()
         .and_then(|host_and_port| host_and_port.strip_prefix(host));
-    !host.is_empty()
+    // An empty name, or empty brackets, names no host: an IP literal holds an address.
+    !matches!(host, "" | "[]")
         && after_host
             .is_some_and(|rest| rest.is_empty() || rest.strip_prefix(':').is_some_and(fits))
 }
@@ -360,6 +362,8 @@ mod tests {
             "http://merchant.example/\u{7}",
             // A host that is empty, and a port that a client would not go to.
             "http://:80/",
+            "http://[]/",
+            "http://[]:80/",
             "http://merchant.example:65536/",
             "http://merchant.example:+80/",
             "http://[::1]x/",
