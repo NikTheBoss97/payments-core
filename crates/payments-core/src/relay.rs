@@ -361,6 +361,23 @@ impl Relay {
         }
     }
 
+    /// The attempt of `delivery` was not made: the service's database did not give the
+    /// endpoint's URL, its disablement or the event's body (ADR-0053). The attempt ends,
+    /// and the delivery waits like a retry, for its delay drawn with `draw` and a token,
+    /// but its three days do not start: only the endpoint's answers count against it.
+    pub fn not_sent(&mut self, delivery: DeliveryId, now: OffsetDateTime, draw: u64) {
+        if self.in_flight.remove(&delivery.get()).is_none() {
+            return;
+        }
+        if let Some(known) = self.known.get_mut(&delivery.get()) {
+            known.retry = known
+                .retry
+                .checked_add(1)
+                .expect("fewer than 2^32 retries of a delivery");
+            known.due = retries::after(now, retries::delay(known.retry, None, draw));
+        }
+    }
+
     /// Adds a delivery that the relay does not know, unless its endpoint is disabled.
     fn learn(&mut self, delivery: Delivery, retry: u32, due: OffsetDateTime) {
         if self.disabled.contains(&delivery.endpoint.get()) {
@@ -714,6 +731,82 @@ mod tests {
         );
         assert_eq!(relay.answered(gone[2].id, FAILED, at(0), 0), None);
         assert_eq!(relay.answered(gone[3].id, GONE, at(0), 0), None);
+    }
+
+    #[test]
+    fn an_attempt_not_sent_frees_its_place_and_waits_like_a_retry() {
+        // The service's database did not give what the attempt needed: its place goes to
+        // another delivery, and it waits a retry's delay, for a token.
+        let busy = [1, 2, 3, 4, 5].map(|n| delivery(1, n));
+        let mut relay = holding(1);
+        relay.hand_over(busy, at(0));
+        assert_eq!(relay.step(at(0)).attempts, busy[..4]);
+        // The draw 1,500 puts the first retry's delay, drawn within [0, 2 s], at 1.5 s.
+        relay.not_sent(busy[0].id, at(0), 1_500);
+        // Its attempt is no longer in flight, so a late answer to it changes nothing.
+        assert_eq!(relay.answered(busy[0].id, OK, at(0), 0), None);
+        assert_eq!(relay.step(at(0)).attempts, [busy[4]]);
+        for done in &busy[1..] {
+            assert_eq!(
+                relay.answered(done.id, OK, at(0), 0),
+                Some(Effect::Record(done.id))
+            );
+        }
+        assert_eq!(relay.step(at(1_499)).attempts, []);
+        assert_eq!(relay.step(at(1_500)).attempts, [busy[0]]);
+        // Without a token, it waits.
+        let mut relay = broke();
+        let single = delivery(2, 6);
+        relay.hand_over([single], at(0));
+        assert_eq!(relay.step(at(0)).attempts, [single]);
+        relay.not_sent(single.id, at(0), 0);
+        assert_eq!(relay.step(at(60_000)).attempts, []);
+        // An attempt not in flight changes nothing.
+        relay.not_sent(single.id, at(0), 0);
+        assert_eq!(relay.step(at(60_000)).attempts, []);
+    }
+
+    #[test]
+    fn an_attempt_not_sent_never_starts_the_three_days() {
+        // Not sent at every attempt for four days: only the endpoint's answers count
+        // against it, so it is never disabled.
+        let mut relay = plenty();
+        let stuck = delivery(1, 1);
+        relay.hand_over([stuck], at(0));
+        assert_eq!(relay.step(at(0)).attempts, [stuck]);
+        relay.not_sent(stuck.id, at(0), 0);
+        let mut now = 0_i64;
+        while now < THREE_DAYS.checked_add(86_400_000).expect("small") {
+            now = now.checked_add(3_600_000).expect("a short run");
+            let step = relay.step(at(now));
+            assert_eq!(step.effects, []);
+            assert_eq!(step.attempts, [stuck]);
+            relay.not_sent(stuck.id, at(now), 0);
+        }
+    }
+
+    #[test]
+    fn a_delivery_that_failed_keeps_its_three_days_when_not_sent() {
+        // Refused at the start, then never sent again: its three days still end it.
+        let mut relay = plenty();
+        let refused = delivery(1, 1);
+        failing(&mut relay, &[refused]);
+        let mut now = 0_i64;
+        loop {
+            now = now.checked_add(3_600_000).expect("a short run");
+            let step = relay.step(at(now));
+            if now >= THREE_DAYS {
+                assert_eq!(
+                    step.effects,
+                    [Effect::Disable(endpoint(1), Reason::Failing)]
+                );
+                break;
+            }
+            assert_eq!(step.effects, []);
+            for attempt in step.attempts {
+                relay.not_sent(attempt.id, at(now), 0);
+            }
+        }
     }
 
     #[test]
@@ -1075,6 +1168,9 @@ mod tests {
         /// The attempt at this place among those in flight finds its endpoint disabled by
         /// the operator.
         FoundDisabled { which: usize },
+        /// The attempt at this place among those in flight is not sent: the service's
+        /// database did not give what it needed.
+        NotSent { which: usize, draw: u64 },
         /// A search, which reads what changed since the previous one (ADR-0062).
         Search,
     }
@@ -1103,6 +1199,7 @@ mod tests {
                 }
             }),
             any::<usize>().prop_map(|which| Op::FoundDisabled { which }),
+            (any::<usize>(), any::<u64>()).prop_map(|(which, draw)| Op::NotSent { which, draw }),
             Just(Op::Search),
         ]
     }
@@ -1110,9 +1207,10 @@ mod tests {
     /// Runs `ops` against a relay and a model of the database, and checks after each that
     /// no endpoint has more than [`AT_ONCE`] attempts in flight, that nothing is attempted
     /// for an endpoint after it is disabled, and that the relay holds every delivery that
-    /// is not finished and that it has heard of. A relay without tokens must never retry:
-    /// it attempts each delivery once at most, and never one that only the first search
-    /// found, which may have been attempted before a restart.
+    /// is not finished and that it has heard of. An endpoint is disabled as failing only
+    /// once one of its attempts got an answer that failed. A relay without tokens must
+    /// never retry: it attempts each delivery once at most, and never one that only the
+    /// first search found, which may have been attempted before a restart.
     fn run(ops: &[Op], tokens: u32) -> Result<(), TestCaseError> {
         let mut relay = holding(tokens);
         let mut now = 0_i64;
@@ -1125,6 +1223,8 @@ mod tests {
         let mut attempted: HashSet<DeliveryId> = HashSet::new();
         let mut found_first: HashSet<DeliveryId> = HashSet::new();
         let mut heard: HashSet<DeliveryId> = HashSet::new();
+        // The endpoints with an attempt that got an answer that failed.
+        let mut failed: HashSet<EndpointId> = HashSet::new();
         for op in ops {
             match *op {
                 Op::Commit { to, dropped } => {
@@ -1147,6 +1247,7 @@ mod tests {
                             return Err(TestCaseError::fail(format!("{effect:?}")));
                         };
                         prop_assert!(disabled.insert(endpoint), "disabled twice: {endpoint:?}");
+                        prop_assert!(failed.contains(&endpoint), "never failed: {endpoint:?}");
                         unfinished.retain(|(delivery, _)| delivery.endpoint != endpoint);
                     }
                     for attempt in step.attempts {
@@ -1186,8 +1287,20 @@ mod tests {
                             unfinished
                                 .retain(|(delivery, _)| delivery.endpoint != attempt.endpoint);
                         }
-                        Verdict::Gone | Verdict::Again { .. } => prop_assert_eq!(effect, None),
+                        Verdict::Gone => prop_assert_eq!(effect, None),
+                        Verdict::Again { .. } => {
+                            prop_assert_eq!(effect, None);
+                            failed.insert(attempt.endpoint);
+                        }
                     }
+                }
+                Op::NotSent { which, draw } => {
+                    if in_flight.is_empty() {
+                        continue;
+                    }
+                    let place = which.checked_rem(in_flight.len()).expect("some in flight");
+                    let attempt = in_flight.remove(place);
+                    relay.not_sent(attempt.id, at(now), draw);
                 }
                 Op::FoundDisabled { which } => {
                     if in_flight.is_empty() {
