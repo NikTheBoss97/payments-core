@@ -2,7 +2,7 @@
 
 # ADR-0055: Storing events and deliveries
 
-- Status: accepted
+- Status: accepted; partly superseded by ADR-0061
 - Date: 2026-11-16
 
 ## Context
@@ -100,6 +100,8 @@ How a delivery is tied to its event and its endpoint:
 - 2026-11-18: "The server parses first, answers 422" reads as ADR-0060 decides: `400
   malformed-body` for text that is not an absolute URL, and `422 unusable-url` for an
   absolute URL that the rules refuse. The check below stays as it is.
+- 2026-11-18: ADR-0061 supersedes the authority of the URL's CHECK: a host, an IP literal or
+  a name, then nothing, or a colon and a port of at most 65535. The rest of the check stands.
 
 ## References
 

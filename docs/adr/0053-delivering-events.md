@@ -140,6 +140,10 @@ How the tokens are shared:
   length, so a 429, 502 or 504 without `Retry-After` backs off like any other failure. The
   deliveries of an endpoint that the relay disables leave its memory with it, and an
   answer that arrives for one of them later is recorded only if it is a `2xx`.
+- 2026-11-18: An attempt parses its endpoint's stored URL with ADR-0060's rules, which
+  ADR-0061's check stands behind. A URL that the rules refuse is an attempt without an
+  answer: the endpoint cannot be reached at it as written, and the three days end it as
+  `failing`.
 
 ## References
 
