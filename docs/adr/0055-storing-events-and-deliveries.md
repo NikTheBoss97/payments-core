@@ -95,6 +95,12 @@ How a delivery is tied to its event and its endpoint:
   its pair of SQLSTATE and constraint name, and write a delivery inside a savepoint; the
   catalog test pins the columns, constraints, defaults, triggers and grants.
 
+## Amendments
+
+- 2026-11-18: "The server parses first, answers 422" reads as ADR-0060 decides: `400
+  malformed-body` for text that is not an absolute URL, and `422 unusable-url` for an
+  absolute URL that the rules refuse. The check below stays as it is.
+
 ## References
 
 - PostgreSQL 18 manual, [System Information Functions and Operators](https://www.postgresql.org/docs/18/functions-info.html): `pg_current_xact_id()`.

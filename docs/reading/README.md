@@ -13,7 +13,7 @@ publication: its title, authors, year and link.
 |---|---|---|
 | [Ledgers and accounting](ledgers-and-accounting.md) | Double-entry bookkeeping, ledgers as immutable logs, and recording time. | 22 |
 | [Money and identifiers](money-and-identifiers.md) | Representing amounts and currencies exactly, splitting them without losing a unit, and generating identifiers. | 10 |
-| [Schema design and database errors](schema-and-errors.md) | Constraints, privileges and operator resolution in PostgreSQL, NULLs and keys, and error codes that programs can act on. | 15 |
+| [Schema design and database errors](schema-and-errors.md) | Constraints, privileges and operator resolution in PostgreSQL, NULLs and keys, and error codes that programs can act on. | 16 |
 | [Transactions and concurrency](transactions-and-concurrency.md) | Isolation levels, locking, coordination and what a database transaction guarantees. | 14 |
 | [Idempotency and messaging](idempotency-and-messaging.md) | Idempotency keys, retries, transactional messaging and webhooks. | 39 |
 | [Authentication and tenant isolation](authentication-and-tenancy.md) | API keys, signed messages, least privilege, object-level authorization and row-level security. | 19 |
