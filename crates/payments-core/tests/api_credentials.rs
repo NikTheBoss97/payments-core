@@ -227,6 +227,7 @@ async fn a_key_that_cannot_be_looked_up_is_a_503_and_never_a_401(pool: PgPool) -
         pools.tenant.clone(),
         pools.tenant.clone(),
         pools.operator.digest(),
+        pools.master.clone(),
         unused_webhooks(),
         common::api::unused_handovers(),
     );
@@ -236,6 +237,7 @@ async fn a_key_that_cannot_be_looked_up_is_a_503_and_never_a_401(pool: PgPool) -
         pools.tenant.clone(),
         closed,
         pools.operator.digest(),
+        pools.master.clone(),
         unused_webhooks(),
         common::api::unused_handovers(),
     );

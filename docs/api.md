@@ -24,6 +24,7 @@ cannot use it. A variable that is set but empty counts as not set.
 | `MOCK_PSP_URL` | Where the provider's API is: `http://` and its host and port, with no path. | required |
 | `MOCK_PSP_API_KEY` | The key that the server's calls to the provider carry, as `Authorization: Bearer`. The server never logs it. | required |
 | `MOCK_PSP_SIGNING_KEYS` | The keys that sign the provider's notifications, each `whsec_` and the base64 of 24 to 64 bytes, separated by spaces: the current one, and during a rotation the next. | required |
+| `WEBHOOK_MASTER_KEY` | The key from which each webhook endpoint's secret is derived, `whsec_` and the base64 of 32 bytes. It signs nothing itself, and the server never logs it. | required |
 | `BIND_ADDRESS` | Where to listen. | `127.0.0.1:8080` |
 
 Beside its routes, the server sends the requests recorded for the provider and sweeps
@@ -295,6 +296,33 @@ Revokes an API key, which stops working on its next request. It takes no body, n
 { "api_key_id": "019b76da-a800-7000-8000-000000000002" }
 ```
 
+### `POST /merchants/{id}/webhook-endpoints`
+
+Registers an endpoint that the merchant's events will be delivered to. Its URL is absolute and
+`http`, without user information or a fragment
+([ADR-0050](adr/0050-webhook-endpoints-registered-by-the-operator.md)). Text that is not an
+absolute URL with a host, and with a port of at most 65535 if it names one, is a
+[`malformed-body`](#malformed-body), and an absolute URL that these rules refuse is
+[`unusable-url`](#unusable-url) ([ADR-0060](adr/0060-refusing-an-endpoints-url.md)). The scheme
+is stored in lowercase.
+
+```json
+{ "url": "http://merchant.example:8000/hooks" }
+```
+
+`201`, with the secret that signs every delivery to the endpoint, which is shown here and never
+again:
+
+```json
+{
+  "endpoint_id": "019b76da-a800-7000-8000-000000000003",
+  "secret": "whsec_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+}
+```
+
+A retry under the same key gets the endpoint's ID alone. If the first answer was lost, register
+another endpoint.
+
 ## The provider's notifications
 
 `POST /webhooks/mock` takes the payment provider's notifications, signed as Standard
@@ -373,6 +401,13 @@ gets its answer.
 
 `422`. A well-formed code that the service does not know. Nothing is stored, because
 currencies change only by a migration.
+
+### unusable-url
+
+`422`. An endpoint's URL that is absolute but that the service will not deliver to: another
+scheme than `http`, user information or a fragment
+([ADR-0060](adr/0060-refusing-an-endpoints-url.md)). Nothing was decided, so the key is still
+free.
 
 ### illegal-move
 

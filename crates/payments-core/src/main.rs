@@ -16,6 +16,7 @@ use payments_core::credentials::SecretDigest;
 use payments_core::notifications::SigningKeys;
 use payments_core::psp::{InvalidClient, PspClient};
 use payments_core::sender::Sender;
+use payments_core::signing::MasterKey;
 use sqlx::PgPool;
 use sqlx::types::time::OffsetDateTime;
 use tokio::net::TcpListener;
@@ -46,6 +47,9 @@ async fn run() -> Result<(), Box<dyn Error>> {
     // Its errors say what is wrong with a key, never what the key holds.
     let keys = SigningKeys::parse(&required("MOCK_PSP_SIGNING_KEYS")?)
         .map_err(|error| format!("MOCK_PSP_SIGNING_KEYS: {error}"))?;
+    // Its errors say what is wrong with the key, never what the key holds (ADR-0051).
+    let master = MasterKey::parse(&required("WEBHOOK_MASTER_KEY")?)
+        .map_err(|error| format!("WEBHOOK_MASTER_KEY: {error}"))?;
     let psp_url = required("MOCK_PSP_URL")?;
     let psp_key = required("MOCK_PSP_API_KEY")?;
     // One client for the route's catch-ups and one for the sender's task.
@@ -69,6 +73,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
         tenant,
         system,
         operator,
+        master,
         Webhooks::new(psp, keys),
         handovers,
     );

@@ -38,6 +38,9 @@ pub enum Problem {
     KeyReused,
     /// A currency that is well formed but not one that the service knows (ADR-0023).
     UnknownCurrency,
+    /// An endpoint's URL that is absolute but that the rules refuse: another scheme than
+    /// `http`, user information or a fragment (ADR-0060).
+    UnusableUrl,
     /// The payment's status does not allow this move. It is final, so it is stored under
     /// the key (ADR-0026).
     IllegalMove,
@@ -111,6 +114,11 @@ impl Problem {
                 StatusCode::UNPROCESSABLE_ENTITY,
                 "unknown-currency",
                 "The service does not know this currency",
+            ),
+            Self::UnusableUrl => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "unusable-url",
+                "The service cannot deliver to this URL",
             ),
             Self::IllegalMove => (
                 StatusCode::CONFLICT,
@@ -225,7 +233,7 @@ mod tests {
     use super::*;
 
     /// Every problem. The match stops a new one from compiling until it is added here.
-    const ALL: [Problem; 16] = [
+    const ALL: [Problem; 17] = [
         Problem::Unauthorized,
         Problem::NotFound,
         Problem::MethodNotAllowed,
@@ -234,6 +242,7 @@ mod tests {
         Problem::BodyTooLarge,
         Problem::KeyReused,
         Problem::UnknownCurrency,
+        Problem::UnusableUrl,
         Problem::IllegalMove,
         Problem::AmountAboveLimit,
         Problem::AuthorizationRequested,
@@ -254,6 +263,7 @@ mod tests {
             | Problem::BodyTooLarge
             | Problem::KeyReused
             | Problem::UnknownCurrency
+            | Problem::UnusableUrl
             | Problem::IllegalMove
             | Problem::AmountAboveLimit
             | Problem::AuthorizationRequested

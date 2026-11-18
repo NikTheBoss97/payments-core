@@ -119,6 +119,7 @@ impl World {
             self.pools.tenant.clone(),
             system,
             self.pools.operator.digest(),
+            self.pools.master.clone(),
             self.webhooks.clone(),
             common::api::unused_handovers(),
         );
@@ -283,6 +284,7 @@ async fn every_refusal_is_the_same_problem_and_records_nothing(pool: PgPool) -> 
         pools.tenant.clone(),
         pools.system.clone(),
         pools.operator.digest(),
+        pools.master.clone(),
         webhooks_for(&key),
         common::api::unused_handovers(),
     );
@@ -338,6 +340,7 @@ async fn a_notification_that_cannot_be_recorded_is_a_503_that_asks_for_it_again(
         pools.tenant.clone(),
         closed,
         pools.operator.digest(),
+        pools.master.clone(),
         webhooks_for(&key),
         common::api::unused_handovers(),
     );
@@ -402,6 +405,7 @@ async fn the_route_records_as_the_system_role_without_the_merchants_pool(
         closed,
         pools.system.clone(),
         pools.operator.digest(),
+        pools.master.clone(),
         webhooks_for(&key),
         common::api::unused_handovers(),
     );

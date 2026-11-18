@@ -8,6 +8,8 @@ use std::time::Duration;
 use axum::Router;
 use axum::body::Body;
 use axum::http::{HeaderMap, Method, Request, StatusCode};
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD;
 use http_body_util::BodyExt;
 use mock_psp::signing::SigningKey;
 use payments_core::accounts::Psp;
@@ -17,6 +19,7 @@ use payments_core::ids::{MerchantId, PaymentId, RequestId};
 use payments_core::notifications::SigningKeys;
 use payments_core::payments::{create_payment, register_merchant};
 use payments_core::psp::PspClient;
+use payments_core::signing::MasterKey;
 use payments_core::tenancy::Tenant;
 use sqlx::PgPool;
 use tokio::sync::mpsc;
@@ -204,13 +207,23 @@ pub fn unused_handovers() -> mpsc::Sender<RequestId> {
     mpsc::channel(1).0
 }
 
-/// The two login roles' pools, as the server holds them (ADR-0025), and the operator's
-/// secret, of which the server holds the digest (ADR-0024). The system role's connections
-/// act through `SET ROLE`, so close both before the test returns.
+/// A master key made now, written as the server reads it: `whsec_` and the base64 of 32
+/// bytes from the operating system (ADR-0051). No master key sits in the repository.
+pub fn new_master_key() -> String {
+    let mut bytes = [0_u8; 32];
+    getrandom::fill(&mut bytes).expect("the operating system's random bytes");
+    format!("whsec_{}", STANDARD.encode(bytes))
+}
+
+/// The two login roles' pools, as the server holds them (ADR-0025), the operator's secret,
+/// of which the server holds the digest (ADR-0024), and the master key of the endpoints'
+/// secrets (ADR-0051). The system role's connections act through `SET ROLE`, so close both
+/// before the test returns.
 pub struct Pools {
     pub tenant: PgPool,
     pub system: PgPool,
     pub operator: ApiKeySecret,
+    pub master: MasterKey,
 }
 
 impl Pools {
@@ -219,6 +232,7 @@ impl Pools {
             tenant: tenant_pool(pool).await?,
             system: runtime_pool(pool).await?,
             operator: ApiKeySecret::generate(),
+            master: MasterKey::parse(&new_master_key()).expect("32 bytes"),
         })
     }
 
@@ -227,6 +241,7 @@ impl Pools {
             self.tenant.clone(),
             self.system.clone(),
             self.operator.digest(),
+            self.master.clone(),
             unused_webhooks(),
             unused_handovers(),
         )

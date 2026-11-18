@@ -167,6 +167,7 @@ async fn the_comparison_in_rust_holds_with_no_row_level_security(pool: PgPool) -
         pools.system.clone(),
         pools.system.clone(),
         pools.operator.digest(),
+        pools.master.clone(),
         unused_webhooks(),
         common::api::unused_handovers(),
     );
