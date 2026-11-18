@@ -144,6 +144,16 @@ How the tokens are shared:
   ADR-0061's check stands behind. A URL that the rules refuse is an attempt without an
   answer: the endpoint cannot be reached at it as written, and the three days end it as
   `failing`.
+- 2026-11-18: An attempt that the service could not make, because its database did not give
+  the endpoint's URL, its disablement or the event's body, is no failed attempt: it waits
+  like a retry, for its delay and a token, and does not start the three days.
+- 2026-11-18: An answer is its head: a `2xx` is a success once its head arrives within the
+  15 seconds. Its body is then read for at most a second and 64 KiB, only so that the
+  connection can be used again, and nothing in it changes the answer.
+- 2026-11-18: `Retry-After` is read in either of RFC 9110's forms, seconds or an HTTP-date
+  in any of its three formats. A date counts from the attempt's start, one already past
+  asks for no wait, and a wait too long for 32 bits reads as the longest. The PSP's
+  `Retry-After` is still read in seconds only, its format being ours (ADR-0032).
 
 ## References
 

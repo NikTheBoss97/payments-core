@@ -2,7 +2,7 @@
 
 # ADR-0052: How the relay finds what to send
 
-- Status: accepted
+- Status: accepted; partly superseded by ADR-0062
 - Date: 2026-11-15
 
 ## Context
@@ -91,6 +91,10 @@ recorded (ADR-0042).
   misses it, and one that a search no longer returns is finished and forgotten. The mark
   never falls: it becomes the higher of itself and the lower of that `xmin` and the
   smallest transaction ID among the unfinished deliveries found.
+- 2026-11-18: ADR-0062 supersedes the search, the mark, the long transaction and the
+  restart, and the amendment above: each search reads the transactions that had not
+  completed at the previous one's snapshot. Each event's transaction ID and the handover
+  stand.
 
 ## References
 
