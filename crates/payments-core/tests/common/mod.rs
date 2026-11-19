@@ -15,13 +15,15 @@
 pub mod api;
 pub mod crashes;
 pub mod keys;
+pub mod outbox;
 pub mod payments;
 pub mod psp;
 
 use std::time::{Duration, Instant};
 
 use payments_core::ids::{
-    AccountId, ApiKeyId, EndpointId, MerchantId, PaymentId, RequestId, TransactionId, TransitionId,
+    AccountId, ApiKeyId, DeliveryId, EndpointId, EventId, MerchantId, PaymentId, RequestId,
+    TransactionId, TransitionId,
 };
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{Connection, PgConnection, PgPool, Postgres, Transaction};
@@ -284,6 +286,14 @@ pub fn request_id(n: u32) -> RequestId {
 /// A fixed webhook endpoint ID, from [`test_uuid`].
 pub fn endpoint_id(n: u32) -> EndpointId {
     EndpointId::try_from(test_uuid(n)).expect("test_uuid builds UUIDv7 values")
+}
+
+pub fn event_id(n: u32) -> EventId {
+    EventId::try_from(test_uuid(n)).expect("test_uuid builds UUIDv7 values")
+}
+
+pub fn delivery_id(n: u32) -> DeliveryId {
+    DeliveryId::try_from(test_uuid(n)).expect("test_uuid builds UUIDv7 values")
 }
 
 /// The SQLSTATE of a database error, or a panic if the error is not one.

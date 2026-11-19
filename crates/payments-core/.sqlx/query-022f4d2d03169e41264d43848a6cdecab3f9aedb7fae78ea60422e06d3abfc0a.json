@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "REVOKE SELECT ON payment_events FROM payments_app",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "022f4d2d03169e41264d43848a6cdecab3f9aedb7fae78ea60422e06d3abfc0a"
+}
