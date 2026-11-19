@@ -17,7 +17,7 @@ use std::fmt;
 use std::time::Duration;
 
 use axum::body::Bytes;
-use axum::http::{HeaderMap, HeaderValue, Method, Request, StatusCode, Uri, header};
+use axum::http::{HeaderValue, Method, Request, StatusCode, Uri, header};
 use http_body_util::{BodyExt, Full, LengthLimitError, Limited};
 use hyper_util::client::legacy::Client;
 use hyper_util::client::legacy::connect::HttpConnector;
@@ -32,6 +32,7 @@ use crate::accounts::Psp;
 use crate::ids::{PaymentId, RequestId};
 use crate::money::{Currency, PositiveAmount};
 use crate::requests::RequestKind;
+use crate::retries::retry_after;
 use crate::times::BusinessTime;
 
 /// The most bytes that a history's body may hold: far above any payment's history, and
@@ -337,17 +338,6 @@ impl From<Unanswered> for SendError {
             Unanswered::TimedOut => Self::TimedOut,
         }
     }
-}
-
-/// A `Retry-After` in seconds. The HTTP-date form reads as none.
-fn retry_after(headers: &HeaderMap) -> Option<u32> {
-    headers
-        .get(header::RETRY_AFTER)?
-        .to_str()
-        .ok()?
-        .trim()
-        .parse()
-        .ok()
 }
 
 /// A payment's history in the service's own types (ADR-0031, ADR-0038): its facts at
@@ -1114,21 +1104,6 @@ mod tests {
             );
         }
         assert!(read(&body(json!([fact(&"f".repeat(255), 1)]))).is_ok());
-    }
-
-    #[test]
-    fn a_retry_after_is_read_in_seconds_only() {
-        let mut headers = HeaderMap::new();
-        assert_eq!(retry_after(&headers), None);
-        for (value, read) in [
-            ("120", Some(120)),
-            (" 7 ", Some(7)),
-            ("Wed, 21 Oct 2015 07:28:00 GMT", None),
-            ("-1", None),
-        ] {
-            headers.insert(header::RETRY_AFTER, HeaderValue::from_static(value));
-            assert_eq!(retry_after(&headers), read, "{value}");
-        }
     }
 
     #[test]
