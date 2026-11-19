@@ -29,7 +29,8 @@ pub const FAILING_AFTER: Duration = Duration::from_secs(259_200);
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Answer {
     /// The endpoint answered with this status, and with a `Retry-After` of this many
-    /// seconds, if it gave one in seconds.
+    /// seconds, if it gave one: seconds, or a date counted from the attempt's start
+    /// (ADR-0053).
     Status {
         status: u16,
         retry_after: Option<u32>,
