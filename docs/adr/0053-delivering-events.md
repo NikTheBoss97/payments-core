@@ -154,6 +154,10 @@ How the tokens are shared:
   in any of its three formats. A date counts from the attempt's start, one already past
   asks for no wait, and a wait too long for 32 bits reads as the longest. The PSP's
   `Retry-After` is still read in seconds only, its format being ours (ADR-0032).
+- 2026-11-19: The relay's records insert with `ON CONFLICT DO NOTHING` on their unique
+  keys, a success's on its delivery and a disablement's on its endpoint, as the operator's
+  route does (ADR-0050). Recording either again writes nothing and raises no `23505`, and
+  a first disablement keeps its reason.
 
 ## References
 
