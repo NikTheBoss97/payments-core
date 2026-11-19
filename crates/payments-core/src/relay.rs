@@ -80,7 +80,7 @@ pub struct Delivery {
 /// What the server carries out after an answer (ADR-0053).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Effect {
-    /// Records the delivery's success: a `23505` means that it is recorded already.
+    /// Records the delivery's success, once: recording it again writes nothing.
     Record(DeliveryId),
     /// Disables the endpoint, and its unfinished deliveries end with it.
     Disable(EndpointId, Reason),
@@ -93,6 +93,18 @@ pub enum Reason {
     Gone,
     /// One of its deliveries has gone [`FAILING_AFTER`] without a success.
     Failing,
+}
+
+impl Reason {
+    /// The label that the database stores. SQL binds it rather than spelling it
+    /// (ADR-0009).
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Gone => "gone",
+            Self::Failing => "failing",
+        }
+    }
 }
 
 /// What a step asks of the server: the endpoints to disable, then the attempts to start.
@@ -123,7 +135,7 @@ impl XactId {
 
 /// What the server reads of a snapshot, in a statement of its own before a search's rows
 /// (ADR-0062): its `xmax`, at or above which no transaction had completed, and the
-/// transactions then in progress.
+/// transactions below it then in progress.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Snapshot {
     pub xmax: XactId,

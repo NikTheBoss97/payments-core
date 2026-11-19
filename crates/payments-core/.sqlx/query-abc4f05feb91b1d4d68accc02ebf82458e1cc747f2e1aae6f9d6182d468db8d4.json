@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO webhook_delivery_successes (delivery_id) VALUES ($1) ON CONFLICT (delivery_id) DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "abc4f05feb91b1d4d68accc02ebf82458e1cc747f2e1aae6f9d6182d468db8d4"
+}

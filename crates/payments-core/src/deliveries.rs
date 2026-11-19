@@ -1,8 +1,10 @@
 // Author: Nicola Antonello
 
 //! The relay's input and output (ADR-0052, ADR-0053, ADR-0062): one attempt to deliver an
-//! event to a merchant's endpoint. The relay decides which attempts to make and what their
-//! answers mean; this module reads what an attempt needs from the database, and posts it.
+//! event to a merchant's endpoint, the search for the deliveries not finished, and the
+//! records of what the relay decided. The relay decides which attempts to make and what
+//! their answers mean; this module reads the database, posts the attempts and writes the
+//! records.
 
 use std::time::Duration;
 
@@ -14,10 +16,13 @@ use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::rt::TokioExecutor;
 use sqlx::PgPool;
 use sqlx::types::time::OffsetDateTime;
+use uuid::Uuid;
 
+use crate::db::{CommitError, commit};
 use crate::events::{self, BodyError};
+use crate::ids::{DeliveryId, EndpointId, EventId};
 use crate::operator::EndpointUrl;
-use crate::relay::{Answer, Delivery};
+use crate::relay::{Answer, Delivery, Effect, Search, Snapshot, XactId};
 use crate::retries::retry_after_from;
 use crate::signing::{MasterKey, sign};
 
@@ -61,6 +66,26 @@ pub enum NotSent {
     /// The event's body could not be read.
     #[error("the event's body could not be read")]
     Body(#[source] BodyError),
+}
+
+/// Why a search could not be made: the snapshot or the deliveries could not be read. The
+/// relay learns nothing, and searches again at a later step.
+#[derive(Debug, thiserror::Error)]
+#[error("the deliveries not finished could not be searched")]
+pub struct SearchError {
+    #[source]
+    source: sqlx::Error,
+}
+
+/// Why an effect could not be recorded.
+#[derive(Debug, thiserror::Error)]
+pub enum RecordError {
+    /// The insert failed, and wrote nothing.
+    #[error("the effect could not be written")]
+    Database(#[source] sqlx::Error),
+    /// The `COMMIT` failed, so the effect may or may not be recorded (ADR-0014).
+    #[error("the effect may or may not be recorded")]
+    NotConfirmed(#[source] CommitError),
 }
 
 impl DeliveryClient {
@@ -146,5 +171,144 @@ impl DeliveryClient {
         // Whether the body ends in time decides only whether the connection is kept.
         let _ = tokio::time::timeout(DRAIN_TIME, drain).await;
         answer
+    }
+}
+
+/// Reads, as the system role, the snapshot and then the deliveries that `search` asks for
+/// (ADR-0062). The snapshot comes first, in a statement of its own: its `xmax`, and the
+/// transactions then in progress. A later statement reads the deliveries not finished,
+/// with no success and an endpoint not disabled: of every transaction for a full search,
+/// and otherwise of the transactions that had not completed at the previous snapshot, in
+/// its list or at or above its `xmax`. The relay keeps the new snapshot for the next search.
+///
+/// # Errors
+///
+/// [`SearchError`] when either could not be read.
+pub async fn search(
+    pool: &PgPool,
+    search: &Search,
+) -> Result<(Snapshot, Vec<Delivery>), SearchError> {
+    let failed = |source| SearchError { source };
+    let read = sqlx::query!(
+        r#"SELECT pg_snapshot_xmax(s)::text::bigint AS "xmax!",
+                  ARRAY(SELECT x::text::bigint FROM pg_snapshot_xip(s) AS x) AS "in_progress!"
+             FROM pg_current_snapshot() AS s"#
+    )
+    .fetch_one(pool)
+    .await
+    .map_err(failed)?;
+    let snapshot = Snapshot {
+        xmax: read_xact_id(read.xmax),
+        in_progress: read.in_progress.into_iter().map(read_xact_id).collect(),
+    };
+    let found = match search {
+        Search::Full => {
+            sqlx::query_as!(
+                Found,
+                "SELECT d.id, d.endpoint_id, d.event_id
+                   FROM webhook_deliveries d
+                  WHERE NOT EXISTS (SELECT 1 FROM webhook_delivery_successes s
+                                     WHERE s.delivery_id = d.id)
+                    AND NOT EXISTS (SELECT 1 FROM webhook_endpoint_disablements x
+                                     WHERE x.endpoint_id = d.endpoint_id)
+                  ORDER BY d.id"
+            )
+            .fetch_all(pool)
+            .await
+        }
+        Search::Since(previous) => {
+            let in_progress: Vec<i64> = previous.in_progress.iter().copied().map(bound).collect();
+            // Bound as bigints and read back through text as xid8s, as ADR-0055 binds
+            // them, so that the index on xact_id serves both conditions.
+            sqlx::query_as!(
+                Found,
+                "SELECT d.id, d.endpoint_id, d.event_id
+                   FROM webhook_deliveries d
+                  WHERE (d.xact_id >= $1::bigint::text::xid8
+                         OR d.xact_id = ANY ($2::bigint[]::text[]::xid8[]))
+                    AND NOT EXISTS (SELECT 1 FROM webhook_delivery_successes s
+                                     WHERE s.delivery_id = d.id)
+                    AND NOT EXISTS (SELECT 1 FROM webhook_endpoint_disablements x
+                                     WHERE x.endpoint_id = d.endpoint_id)
+                  ORDER BY d.id",
+                bound(previous.xmax),
+                &in_progress
+            )
+            .fetch_all(pool)
+            .await
+        }
+    }
+    .map_err(failed)?;
+    Ok((snapshot, found.into_iter().map(Found::delivery).collect()))
+}
+
+/// A delivery as a search reads it.
+struct Found {
+    id: Uuid,
+    endpoint_id: Uuid,
+    event_id: Uuid,
+}
+
+impl Found {
+    fn delivery(self) -> Delivery {
+        Delivery {
+            id: DeliveryId::try_from(self.id)
+                .expect("a delivery's ID is a UUIDv7: webhook_deliveries_id_check"),
+            endpoint: EndpointId::try_from(self.endpoint_id)
+                .expect("an endpoint's ID is a UUIDv7: webhook_endpoints_id_check"),
+            event: EventId::try_from(self.event_id)
+                .expect("an event's ID is a UUIDv7: payment_events_id_check"),
+        }
+    }
+}
+
+/// A transaction's ID as a snapshot gives it: an `xid8` read through text as a `bigint`.
+fn read_xact_id(id: i64) -> XactId {
+    XactId::new(u64::try_from(id).expect("an xid8 cast to a bigint is not negative"))
+}
+
+/// A transaction's ID that a snapshot gave, to bind as the `bigint` it was read as.
+fn bound(id: XactId) -> i64 {
+    i64::try_from(id.get()).expect("the IDs that a snapshot gives fit in a bigint")
+}
+
+/// Records what the relay decided (ADR-0053): a delivery's success, or an endpoint's
+/// disablement for the relay's reason, once, as the system role, and committed through the
+/// one function of ADR-0014. Recording either again writes nothing, and a first
+/// disablement keeps its reason, as the operator's does (ADR-0050).
+///
+/// # Errors
+///
+/// See [`RecordError`].
+pub async fn record(pool: &PgPool, effect: Effect) -> Result<(), RecordError> {
+    let mut tx = pool.begin().await.map_err(RecordError::Database)?;
+    let inserted = match effect {
+        Effect::Record(delivery) => {
+            sqlx::query!(
+                "INSERT INTO webhook_delivery_successes (delivery_id) VALUES ($1) \
+                 ON CONFLICT (delivery_id) DO NOTHING",
+                delivery.get()
+            )
+            .execute(&mut *tx)
+            .await
+        }
+        Effect::Disable(endpoint, reason) => {
+            sqlx::query!(
+                "INSERT INTO webhook_endpoint_disablements (endpoint_id, reason) \
+                 VALUES ($1, $2) ON CONFLICT (endpoint_id) DO NOTHING",
+                endpoint.get(),
+                reason.as_str()
+            )
+            .execute(&mut *tx)
+            .await
+        }
+    };
+    match inserted {
+        Ok(_) => commit(tx).await.map_err(RecordError::NotConfirmed),
+        Err(failed) => {
+            // The failed insert aborted the transaction: drop it (ADR-0014).
+            drop(tx);
+            Err(RecordError::Database(failed))
+        }
     }
 }
