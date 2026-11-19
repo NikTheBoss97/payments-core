@@ -29,6 +29,9 @@ hmac = "0.13"
 # builds http-body-util already, and the fake PSP builds hyper-util.
 http-body-util = "0.1"
 hyper-util = { version = "0.1.21", features = ["client-legacy", "http1", "tokio"] }
+# Reads a merchant's `Retry-After` given as an HTTP-date, in any of RFC 9110's three
+# formats (ADR-0053). hyper builds this crate already.
+httpdate = "1.0.3"
 # Renders a problem, and later reads and answers requests (ADR-0023). sqlx builds these
 # crates already.
 serde = { version = "1", features = ["derive"] }

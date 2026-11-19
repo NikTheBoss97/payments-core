@@ -8,7 +8,7 @@
 //! The lints are the same as in `money`: this module counts time and tokens.
 #![forbid(clippy::arithmetic_side_effects, clippy::as_conversions)]
 
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use axum::http::{HeaderMap, header};
 use sqlx::types::time::OffsetDateTime;
@@ -75,6 +75,31 @@ pub(crate) fn retry_after(headers: &HeaderMap) -> Option<u32> {
         .trim()
         .parse()
         .ok()
+}
+
+/// A merchant's `Retry-After` (ADR-0053): seconds, or an HTTP-date in any of RFC 9110's
+/// three formats, counted from `start`, the attempt's start, and rounded up to a whole
+/// second. A date already past asks for no wait, and a wait too long for 32 bits reads as
+/// the longest, as do more seconds than 32 bits hold.
+#[must_use]
+pub fn retry_after_from(headers: &HeaderMap, start: OffsetDateTime) -> Option<u32> {
+    let value = headers.get(header::RETRY_AFTER)?.to_str().ok()?.trim();
+    if !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()) {
+        // Decimal digits fail to read as a u32 only by being too many.
+        return Some(value.parse().unwrap_or(u32::MAX));
+    }
+    let date = httpdate::parse_http_date(value)
+        .ok()?
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .ok()
+        .and_then(|since| i64::try_from(since.as_micros()).ok())
+        .expect("an HTTP-date falls in the years 1970 to 9999, an i64 of microseconds");
+    let wait = date
+        .checked_sub(unix_micros(start))
+        .expect("two times in time's range are an i64 of microseconds apart");
+    // A date at or before the start asks for no wait.
+    let wait = u64::try_from(wait).unwrap_or(0);
+    Some(u32::try_from(wait.div_ceil(1_000_000)).unwrap_or(u32::MAX))
 }
 
 /// The one budget for the process's retries (ADR-0032, ADR-0042): a token bucket that
@@ -236,6 +261,74 @@ mod tests {
         ] {
             headers.insert(header::RETRY_AFTER, HeaderValue::from_static(value));
             assert_eq!(retry_after(&headers), read, "{value}");
+        }
+    }
+
+    /// The `Retry-After` of a merchant's answer to an attempt that started at `start`.
+    fn read_from(value: &'static str, start: OffsetDateTime) -> Option<u32> {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::RETRY_AFTER, HeaderValue::from_static(value));
+        retry_after_from(&headers, start)
+    }
+
+    #[test]
+    fn a_merchants_retry_after_in_seconds_saturates_at_the_longest_wait() {
+        for (value, read) in [
+            ("120", Some(120)),
+            (" 7 ", Some(7)),
+            ("0", Some(0)),
+            ("0080", Some(80)),
+            ("4294967295", Some(u32::MAX)),
+            ("4294967296", Some(u32::MAX)),
+            ("99999999999999999999999999", Some(u32::MAX)),
+        ] {
+            assert_eq!(read_from(value, at(250)), read, "{value}");
+        }
+    }
+
+    #[test]
+    fn a_merchants_retry_after_reads_each_date_format_from_the_attempts_start() {
+        // The attempt started at 00:00:00.250 on 1 January 2026, a Thursday, and each date
+        // is two minutes into that day: 119.75 seconds later, rounded up.
+        for value in [
+            "Thu, 01 Jan 2026 00:02:00 GMT",
+            "Thursday, 01-Jan-26 00:02:00 GMT",
+            "Thu Jan  1 00:02:00 2026",
+        ] {
+            assert_eq!(read_from(value, at(250)), Some(120), "{value}");
+        }
+        // Three quarters of a second still wait a whole one.
+        assert_eq!(read_from("Thu, 01 Jan 2026 00:00:01 GMT", at(250)), Some(1));
+    }
+
+    #[test]
+    fn a_date_already_past_asks_for_no_wait_and_a_far_one_for_the_longest() {
+        for (value, read) in [
+            ("Thu, 01 Jan 2026 00:00:00 GMT", Some(0)),
+            ("Wed, 31 Dec 2025 23:59:00 GMT", Some(0)),
+            ("Thu, 01 Jan 1970 00:00:00 GMT", Some(0)),
+            ("Fri, 31 Dec 9999 23:59:59 GMT", Some(u32::MAX)),
+        ] {
+            assert_eq!(read_from(value, at(250)), read, "{value}");
+        }
+    }
+
+    #[test]
+    fn anything_else_in_a_merchants_retry_after_reads_as_none() {
+        assert_eq!(retry_after_from(&HeaderMap::new(), at(250)), None);
+        for value in [
+            "",
+            "soon",
+            "-1",
+            // Rust reads a sign before digits, and RFC 9110's delay-seconds has none.
+            "+7",
+            "1.5",
+            "120 seconds",
+            // A date on the wrong weekday, and one not in GMT.
+            "Fri, 01 Jan 2026 00:02:00 GMT",
+            "Thu, 01 Jan 2026 00:02:00 UTC",
+        ] {
+            assert_eq!(read_from(value, at(250)), None, "{value}");
         }
     }
 
