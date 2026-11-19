@@ -899,6 +899,7 @@ dependencies = [
  "getrandom",
  "hmac",
  "http-body-util",
+ "httpdate",
  "hyper-util",
  "mock-merchant",
  "mock-psp",
