@@ -1,15 +1,16 @@
 // Author: Nicola Antonello
 
 //! Spacing and bounding retries (ADR-0032, ADR-0042): the delay before each retry, with
-//! full jitter, and the one budget that bounds how often the process retries. Time and
-//! randomness are inputs, so a test decides both (ADR-0029), and nothing here reads a
-//! clock.
+//! full jitter, the wait that an answer asks for, and the one budget that bounds how often
+//! the process retries. Time and randomness are inputs, so a test decides both (ADR-0029),
+//! and nothing here reads a clock.
 //!
 //! The lints are the same as in `money`: this module counts time and tokens.
 #![forbid(clippy::arithmetic_side_effects, clippy::as_conversions)]
 
 use std::time::Duration;
 
+use axum::http::{HeaderMap, header};
 use sqlx::types::time::OffsetDateTime;
 
 use crate::times::{from_unix_micros, unix_micros};
@@ -63,6 +64,17 @@ pub(crate) fn waited(first: OffsetDateTime, now: OffsetDateTime) -> Duration {
         .checked_sub(unix_micros(first))
         .and_then(|micros| u64::try_from(micros).ok())
         .map_or(Duration::ZERO, Duration::from_micros)
+}
+
+/// A `Retry-After` in seconds. The HTTP-date form reads as none.
+pub(crate) fn retry_after(headers: &HeaderMap) -> Option<u32> {
+    headers
+        .get(header::RETRY_AFTER)?
+        .to_str()
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
 }
 
 /// The one budget for the process's retries (ADR-0032, ADR-0042): a token bucket that
@@ -160,6 +172,7 @@ impl RetryBudget {
 
 #[cfg(test)]
 mod tests {
+    use axum::http::HeaderValue;
     use proptest::prelude::*;
 
     use super::*;
@@ -209,6 +222,21 @@ mod tests {
             Duration::from_secs(7_200)
         );
         assert_eq!(delay(1, Some(0), 1_500), Duration::from_millis(1_500));
+    }
+
+    #[test]
+    fn a_retry_after_is_read_in_seconds_only() {
+        let mut headers = HeaderMap::new();
+        assert_eq!(retry_after(&headers), None);
+        for (value, read) in [
+            ("120", Some(120)),
+            (" 7 ", Some(7)),
+            ("Wed, 21 Oct 2015 07:28:00 GMT", None),
+            ("-1", None),
+        ] {
+            headers.insert(header::RETRY_AFTER, HeaderValue::from_static(value));
+            assert_eq!(retry_after(&headers), read, "{value}");
+        }
     }
 
     #[test]
