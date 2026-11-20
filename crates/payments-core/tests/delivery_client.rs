@@ -219,10 +219,15 @@ async fn an_answers_status_and_retry_after_come_back_as_given(pool: PgPool) -> T
 #[sqlx::test]
 async fn a_retry_after_date_counts_from_the_attempts_start(pool: PgPool) -> TestResult {
     let system = runtime_pool(&pool).await?;
-    let at = OffsetDateTime::now_utc();
-    // Two minutes after the start of the attempt's second, which a date's whole seconds
-    // name: 120 seconds, at most a fraction of one less, rounded up.
-    let date = SystemTime::from(at.replace_nanosecond(0)?)
+    // The attempt started a minute ago, and the date is two minutes after the start of the
+    // current second, which a date's whole seconds name: 180 seconds after the attempt's
+    // start, at most a fraction of one less, rounded up. Counted from the answer's arrival,
+    // the wait would be about 120.
+    let now = OffsetDateTime::now_utc();
+    let at = now
+        .checked_sub(time::Duration::minutes(1))
+        .ok_or("a time in range")?;
+    let date = SystemTime::from(now.replace_nanosecond(0)?)
         .checked_add(Duration::from_secs(120))
         .ok_or("a time in range")?;
     let server = RawServer::start(
@@ -240,7 +245,7 @@ async fn a_retry_after_date_counts_from_the_attempts_start(pool: PgPool) -> Test
         client.attempt(&system, delivery, at).await?,
         Outcome::Answered(Answer::Status {
             status: 503,
-            retry_after: Some(120)
+            retry_after: Some(180)
         })
     );
     system.close().await;
