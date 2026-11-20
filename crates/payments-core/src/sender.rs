@@ -24,6 +24,7 @@ use uuid::Uuid;
 use crate::accounts::Psp;
 use crate::catch_up::{self, CatchUpError, CaughtUp, SweepError, Swept};
 use crate::db::{CommitError, code_and_constraint, commit};
+use crate::deliveries::Handover;
 use crate::ids::{PaymentId, RequestId};
 use crate::money::Currency;
 use crate::psp::{Outgoing, PspClient, ReadError, SendError};
@@ -222,7 +223,15 @@ impl Sender {
     ///
     /// [`SweepError`] when the payments that are due cannot be listed.
     pub async fn sweep(&mut self, pool: &PgPool, now: OffsetDateTime) -> Result<Swept, SweepError> {
-        let swept = catch_up::sweep(pool, &self.client, now, &mut self.budget, self.place).await?;
+        let swept = catch_up::sweep(
+            pool,
+            &self.client,
+            now,
+            &mut self.budget,
+            self.place,
+            &Handover::none(),
+        )
+        .await?;
         if let Some(&(last, _)) = swept.last() {
             self.place = Some(last);
         }
@@ -303,7 +312,7 @@ impl Sender {
                 }
             };
             let held = read.history().holds(&id);
-            let caught = catch_up::apply(pool, read).await;
+            let caught = catch_up::apply(pool, read, &Handover::none()).await;
             let stopped = matches!(
                 caught,
                 Ok(CaughtUp::Stopped { .. } | CaughtUp::AlreadyStopped)

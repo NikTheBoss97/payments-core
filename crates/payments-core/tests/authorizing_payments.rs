@@ -22,6 +22,7 @@ use common::{
 use futures_util::future::join;
 use mock_psp::wire::Detail;
 use payments_core::catch_up::{CatchUpError, CaughtUp, Stop, StopReason, catch_up};
+use payments_core::deliveries::Handover;
 use payments_core::ids::{MerchantId, PaymentId};
 use payments_core::lifecycle::{Event, IllegalTransition, PaymentStatus, Refused};
 use payments_core::money::PositiveAmount;
@@ -152,7 +153,13 @@ async fn the_amount_is_at_most_the_request(pool: PgPool) -> TestResult {
         },
     );
     assert_eq!(
-        catch_up(&psp.system, &client_of(&psp.fake), payment).await?,
+        catch_up(
+            &psp.system,
+            &client_of(&psp.fake),
+            payment,
+            &Handover::none()
+        )
+        .await?,
         CaughtUp::Stopped {
             applied: 0,
             stop: Stop {
@@ -275,9 +282,14 @@ async fn a_record_that_a_trigger_loses_fails_at_commit(pool: PgPool) -> TestResu
     )
     .execute(&pool)
     .await?;
-    let err = catch_up(&psp.system, &client_of(&psp.fake), payment)
-        .await
-        .unwrap_err();
+    let err = catch_up(
+        &psp.system,
+        &client_of(&psp.fake),
+        payment,
+        &Handover::none(),
+    )
+    .await
+    .unwrap_err();
     let CatchUpError::Invariant { source, .. } = err else {
         panic!("expected Invariant, got {err:?}");
     };
@@ -315,9 +327,14 @@ async fn a_link_that_a_trigger_loses_fails_at_commit(pool: PgPool) -> TestResult
     )
     .execute(&pool)
     .await?;
-    let err = catch_up(&psp.system, &client_of(&psp.fake), payment)
-        .await
-        .unwrap_err();
+    let err = catch_up(
+        &psp.system,
+        &client_of(&psp.fake),
+        payment,
+        &Handover::none(),
+    )
+    .await
+    .unwrap_err();
     let CatchUpError::Invariant { source, .. } = err else {
         panic!("expected Invariant, got {err:?}");
     };
@@ -354,9 +371,14 @@ async fn a_record_that_a_trigger_corrupts_is_a_bug(pool: PgPool) -> TestResult {
     )
     .execute(&pool)
     .await?;
-    let err = catch_up(&psp.system, &client_of(&psp.fake), payment)
-        .await
-        .unwrap_err();
+    let err = catch_up(
+        &psp.system,
+        &client_of(&psp.fake),
+        payment,
+        &Handover::none(),
+    )
+    .await
+    .unwrap_err();
     let CatchUpError::Invariant { source, .. } = err else {
         panic!("expected Invariant, got {err:?}");
     };

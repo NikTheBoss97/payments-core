@@ -19,6 +19,7 @@ use common::{merchant_id, request_id, runtime_pool, tenant_pool};
 use mock_psp::MockPsp;
 use payments_core::background::{Cadence, HANDOVERS, run};
 use payments_core::catch_up::{CaughtUp, catch_up};
+use payments_core::deliveries::Handover;
 use payments_core::ids::{PaymentId, RequestId};
 use payments_core::lifecycle::PaymentStatus;
 use payments_core::money::PositiveAmount;
@@ -164,13 +165,13 @@ async fn the_first_pass_runs_as_the_task_starts(pool: PgPool) -> TestResult {
     world.fake.approve_for(authorize.request.get(), AUTHORIZED);
     let client = client_of(&world.fake);
     assert_eq!(
-        catch_up(&world.system, &client, payment).await?,
+        catch_up(&world.system, &client, payment, &Handover::none()).await?,
         CaughtUp::Current { applied: 1 }
     );
     let capture = world.capture(1, payment).await?;
     world.fake.approve(capture);
     assert_eq!(
-        catch_up(&world.system, &client, payment).await?,
+        catch_up(&world.system, &client, payment, &Handover::none()).await?,
         CaughtUp::Current { applied: 1 }
     );
     // The PSP settles, and its notification never comes. No request waits, so no step

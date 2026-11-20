@@ -22,6 +22,7 @@ use mock_psp::MockPsp;
 use mock_psp::wire::Detail;
 use payments_core::accounts::Psp;
 use payments_core::catch_up::{CaughtUp, catch_up};
+use payments_core::deliveries::Handover;
 use payments_core::ids::{PaymentId, RequestId};
 use payments_core::money::{Currency, PositiveAmount};
 use payments_core::psp::{Outgoing, PspClient};
@@ -79,7 +80,7 @@ pub async fn step(sender: &mut Sender, system: &PgPool) -> Report {
 /// Catches `payment` up with what this fake decided, as the catch-up after a notification
 /// does (ADR-0031), and checks that it applied something.
 pub async fn caught_up(system: &PgPool, psp: &MockPsp, payment: PaymentId) {
-    let caught_up = catch_up(system, &client_of(psp), payment)
+    let caught_up = catch_up(system, &client_of(psp), payment, &Handover::none())
         .await
         .expect("the fake's history can be read and applied");
     assert!(

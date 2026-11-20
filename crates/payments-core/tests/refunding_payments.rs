@@ -20,6 +20,7 @@ use futures_util::future::join_all;
 use mock_psp::wire::Detail;
 use payments_core::accounts::{AccountRef, Psp};
 use payments_core::catch_up::{CatchUpError, CaughtUp, catch_up};
+use payments_core::deliveries::Handover;
 use payments_core::ids::{MerchantId, PaymentId};
 use payments_core::lifecycle::{Event, IllegalTransition, PaymentStatus, Refused};
 use payments_core::money::PositiveAmount;
@@ -334,7 +335,13 @@ async fn of_many_refunds_of_one_exactly_what_is_left_apply(pool: PgPool) -> Test
         psp.fake.approve(request.request.get());
     }
     assert_eq!(
-        catch_up(&psp.system, &client_of(&psp.fake), payment).await?,
+        catch_up(
+            &psp.system,
+            &client_of(&psp.fake),
+            payment,
+            &Handover::none()
+        )
+        .await?,
         CaughtUp::Current { applied: 5 }
     );
     assert_eq!(
@@ -368,7 +375,13 @@ async fn a_partial_refund_and_a_settle_apply_in_either_order(pool: PgPool) -> Te
             psp.fake.settle(payment.get());
         }
         assert_eq!(
-            catch_up(&psp.system, &client_of(&psp.fake), payment).await?,
+            catch_up(
+                &psp.system,
+                &client_of(&psp.fake),
+                payment,
+                &Handover::none()
+            )
+            .await?,
             CaughtUp::Current { applied: 2 }
         );
         assert_eq!(
@@ -413,7 +426,13 @@ async fn a_final_refund_and_a_settle_end_refunded_in_either_order(pool: PgPool) 
             psp.fake.settle(payment.get());
         }
         assert_eq!(
-            catch_up(&psp.system, &client_of(&psp.fake), payment).await?,
+            catch_up(
+                &psp.system,
+                &client_of(&psp.fake),
+                payment,
+                &Handover::none()
+            )
+            .await?,
             CaughtUp::Current { applied: 2 }
         );
         assert_eq!(
@@ -457,9 +476,14 @@ async fn a_posting_that_a_trigger_corrupts_fails_at_commit(pool: PgPool) -> Test
     )
     .execute(&pool)
     .await?;
-    let err = catch_up(&psp.system, &client_of(&psp.fake), payment)
-        .await
-        .unwrap_err();
+    let err = catch_up(
+        &psp.system,
+        &client_of(&psp.fake),
+        payment,
+        &Handover::none(),
+    )
+    .await
+    .unwrap_err();
     let CatchUpError::Invariant { source, .. } = err else {
         panic!("expected Invariant, got {err:?}");
     };
@@ -497,9 +521,14 @@ async fn a_record_that_a_trigger_loses_fails_at_commit(pool: PgPool) -> TestResu
     )
     .execute(&pool)
     .await?;
-    let err = catch_up(&psp.system, &client_of(&psp.fake), payment)
-        .await
-        .unwrap_err();
+    let err = catch_up(
+        &psp.system,
+        &client_of(&psp.fake),
+        payment,
+        &Handover::none(),
+    )
+    .await
+    .unwrap_err();
     let CatchUpError::Invariant { source, .. } = err else {
         panic!("expected Invariant, got {err:?}");
     };

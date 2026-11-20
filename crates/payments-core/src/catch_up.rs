@@ -27,7 +27,8 @@ use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
 use crate::accounts::{AccountKey, Psp};
-use crate::ids::{DeliveryId, EventId, PaymentId, TransactionId, TransitionId};
+use crate::deliveries::Handover;
+use crate::ids::{DeliveryId, EndpointId, EventId, PaymentId, TransactionId, TransitionId};
 use crate::lifecycle::{Event, IllegalTransition, PaymentStatus, StepKind};
 use crate::payments::{
     Authorize, Books, Capture, Failed, Failure, Outcome, PlainRefusal, PostingRefusal, Refund,
@@ -35,6 +36,7 @@ use crate::payments::{
     read_books, refund_in,
 };
 use crate::psp::{Fact, FactDetail, FactKind, History, PspClient, ReadError};
+use crate::relay::Delivery;
 use crate::requests::RequestKind;
 use crate::retries::RetryBudget;
 
@@ -194,6 +196,7 @@ pub async fn sweep(
     now: OffsetDateTime,
     budget: &mut RetryBudget,
     after: Option<PaymentId>,
+    handover: &Handover,
 ) -> Result<Swept, SweepError> {
     // In ID order from the place, for fairness and never for correctness (ADR-0005): the
     // IDs after `after` first, then the rest. With no place, the first key is NULL for
@@ -238,12 +241,13 @@ pub async fn sweep(
             break;
         }
         let payment = PaymentId::try_from(id).expect("payments_id_check allows only UUIDv7 IDs");
-        swept.push((payment, catch_up(pool, psp, payment).await));
+        swept.push((payment, catch_up(pool, psp, payment, handover).await));
     }
     Ok(swept)
 }
 
-/// Catches a payment up with its PSP's history: [`read`], then [`apply`].
+/// Catches a payment up with its PSP's history: [`read`], then [`apply`], which hands the
+/// deliveries that it commits to `handover`.
 ///
 /// # Errors
 ///
@@ -252,9 +256,10 @@ pub async fn catch_up(
     pool: &PgPool,
     psp: &PspClient,
     payment: PaymentId,
+    handover: &Handover,
 ) -> Result<CaughtUp, CatchUpError> {
     let read = read(pool, psp, payment).await?;
-    apply(pool, read).await
+    apply(pool, read, handover).await
 }
 
 /// The first half of a catch-up: counts the facts held, then reads the history, both
@@ -291,12 +296,17 @@ pub async fn read(
 
 /// The second half of a catch-up: under the payment's lock, checks the history against
 /// the facts held, applies the new facts in the PSP's order, and commits once
-/// (ADR-0039, ADR-0041).
+/// (ADR-0039, ADR-0041). Once its `COMMIT` is confirmed, and never before, it hands the
+/// deliveries that it wrote to `handover` (ADR-0052, ADR-0057).
 ///
 /// # Errors
 ///
 /// See [`CatchUpError`].
-pub async fn apply(pool: &PgPool, read: Read) -> Result<CaughtUp, CatchUpError> {
+pub async fn apply(
+    pool: &PgPool,
+    read: Read,
+    handover: &Handover,
+) -> Result<CaughtUp, CatchUpError> {
     let Read {
         counted,
         psp,
@@ -329,7 +339,7 @@ pub async fn apply(pool: &PgPool, read: Read) -> Result<CaughtUp, CatchUpError> 
             position,
             reason: StopReason::HistoryChanged,
         };
-        return stop_at(tx, payment, stop, 0).await;
+        return stop_at(tx, payment, stop, 0, Vec::new(), handover).await;
     }
     let Some(new) = theirs.get(held.facts.len()..).filter(|new| !new.is_empty()) else {
         // Nothing after the facts held: the history held nothing new, or was read before
@@ -347,6 +357,7 @@ pub async fn apply(pool: &PgPool, read: Read) -> Result<CaughtUp, CatchUpError> 
         settled: held.facts.iter().any(|(_, kind)| *kind == FactKind::Settle),
         requests: held.requests,
         applied: 0,
+        handed: Vec::new(),
     };
     for fact in new {
         if let Some(reason) = applying.place(fact).await? {
@@ -354,10 +365,20 @@ pub async fn apply(pool: &PgPool, read: Read) -> Result<CaughtUp, CatchUpError> 
                 position: fact.position(),
                 reason,
             };
-            return stop_at(applying.tx, payment, stop, applying.applied).await;
+            let applied = applying.applied;
+            return stop_at(
+                applying.tx,
+                payment,
+                stop,
+                applied,
+                applying.handed,
+                handover,
+            )
+            .await;
         }
     }
     commit(applying.tx, payment).await?;
+    handover.hand_over(applying.handed);
     Ok(CaughtUp::Current {
         applied: applying.applied,
     })
@@ -512,6 +533,8 @@ struct Applying<'a> {
     merchant: Uuid,
     /// The endpoints that each event goes to.
     endpoints: Vec<Uuid>,
+    /// The deliveries written so far, handed over once the `COMMIT` is confirmed.
+    handed: Vec<Delivery>,
     psp: Psp,
     books: Option<&'a Books>,
     requests: HashMap<Uuid, HeldRequest>,
@@ -754,11 +777,11 @@ impl Applying<'_> {
     /// (ADR-0005, ADR-0057).
     async fn insert_event(&mut self, position: i32) -> Result<(), CatchUpError> {
         let payment = self.payment;
-        let event = EventId::now_v7().get();
+        let event = EventId::now_v7();
         sqlx::query!(
             "INSERT INTO payment_events (id, merchant_id, payment_id, position)
              VALUES ($1, $2, $3, $4)",
-            event,
+            event.get(),
             self.merchant,
             payment.get(),
             position
@@ -768,23 +791,32 @@ impl Applying<'_> {
         .map_err(|source| database(payment, source))?;
         // One list makes both arrays, so they always have one length, and unnest never
         // pads one with NULL.
-        let deliveries: Vec<Uuid> = self
+        let deliveries: Vec<DeliveryId> = self
             .endpoints
             .iter()
-            .map(|_| DeliveryId::now_v7().get())
+            .map(|_| DeliveryId::now_v7())
             .collect();
+        let ids: Vec<Uuid> = deliveries.iter().map(|delivery| delivery.get()).collect();
         sqlx::query!(
             "INSERT INTO webhook_deliveries (id, event_id, endpoint_id, merchant_id)
              SELECT d.id, $3::uuid, d.endpoint_id, $4::uuid
                FROM unnest($1::uuid[], $2::uuid[]) AS d (id, endpoint_id)",
-            &deliveries,
+            &ids,
             &self.endpoints,
-            event,
+            event.get(),
             self.merchant
         )
         .execute(&mut *self.tx)
         .await
         .map_err(|source| database(payment, source))?;
+        for (id, &endpoint) in deliveries.into_iter().zip(&self.endpoints) {
+            self.handed.push(Delivery {
+                id,
+                endpoint: EndpointId::try_from(endpoint)
+                    .expect("webhook_endpoints_id_check allows only UUIDv7 IDs"),
+                event,
+            });
+        }
         Ok(())
     }
 }
@@ -810,12 +842,15 @@ fn answers(request: &HeldRequest, detail: FactDetail) -> bool {
 }
 
 /// Stops the payment for an operator at this position, and commits with the facts
-/// applied before it, which agreed (ADR-0041).
+/// applied before it, which agreed (ADR-0041); once the `COMMIT` is confirmed, hands
+/// those facts' deliveries to `handover`.
 async fn stop_at(
     mut tx: Transaction<'static, Postgres>,
     payment: PaymentId,
     stop: Stop,
     applied: u32,
+    handed: Vec<Delivery>,
+    handover: &Handover,
 ) -> Result<CaughtUp, CatchUpError> {
     sqlx::query!(
         "INSERT INTO payment_stops (payment_id, position, reason) VALUES ($1, $2, $3)",
@@ -827,6 +862,7 @@ async fn stop_at(
     .await
     .map_err(|source| database(payment, source))?;
     commit(tx, payment).await?;
+    handover.hand_over(handed);
     Ok(CaughtUp::Stopped { applied, stop })
 }
 

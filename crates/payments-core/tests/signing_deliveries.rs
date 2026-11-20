@@ -26,6 +26,7 @@ use mock_merchant::signature::Refusal;
 use mock_merchant::{MockMerchant, Verdict};
 use mock_psp::MockPsp;
 use payments_core::catch_up::{CaughtUp, catch_up};
+use payments_core::deliveries::Handover;
 use payments_core::events::body;
 use payments_core::ids::{EndpointId, EventId, MerchantId, PaymentId};
 use payments_core::money::PositiveAmount;
@@ -101,7 +102,13 @@ impl World {
 
     /// Catches the payment up, and checks that it applied `applied` new facts.
     async fn caught_up(&self, payment: PaymentId, applied: u32) -> TestResult {
-        let caught_up = catch_up(&self.system, &client_of(&self.fake), payment).await?;
+        let caught_up = catch_up(
+            &self.system,
+            &client_of(&self.fake),
+            payment,
+            &Handover::none(),
+        )
+        .await?;
         assert_eq!(caught_up, CaughtUp::Current { applied }, "{payment}");
         Ok(())
     }

@@ -31,6 +31,7 @@ use futures_util::future::{join, join_all};
 use mock_psp::wire::Detail;
 use payments_core::catch_up::{CaughtUp, Stop, StopReason, catch_up};
 use payments_core::db::commit;
+use payments_core::deliveries::Handover;
 use payments_core::ids::{MerchantId, PaymentId, TransitionId};
 use payments_core::lifecycle::{Event, IllegalTransition, PaymentStatus, Transition, next};
 use payments_core::money::PositiveAmount;
@@ -220,7 +221,7 @@ async fn each_move_without_money_follows_the_table(pool: PgPool) -> TestResult {
             let payment = at(&mut psp, me, merchant, n, status).await?;
             let before = newest(&psp.system, payment).await?;
             lapse_or_settle(&psp, payment, status, event);
-            let caught_up = catch_up(&psp.system, &client, payment).await?;
+            let caught_up = catch_up(&psp.system, &client, payment, &Handover::none()).await?;
             let context = format!("{event:?} from {status}");
             match next(status, event) {
                 Ok(step) => {
@@ -228,7 +229,7 @@ async fn each_move_without_money_follows_the_table(pool: PgPool) -> TestResult {
                     assert_moved(&pool, payment, before, status, step, &context).await?;
                     // Caught up again, it applies nothing twice.
                     assert_eq!(
-                        catch_up(&psp.system, &client, payment).await?,
+                        catch_up(&psp.system, &client, payment, &Handover::none()).await?,
                         CaughtUp::Current { applied: 0 },
                         "{context}"
                     );
