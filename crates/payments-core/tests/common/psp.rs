@@ -49,7 +49,7 @@ pub fn client_of(psp: &MockPsp) -> PspClient {
 
 /// The sender of this fake, as the server's task holds it (ADR-0042), its budget full now.
 pub fn sender_of(psp: &MockPsp) -> Sender {
-    Sender::new(client_of(psp), OffsetDateTime::now_utc())
+    Sender::new(client_of(psp), Handover::none(), OffsetDateTime::now_utc())
 }
 
 /// Hands `request` over to `sender` and takes a step, as the server does once a route has

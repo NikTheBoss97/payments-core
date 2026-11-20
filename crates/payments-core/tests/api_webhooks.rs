@@ -24,14 +24,16 @@ use common::api::{Pools, get, send, unused_psp};
 use common::crashes::{
     NOTIFICATION_AT_COMMIT, NOTIFICATION_POINTS, install_crash_points, plan_death,
 };
+use common::outbox::{deliveries_of, handed, insert_endpoint};
 use common::payments::{REQUESTED, create_command, fee_rate, status_of};
 use common::psp::{client_of, silent_psp};
-use common::{merchant_id, request_id, runtime_pool, runtime_pool_of_one, test_uuid};
+use common::{endpoint_id, merchant_id, request_id, runtime_pool, runtime_pool_of_one, test_uuid};
 use mock_psp::signing::{SigningKey, signature_header};
 use mock_psp::{Attempt, MockPsp, Tamper};
 use payments_core::accounts::Psp;
 use payments_core::api::problem::Problem;
 use payments_core::api::{AppState, Webhooks, router};
+use payments_core::deliveries::{HANDOVERS, Handover};
 use payments_core::ids::PaymentId;
 use payments_core::lifecycle::PaymentStatus;
 use payments_core::money::PositiveAmount;
@@ -43,6 +45,7 @@ use payments_core::tenancy::Tenant;
 use sqlx::PgPool;
 use sqlx::types::time::OffsetDateTime;
 use tokio::net::TcpListener;
+use tokio::sync::mpsc;
 use uuid::Uuid;
 
 type TestResult = Result<(), Box<dyn Error>>;
@@ -64,7 +67,7 @@ fn keys_of(fake: &MockPsp) -> SigningKeys {
 /// never reaches.
 fn webhooks_for(key: &SigningKey) -> Webhooks {
     let keys = SigningKeys::parse(&key.written()).expect("a key that the fake made");
-    Webhooks::new(unused_psp(), keys)
+    Webhooks::new(unused_psp(), keys, Handover::none())
 }
 
 /// Serves this router on a port of its own, until the runtime ends with the test.
@@ -88,9 +91,15 @@ struct World {
 impl World {
     /// A server that reads its histories from the fake.
     async fn new(pool: &PgPool) -> Result<Self, Box<dyn Error>> {
+        Self::handing_over(pool, Handover::none()).await
+    }
+
+    /// A server that reads its histories from the fake, and whose catch-ups hand their
+    /// deliveries over to `deliveries`.
+    async fn handing_over(pool: &PgPool, deliveries: Handover) -> Result<Self, Box<dyn Error>> {
         let fake = MockPsp::start().await?;
         let psp = client_of(&fake);
-        Self::started(pool, fake, psp).await
+        Self::started(pool, fake, psp, deliveries).await
     }
 
     /// A server that reads its histories from the PSP at `url`, and waits a minute for
@@ -98,11 +107,16 @@ impl World {
     async fn reading(pool: &PgPool, url: &str) -> Result<Self, Box<dyn Error>> {
         let fake = MockPsp::start().await?;
         let psp = PspClient::new(Psp::Mock, url, fake.api_key(), Duration::from_secs(60))?;
-        Self::started(pool, fake, psp).await
+        Self::started(pool, fake, psp, Handover::none()).await
     }
 
-    async fn started(pool: &PgPool, fake: MockPsp, psp: PspClient) -> Result<Self, Box<dyn Error>> {
-        let webhooks = Webhooks::new(psp, keys_of(&fake));
+    async fn started(
+        pool: &PgPool,
+        fake: MockPsp,
+        psp: PspClient,
+        deliveries: Handover,
+    ) -> Result<Self, Box<dyn Error>> {
+        let webhooks = Webhooks::new(psp, keys_of(&fake), deliveries);
         let world = Self {
             pools: Pools::login(pool).await?,
             fake,
@@ -475,6 +489,44 @@ async fn a_notification_catches_its_payment_up_after_the_answer(pool: PgPool) ->
     // The catch-up reads the PSP's history and applies the authorization that it holds.
     until_status(&world.pools.system, payment, PaymentStatus::Authorized).await?;
     world.until_no_catch_up_runs().await;
+    world.close().await;
+    Ok(())
+}
+
+#[sqlx::test]
+async fn a_notifications_catch_up_hands_its_deliveries_over_to_the_relay(
+    pool: PgPool,
+) -> TestResult {
+    let (deliveries, mut handed_over) = mpsc::channel(HANDOVERS);
+    let world = World::handing_over(&pool, Handover::new(deliveries)).await?;
+    let payment = world.payment(1).await?;
+    insert_endpoint(
+        &world.pools.system,
+        endpoint_id(1),
+        merchant_id(1).get(),
+        "http://localhost:8080/webhooks",
+    )
+    .await?;
+    let request = world.ask_authorization(1, payment).await?;
+    world.fake.approve(request);
+    let approval = world
+        .fake
+        .notifications()
+        .last()
+        .ok_or("the approval's notification")?
+        .id
+        .clone();
+    assert_eq!(world.fake.deliver(&approval).await, answered(202, None));
+
+    // The catch-up after the answer commits the authorization's event and its delivery,
+    // then hands the delivery over, bounded.
+    let first = tokio::time::timeout(Duration::from_secs(10), handed_over.recv())
+        .await?
+        .ok_or("a delivery handed over")?;
+    world.until_no_catch_up_runs().await;
+    let mut all = vec![first];
+    all.extend(handed(&mut handed_over));
+    assert_eq!(all, deliveries_of(&world.pools.system, payment).await?);
     world.close().await;
     Ok(())
 }

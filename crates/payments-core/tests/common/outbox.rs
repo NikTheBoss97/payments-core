@@ -5,10 +5,13 @@
 //! event to each endpoint, in one transaction of the system role. Every fact is an
 //! authorization, since the table does not judge the order of kinds (ADR-0037).
 
-use payments_core::ids::{DeliveryId, EndpointId, EventId};
+use std::error::Error;
+
+use payments_core::ids::{DeliveryId, EndpointId, EventId, PaymentId};
 use payments_core::relay::Delivery;
 use payments_core::signing::MasterKey;
 use sqlx::{PgConnection, PgPool};
+use tokio::sync::mpsc;
 use uuid::Uuid;
 
 use super::api::new_master_key;
@@ -126,6 +129,42 @@ pub async fn event(
     let written = write_event(&mut tx, merchant, payment, position, event, deliveries).await?;
     tx.commit().await?;
     Ok(written)
+}
+
+/// The deliveries of `payment`'s events, as the relay learns of them, by ID.
+pub async fn deliveries_of(
+    pool: &PgPool,
+    payment: PaymentId,
+) -> Result<Vec<Delivery>, Box<dyn Error>> {
+    let rows = sqlx::query!(
+        "SELECT d.id, d.endpoint_id, d.event_id
+           FROM webhook_deliveries d
+           JOIN payment_events e ON e.id = d.event_id
+          WHERE e.payment_id = $1
+          ORDER BY d.id",
+        payment.get()
+    )
+    .fetch_all(pool)
+    .await?;
+    rows.into_iter()
+        .map(|row| {
+            Ok(Delivery {
+                id: DeliveryId::try_from(row.id)?,
+                endpoint: EndpointId::try_from(row.endpoint_id)?,
+                event: EventId::try_from(row.event_id)?,
+            })
+        })
+        .collect()
+}
+
+/// What a handover's channel holds now, by ID, taken without waiting.
+pub fn handed(channel: &mut mpsc::Receiver<Delivery>) -> Vec<Delivery> {
+    let mut handed = Vec::new();
+    while let Ok(delivery) = channel.try_recv() {
+        handed.push(delivery);
+    }
+    handed.sort_by_key(|delivery| delivery.id.get());
+    handed
 }
 
 /// Records the success of a delivery, as the relay does.

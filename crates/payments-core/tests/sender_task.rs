@@ -92,7 +92,11 @@ impl World {
 
     /// The task, and the routes' end of its handovers.
     fn handing_over(&self, cadence: Cadence) -> (JoinHandle<Infallible>, mpsc::Sender<RequestId>) {
-        let sender = Sender::new(client_of(&self.fake), OffsetDateTime::now_utc());
+        let sender = Sender::new(
+            client_of(&self.fake),
+            Handover::none(),
+            OffsetDateTime::now_utc(),
+        );
         let (handovers, handed_over) = mpsc::channel(HANDOVERS);
         let task = tokio::spawn(run(self.system.clone(), sender, cadence, handed_over));
         (task, handovers)

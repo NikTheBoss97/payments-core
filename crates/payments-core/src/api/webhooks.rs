@@ -36,13 +36,15 @@ use crate::psp::PspClient;
 const RETRY_AFTER_SECONDS: &str = "5";
 
 /// What the PSP's route holds (ADR-0043): the keys that verify its notifications, a
-/// client of its API, which reads the histories, and the permits of the catch-ups that
-/// notifications start.
+/// client of its API, which reads the histories, the permits of the catch-ups that
+/// notifications start, and where those catch-ups hand the deliveries that they commit
+/// over to the relay's task (ADR-0052).
 #[derive(Debug, Clone)]
 pub struct Webhooks {
     keys: Arc<SigningKeys>,
     psp: Arc<PspClient>,
     catch_ups: Arc<Semaphore>,
+    deliveries: Handover,
 }
 
 impl Webhooks {
@@ -50,13 +52,14 @@ impl Webhooks {
     pub const CATCH_UPS: usize = 4;
 
     /// The route's view of the PSP: a client of its API, and the keys that its
-    /// notifications may be signed with.
+    /// notifications may be signed with, and where its catch-ups hand deliveries over.
     #[must_use]
-    pub fn new(psp: PspClient, keys: SigningKeys) -> Self {
+    pub fn new(psp: PspClient, keys: SigningKeys, deliveries: Handover) -> Self {
         Self {
             keys: Arc::new(keys),
             psp: Arc::new(psp),
             catch_ups: Arc::new(Semaphore::new(Self::CATCH_UPS)),
+            deliveries,
         }
     }
 
@@ -77,8 +80,9 @@ impl Webhooks {
             return;
         };
         let (system, psp) = (system.clone(), Arc::clone(&self.psp));
+        let deliveries = self.deliveries.clone();
         tokio::spawn(async move {
-            let caught_up = catch_up(&system, &psp, payment, &Handover::none()).await;
+            let caught_up = catch_up(&system, &psp, payment, &deliveries).await;
             drop(permit);
             report(payment, &caught_up);
         });

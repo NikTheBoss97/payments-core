@@ -282,6 +282,7 @@ mod tests {
     use super::*;
     use crate::accounts::Psp;
     use crate::catch_up::{Stop, StopReason};
+    use crate::deliveries::Handover;
     use crate::psp::{PspClient, ReadError, SendError};
     use crate::sender::{AnswerError, Sender};
 
@@ -352,7 +353,7 @@ mod tests {
             Duration::from_secs(1),
         )
         .expect("a local address");
-        (pool, Sender::new(client, now()))
+        (pool, Sender::new(client, Handover::none(), now()))
     }
 
     #[test]

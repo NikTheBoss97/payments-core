@@ -15,6 +15,7 @@ use mock_psp::signing::SigningKey;
 use payments_core::accounts::Psp;
 use payments_core::api::{AppState, Webhooks};
 use payments_core::credentials::{ApiKeySecret, SecretDigest};
+use payments_core::deliveries::Handover;
 use payments_core::ids::{MerchantId, PaymentId, RequestId};
 use payments_core::notifications::SigningKeys;
 use payments_core::payments::{create_payment, register_merchant};
@@ -168,12 +169,13 @@ pub fn unused_psp() -> PspClient {
 }
 
 /// What the PSP's route holds in a test that sends it nothing: a key of its own, which
-/// signs nothing that the test sends, and a PSP that it never reaches.
+/// signs nothing that the test sends, a PSP that it never reaches, and no handover.
 pub fn unused_webhooks() -> Webhooks {
     let key = SigningKey::generate().written();
     Webhooks::new(
         unused_psp(),
         SigningKeys::parse(&key).expect("a key that the fake made"),
+        Handover::none(),
     )
 }
 
