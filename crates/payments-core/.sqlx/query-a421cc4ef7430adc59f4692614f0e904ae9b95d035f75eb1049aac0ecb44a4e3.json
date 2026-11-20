@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "GRANT SELECT ON webhook_endpoints TO payments_app",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "a421cc4ef7430adc59f4692614f0e904ae9b95d035f75eb1049aac0ecb44a4e3"
+}

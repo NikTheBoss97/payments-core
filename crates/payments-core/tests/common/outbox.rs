@@ -7,11 +7,18 @@
 
 use payments_core::ids::{DeliveryId, EndpointId, EventId};
 use payments_core::relay::Delivery;
+use payments_core::signing::MasterKey;
 use sqlx::{PgConnection, PgPool};
 use uuid::Uuid;
 
+use super::api::new_master_key;
 use super::payments::{NewPayment, Step, register_merchant};
 use super::runtime_transaction;
+
+/// A master key made now, as the relay's tests use it.
+pub fn master() -> MasterKey {
+    MasterKey::parse(&new_master_key()).expect("a key that new_master_key wrote")
+}
 
 /// A new merchant and its payment, committed with the payment's first step. Returns the
 /// merchant and the payment.
