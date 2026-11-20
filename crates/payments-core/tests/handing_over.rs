@@ -173,9 +173,74 @@ async fn a_catch_up_that_stops_hands_over_the_deliveries_of_the_facts_it_applied
 }
 
 #[sqlx::test]
-async fn a_full_handover_drops_the_rest_and_the_search_finds_them(pool: PgPool) -> TestResult {
+async fn a_catch_up_whose_stop_fails_to_commit_hands_over_nothing(pool: PgPool) -> TestResult {
+    let world = World::new(&pool).await?;
+    install_crash_points(&pool).await?;
+    let one = runtime_pool_of_one(&pool).await?;
+    let payment = world.approved(1).await?;
+    world.fake.append(payment.get(), Detail::Settled);
+    let (channel, mut handed_over) = mpsc::channel(HANDOVERS);
+    let handover = Handover::new(channel);
+    let client = client_of(&world.fake);
+
+    // The catch-up applies the authorization, stops the payment at the settlement, and
+    // dies during the COMMIT of both.
+    plan_death(&one, AT_COMMIT).await?;
+    let err = catch_up(&one, &client, payment, &handover)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, CatchUpError::NotConfirmed { .. }), "{err:?}");
+    assert!(handed(&mut handed_over).is_empty());
+    // The next catch-up stops it again, and hands over what it committed.
+    let stop = Stop {
+        position: 2,
+        reason: StopReason::NoPlace,
+    };
+    assert_eq!(
+        catch_up(&one, &client, payment, &handover).await?,
+        CaughtUp::Stopped { applied: 1, stop }
+    );
+    assert_eq!(
+        handed(&mut handed_over),
+        deliveries_of(&world.system, payment).await?
+    );
+    one.close().await;
+    world.close().await;
+    Ok(())
+}
+
+#[sqlx::test]
+async fn a_catch_up_that_applies_two_facts_hands_over_the_deliveries_of_both(
+    pool: PgPool,
+) -> TestResult {
     let world = World::new(&pool).await?;
     let payment = world.approved(1).await?;
+    // The authorization, then its expiry: two facts, so two events, in one catch-up.
+    world.fake.append(payment.get(), Detail::Expired);
+    let (channel, mut handed_over) = mpsc::channel(HANDOVERS);
+    let handover = Handover::new(channel);
+
+    assert_eq!(
+        catch_up(&world.system, &client_of(&world.fake), payment, &handover).await?,
+        CaughtUp::Current { applied: 2 }
+    );
+    let committed = deliveries_of(&world.system, payment).await?;
+    assert_eq!(
+        committed.len(),
+        4,
+        "one delivery to each endpoint, for each event"
+    );
+    assert_eq!(handed(&mut handed_over), committed);
+    world.close().await;
+    Ok(())
+}
+
+#[sqlx::test]
+async fn a_full_handover_drops_the_rest_and_the_next_search_finds_them(pool: PgPool) -> TestResult {
+    let world = World::new(&pool).await?;
+    let payment = world.approved(1).await?;
+    // The relay's search before the catch-up: the next one reads what commits after it.
+    let (before, _) = search(&world.system, &Search::Full).await?;
     let (channel, mut handed_over) = mpsc::channel(1);
     let handover = Handover::new(channel);
 
@@ -184,8 +249,8 @@ async fn a_full_handover_drops_the_rest_and_the_search_finds_them(pool: PgPool) 
     let taken = handed(&mut handed_over);
     assert_eq!(taken.len(), 1, "a channel of one holds one");
     assert!(committed.contains(&taken[0]));
-    // The one dropped is found by the relay's search, with every delivery not finished.
-    let (_, found) = search(&world.system, &Search::Full).await?;
+    // The one dropped is found by the next search, with the other written since.
+    let (_, found) = search(&world.system, &Search::Since(before)).await?;
     assert_eq!(found, committed);
     world.close().await;
     Ok(())
