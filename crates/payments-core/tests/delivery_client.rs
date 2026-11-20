@@ -27,7 +27,7 @@ use payments_core::signing::MasterKey;
 use sqlx::PgPool;
 use sqlx::types::time::OffsetDateTime;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::{TcpListener, TcpSocket, TcpStream};
 use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 
@@ -309,9 +309,11 @@ async fn an_answer_slower_than_the_timeout_is_no_answer(pool: PgPool) -> TestRes
 #[sqlx::test]
 async fn an_endpoint_where_nothing_listens_gives_no_answer(pool: PgPool) -> TestResult {
     let system = runtime_pool(&pool).await?;
-    let listener = TcpListener::bind("127.0.0.1:0").await?;
-    let url = format!("http://{}/webhooks", listener.local_addr()?);
-    drop(listener);
+    // A socket bound and not listening: a connection to its port is refused, and no test
+    // running beside this one can bind the port while it is held.
+    let held = TcpSocket::new_v4()?;
+    held.bind("127.0.0.1:0".parse()?)?;
+    let url = format!("http://{}/webhooks", held.local_addr()?);
     let delivery = delivery_to(&system, 1, &url).await?;
     let client = DeliveryClient::new(master(), TIMEOUT);
 
@@ -321,6 +323,7 @@ async fn an_endpoint_where_nothing_listens_gives_no_answer(pool: PgPool) -> Test
             .await?,
         Outcome::Answered(Answer::NoAnswer)
     );
+    drop(held);
     system.close().await;
     Ok(())
 }
