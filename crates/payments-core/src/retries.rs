@@ -88,18 +88,34 @@ pub fn retry_after_from(headers: &HeaderMap, start: OffsetDateTime) -> Option<u3
         // Decimal digits fail to read as a u32 only by being too many.
         return Some(value.parse().unwrap_or(u32::MAX));
     }
-    let date = httpdate::parse_http_date(value)
-        .ok()?
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .ok()
-        .and_then(|since| i64::try_from(since.as_micros()).ok())
-        .expect("an HTTP-date falls in the years 1970 to 9999, an i64 of microseconds");
-    let wait = date
-        .checked_sub(unix_micros(start))
-        .expect("two times in time's range are an i64 of microseconds apart");
+    let date = httpdate::parse_http_date(value).ok()?;
+    Some(wait_until(date, start))
+}
+
+/// The wait from `start` until `date`, rounded up to a whole second: none for a date at or
+/// before the start, and the longest for one further than 32 bits of seconds. It takes any
+/// time that a `SystemTime` holds, before 1970 too, so no date that a parser accepts can
+/// make it panic.
+fn wait_until(date: SystemTime, start: OffsetDateTime) -> u32 {
+    let wait = micros_since_epoch(date)
+        .checked_sub(i128::from(unix_micros(start)))
+        .expect("two times a u64 of seconds from the epoch are an i128 of microseconds apart");
     // A date at or before the start asks for no wait.
-    let wait = u64::try_from(wait).unwrap_or(0);
-    Some(u32::try_from(wait.div_ceil(1_000_000)).unwrap_or(u32::MAX))
+    let wait = u128::try_from(wait).unwrap_or(0);
+    u32::try_from(wait.div_ceil(1_000_000)).unwrap_or(u32::MAX)
+}
+
+/// A time's microseconds from the epoch, negative before it.
+fn micros_since_epoch(time: SystemTime) -> i128 {
+    let micros = |span: Duration| {
+        i128::try_from(span.as_micros()).expect("a u64 of seconds is an i128 of microseconds")
+    };
+    match time.duration_since(SystemTime::UNIX_EPOCH) {
+        Ok(after) => micros(after),
+        Err(before) => micros(before.duration())
+            .checked_neg()
+            .expect("a u64 of seconds in microseconds negates in an i128"),
+    }
 }
 
 /// The one budget for the process's retries (ADR-0032, ADR-0042): a token bucket that
@@ -330,6 +346,46 @@ mod tests {
         ] {
             assert_eq!(read_from(value, at(250)), None, "{value}");
         }
+    }
+
+    /// `seconds` after the epoch, as a `SystemTime`.
+    fn epoch_plus(seconds: u64) -> SystemTime {
+        SystemTime::UNIX_EPOCH
+            .checked_add(Duration::from_secs(seconds))
+            .expect("a time that a SystemTime holds")
+    }
+
+    #[test]
+    fn a_wait_until_any_time_rounds_up_and_never_panics() {
+        // The start is a quarter of a second into 2026, as above.
+        let start = at(250);
+        let day_before_1970 = SystemTime::UNIX_EPOCH
+            .checked_sub(Duration::from_secs(86_400))
+            .expect("a time that a SystemTime holds");
+        let just_after_start = epoch_plus(1_767_225_600)
+            .checked_add(Duration::from_micros(250_001))
+            .expect("a time that a SystemTime holds");
+        for (date, wait) in [
+            // The start's own second, already past by a quarter of it.
+            (epoch_plus(1_767_225_600), 0),
+            // A microsecond after the start still waits a whole second.
+            (just_after_start, 1),
+            // Two minutes into 2026: 119.75 seconds, rounded up.
+            (epoch_plus(1_767_225_720), 120),
+            // Before 1970, which no HTTP-date names today: long past.
+            (day_before_1970, 0),
+            // Ten thousand years on, past the year 9999 and past 32 bits of seconds.
+            (epoch_plus(315_360_000_000), u32::MAX),
+        ] {
+            assert_eq!(wait_until(date, start), wait, "{date:?}");
+        }
+        // With a start before 1970 too, a date's side of the epoch matters: two minutes
+        // after a start a day before it.
+        let start_before_1970 = from_unix_micros(-86_400_000_000).expect("in range");
+        let two_minutes_on = SystemTime::UNIX_EPOCH
+            .checked_sub(Duration::from_secs(86_280))
+            .expect("a time that a SystemTime holds");
+        assert_eq!(wait_until(two_minutes_on, start_before_1970), 120);
     }
 
     #[test]
