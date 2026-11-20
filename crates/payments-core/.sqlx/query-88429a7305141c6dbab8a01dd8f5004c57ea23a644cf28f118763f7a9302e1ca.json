@@ -1,0 +1,26 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT delivery_id FROM webhook_delivery_successes ORDER BY delivery_id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "delivery_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "webhook_delivery_successes",
+            "name": "delivery_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "88429a7305141c6dbab8a01dd8f5004c57ea23a644cf28f118763f7a9302e1ca"
+}

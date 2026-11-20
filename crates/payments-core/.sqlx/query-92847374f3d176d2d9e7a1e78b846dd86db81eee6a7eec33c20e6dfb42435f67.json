@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "REVOKE SELECT ON webhook_endpoints FROM payments_app",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "92847374f3d176d2d9e7a1e78b846dd86db81eee6a7eec33c20e6dfb42435f67"
+}

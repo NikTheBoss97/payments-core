@@ -15,15 +15,12 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
 use axum::http::StatusCode;
-use base64::Engine;
-use base64::engine::general_purpose::STANDARD;
-use common::outbox::{disable, event, insert_endpoint, new_payment};
+use common::outbox::{disable, event, insert_endpoint, master, new_payment};
 use common::{delivery_id, endpoint_id, event_id, runtime_pool};
 use mock_merchant::{Answer as Scripted, MockMerchant, Verdict};
 use payments_core::deliveries::{DeliveryClient, NotSent, Outcome, TIMEOUT};
 use payments_core::events::body;
 use payments_core::relay::{Answer, Delivery};
-use payments_core::signing::MasterKey;
 use sqlx::PgPool;
 use sqlx::types::time::OffsetDateTime;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -38,13 +35,6 @@ const OK: Outcome = Outcome::Answered(Answer::Status {
     status: 200,
     retry_after: None,
 });
-
-/// A master key of 32 bytes from the operating system.
-fn master() -> MasterKey {
-    let mut bytes = [0_u8; 32];
-    getrandom::fill(&mut bytes).expect("the operating system's randomness");
-    MasterKey::parse(&format!("whsec_{}", STANDARD.encode(bytes))).expect("32 bytes")
-}
 
 /// A new merchant's endpoint `n` at `url`, and its payment's event `n` with delivery
 /// `1000 + n` to the endpoint, committed as the catch-up writes them. The delivery is

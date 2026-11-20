@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "GRANT INSERT (delivery_id) ON webhook_delivery_successes TO payments_app",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "2139f70dfc8b404062650827a9bcfc3d39992ae5034051f387723528a1667ed8"
+}

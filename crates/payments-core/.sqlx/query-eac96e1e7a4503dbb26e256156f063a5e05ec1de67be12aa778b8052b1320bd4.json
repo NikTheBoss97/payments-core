@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "REVOKE INSERT (delivery_id) ON webhook_delivery_successes FROM payments_app",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "eac96e1e7a4503dbb26e256156f063a5e05ec1de67be12aa778b8052b1320bd4"
+}
