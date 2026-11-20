@@ -54,7 +54,7 @@ sqlx migrate run --source crates/payments-core/migrations
 The operator is one secret, of which the server holds only the digest. The payment provider issues
 the key that the server's calls to it carry, and signs its notifications with a key that the server
 holds too. Each merchant endpoint's secret is derived from a master key. Make all four for this
-shell, and start the mock provider and the server there:
+shell, build the mock merchant, and start the mock provider and the server there:
 
 ```sh
 set -a; . ./.env; set +a
@@ -63,15 +63,17 @@ export OPERATOR_KEY_SHA256="$(printf %s "$operator" | openssl dgst -sha256 -r | 
 export MOCK_PSP_API_KEY="mock_sk_$(openssl rand -hex 32)"
 export MOCK_PSP_SIGNING_KEYS="whsec_$(openssl rand -base64 32)"
 export WEBHOOK_MASTER_KEY="whsec_$(openssl rand -base64 32)"
+cargo build -p mock-merchant
 cargo run -p mock-psp &
 cargo run -p payments-core &
 ```
 
-Once the server logs `listening on 127.0.0.1:8080`, take a merchant on, and take a payment through
-its life. Every `POST` carries an idempotency key, so any of these can be sent again and has one
-effect. Each command on the payment records a request to the provider and answers `202`, and
-`applied` waits until the provider has applied it, which the mock does within a second or two. The
-full API is in [`docs/api.md`](docs/api.md).
+Once the server logs `listening on 127.0.0.1:8080`, take a merchant on, give it an endpoint where
+the mock merchant listens, start the mock merchant with the endpoint's secret, which the answer
+shows once, and take a payment through its life. Every `POST` carries an idempotency key, so any
+of these can be sent again and has one effect. Each command on the payment records a request to
+the provider and answers `202`, and `applied` waits until the provider has applied it, which the
+mock does within a second or two. The full API is in [`docs/api.md`](docs/api.md).
 
 ```sh
 post() { curl -s "localhost:8080$1" -H "Authorization: Bearer $2" -H "Idempotency-Key: \"$3\"" -d "$4"; }
@@ -83,6 +85,9 @@ applied() {
 
 merchant=$(post /merchants "$operator" merchant-1 '{"fee_bps":250}' | member merchant_id)
 secret=$(post "/merchants/$merchant/api-keys" "$operator" key-1 '' | member secret)
+hook=$(post "/merchants/$merchant/webhook-endpoints" "$operator" endpoint-1 \
+  '{"url":"http://127.0.0.1:4200/webhooks"}' | member secret)
+MOCK_MERCHANT_SECRETS="$hook" cargo run -p mock-merchant &
 
 payment=$(post /payments "$secret" create-1 '{"currency":"EUR","amount":10000}' | member payment_id)
 applied "$(post "/payments/$payment/authorize" "$secret" authorize-1 '{"amount":10000}' | member request_id)"
@@ -91,6 +96,9 @@ applied "$(post "/payments/$payment/refund" "$secret" refund-1 '{"amount":2500}'
 
 curl -s "localhost:8080/payments/$payment" -H "Authorization: Bearer $secret"; echo
 ```
+
+The mock merchant logs each event that it takes, once it has checked the signature: here one for
+each request that the provider decided, naming the payment and the request.
 
 This speaks plain HTTP on the local interface. In any real deployment TLS ends in front of the
 server, because a secret sent in the clear is a stolen key.
