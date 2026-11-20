@@ -124,7 +124,7 @@ guard, and the failures they reproduce.
 | I7 | A merchant can read or change only its own payments, and is told only about its own. | Reading and changing guaranteed since phase 3; being told in phase 5, in progress: designed in [ADR-0054](docs/adr/0054-what-phase-5-promises-and-how-it-is-tested.md) | [API](docs/correctness/api.md) |
 | I8 | Only the PSP's word moves a payment: after its creation, every step but a cancellation comes from the PSP's history, once and in its order. | Guaranteed since phase 4 | [PSP](docs/correctness/psp.md) |
 | I9 | A request sent to the PSP takes effect there at most once. | Guaranteed since phase 4 | [PSP](docs/correctness/psp.md) |
-| I10 | Every event reaches every endpoint enabled when it was written, at least once, unless that endpoint is disabled first. | Phase 5, in progress: designed in [ADR-0052](docs/adr/0052-how-the-relay-finds-what-to-send.md), [ADR-0053](docs/adr/0053-delivering-events.md) and [ADR-0062](docs/adr/0062-searching-by-snapshot-delta.md) | |
+| I10 | Every event reaches every endpoint enabled when it was written, at least once, unless that endpoint is disabled first. | Phase 5, in progress: designed in [ADR-0052](docs/adr/0052-how-the-relay-finds-what-to-send.md), [ADR-0053](docs/adr/0053-delivering-events.md), [ADR-0062](docs/adr/0062-searching-by-snapshot-delta.md) and [ADR-0063](docs/adr/0063-the-relays-task.md) | |
 
 ### Running the tests
 
