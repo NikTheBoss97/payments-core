@@ -1,9 +1,9 @@
 // Author: Nicola Antonello
 
-//! Spacing and bounding retries (ADR-0032, ADR-0042): the delay before each retry, with
-//! full jitter, the wait that an answer asks for, and the one budget that bounds how often
-//! the process retries. Time and randomness are inputs, so a test decides both (ADR-0029),
-//! and nothing here reads a clock.
+//! Spacing and bounding retries (ADR-0032, ADR-0042, ADR-0053): the delay before each
+//! retry, with full jitter, the wait that an answer asks for, and the budget that bounds
+//! how often a task retries, one for the sender and one for the relay. Time and randomness
+//! are inputs, so a test decides both (ADR-0029), and nothing here reads a clock.
 //!
 //! The lints are the same as in `money`: this module counts time and tokens.
 #![forbid(clippy::arithmetic_side_effects, clippy::as_conversions)]
@@ -18,12 +18,12 @@ use crate::times::{from_unix_micros, unix_micros};
 /// The base of the backoff: before the first retry, the delay is at most twice it.
 pub const BASE: Duration = Duration::from_secs(1);
 
-/// The cap of the backoff: no delay is longer, but for the PSP's `Retry-After`.
+/// The cap of the backoff: no delay is longer, but for a `Retry-After` that asks for more.
 pub const CAP: Duration = Duration::from_secs(3600);
 
 /// The delay before the `retry`th retry, counted from 1 (ADR-0032, ADR-0042): `draw`
 /// brought into `[0, min(CAP, BASE × 2^retry)]` milliseconds, Brooker's "Full Jitter",
-/// and never shorter than the PSP's `Retry-After`, in seconds.
+/// and never shorter than a `Retry-After`, the PSP's or a merchant's, in seconds.
 #[must_use]
 pub fn delay(retry: u32, retry_after: Option<u32>, draw: u64) -> Duration {
     let cap = millis(CAP);
@@ -118,10 +118,11 @@ fn micros_since_epoch(time: SystemTime) -> i128 {
     }
 }
 
-/// The one budget for the process's retries (ADR-0032, ADR-0042): a token bucket that
-/// holds up to `capacity` tokens and gains one every `every`, counted from the times
-/// that the steps give it. A retry spends a token, and one that finds none waits for a
-/// later step. A first send, and the catch-up after a notification, are not retries.
+/// The budget for one task's retries, the sender's (ADR-0032, ADR-0042) or the relay's
+/// (ADR-0053): a token bucket that holds up to `capacity` tokens and gains one every
+/// `every`, counted from the times that the steps give it. A retry spends a token, and
+/// one that finds none waits for a later step. A first send or attempt, and the catch-up
+/// after a notification, are not retries.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RetryBudget {
     capacity: u32,
