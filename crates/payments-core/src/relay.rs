@@ -75,6 +75,9 @@ pub struct Delivery {
     pub id: DeliveryId,
     pub endpoint: EndpointId,
     pub event: EventId,
+    /// The transaction that wrote it, which the relay compares with its snapshots
+    /// (ADR-0064).
+    pub xact: XactId,
 }
 
 /// What the server carries out after an answer (ADR-0053).
@@ -141,6 +144,14 @@ impl XactId {
 pub struct Snapshot {
     pub xmax: XactId,
     pub in_progress: Vec<XactId>,
+}
+
+impl Snapshot {
+    /// Whether transaction `xact` had completed when the snapshot was taken: below its
+    /// `xmax`, and not in its list (ADR-0062, ADR-0064).
+    fn completed(&self, xact: XactId) -> bool {
+        xact < self.xmax && !self.in_progress.contains(&xact)
+    }
 }
 
 /// Which transactions' deliveries a search reads: those not finished, with no success and
@@ -213,15 +224,23 @@ impl Relay {
     }
 
     /// Takes deliveries that the catch-up has just committed: each is a first attempt, due
-    /// at `now`, which takes no token (ADR-0052). One that the relay knows already, whose
-    /// success it holds, or of an endpoint that it disabled, is left as it is.
+    /// at `now`, which takes no token (ADR-0052). One whose transaction had completed at the
+    /// relay's snapshot is left: the first search whose snapshot had it completed read it
+    /// and learned it, unless it was finished then (ADR-0064). So is one that the relay
+    /// knows already, whose success it holds, or of an endpoint that it disabled.
     pub fn hand_over(
         &mut self,
         deliveries: impl IntoIterator<Item = Delivery>,
         now: OffsetDateTime,
     ) {
         for delivery in deliveries {
-            self.learn(delivery, 0, now);
+            let searched = self
+                .snapshot
+                .as_ref()
+                .is_some_and(|snapshot| snapshot.completed(delivery.xact));
+            if !searched {
+                self.learn(delivery, 0, now);
+            }
         }
     }
 
@@ -234,13 +253,14 @@ impl Relay {
         self.snapshot.clone().map_or(Search::Full, Search::Since)
     }
 
-    /// What `search` found after the server read `snapshot`: deliveries not finished. One
-    /// that the relay does not know is a retry when the search was the first, due after a
-    /// first retry's delay drawn with `random`, for a token, since it may have been
-    /// attempted before the restart. After that it is a first attempt, due at `now`, since
-    /// no process can have attempted it: its handover was dropped. The relay keeps
-    /// `snapshot` for the next search, and forgets nothing that a search does not return
-    /// (ADR-0062).
+    /// What `search` found after the server read `snapshot`: deliveries not finished. The
+    /// relay learns only those of transactions that had completed at `snapshot`; a row
+    /// that committed after it waits for its handover, or for the next search, which reads
+    /// it again (ADR-0064). One that the relay does not know is a retry when the search was
+    /// the first, due after a first retry's delay drawn with `random`, for a token, since it
+    /// may have been attempted before the restart. After that it is a first attempt, due at
+    /// `now`, since no process can have attempted it. The relay keeps `snapshot` for the
+    /// next search, and forgets nothing that a search does not return (ADR-0062).
     pub fn searched(
         &mut self,
         search: Search,
@@ -253,6 +273,9 @@ impl Relay {
         // `learn` leaves a delivery that the relay knows as it is, and one whose success it
         // holds: only its record failed.
         for delivery in found {
+            if !snapshot.completed(delivery.xact) {
+                continue;
+            }
             if first {
                 let due = retries::after(now, retries::delay(1, None, random()));
                 self.learn(delivery, 1, due);
@@ -557,12 +580,19 @@ mod tests {
         EndpointId::try_from(uuid(0x1_0000 | n)).expect("a UUIDv7")
     }
 
-    /// The `n`th delivery, to endpoint `to`.
+    /// The `n`th delivery, to endpoint `to`, written by a transaction that every snapshot in
+    /// these tests shows as completed.
     fn delivery(to: u128, n: u128) -> Delivery {
+        written(to, n, 0)
+    }
+
+    /// The `n`th delivery, to endpoint `to`, written by transaction `xact`.
+    fn written(to: u128, n: u128, xact: u64) -> Delivery {
         Delivery {
             id: DeliveryId::try_from(uuid(n)).expect("a UUIDv7"),
             endpoint: endpoint(to),
             event: EventId::try_from(uuid(0x2_0000 | n)).expect("a UUIDv7"),
+            xact: XactId(xact),
         }
     }
 
@@ -878,6 +908,100 @@ mod tests {
     }
 
     #[test]
+    fn a_search_learns_only_the_transactions_completed_at_its_snapshot() {
+        // A search's rows are read after its snapshot, so they can show a transaction that
+        // committed in between, whose handover is on its way (ADR-0064).
+        let mut relay = plenty();
+        let first = relay.begin_search();
+        relay.searched(first, snapshot(10, &[]), [], at(0), &mut || 0);
+        // At the later snapshot 12 has completed, 11 is in progress, and 13 is at xmax.
+        let (done, in_progress, at_xmax) =
+            (written(1, 1, 12), written(1, 2, 11), written(1, 3, 13));
+        let later = relay.begin_search();
+        relay.searched(
+            later,
+            snapshot(13, &[11]),
+            [done, in_progress, at_xmax],
+            at(0),
+            &mut || 0,
+        );
+        assert_eq!(relay.step(at(0)).attempts, [done]);
+        // The next search reads the other two again, and they have completed by then.
+        let next = relay.begin_search();
+        relay.searched(
+            next,
+            snapshot(14, &[]),
+            [in_progress, at_xmax],
+            at(0),
+            &mut || 0,
+        );
+        assert_eq!(relay.step(at(0)).attempts, [in_progress, at_xmax]);
+    }
+
+    #[test]
+    fn a_handover_is_left_when_its_transaction_completed_at_the_relays_snapshot() {
+        // The first search whose snapshot had the transaction completed read its rows and
+        // learned what was not finished (ADR-0064).
+        let mut relay = plenty();
+        let search = relay.begin_search();
+        relay.searched(search, snapshot(10, &[7]), [], at(0), &mut || 0);
+        let (completed, in_progress, at_xmax) =
+            (written(1, 1, 8), written(1, 2, 7), written(1, 3, 10));
+        relay.hand_over([completed, in_progress, at_xmax], at(0));
+        assert_eq!(relay.step(at(0)).attempts, [in_progress, at_xmax]);
+    }
+
+    #[test]
+    fn a_delivery_that_a_search_sees_before_its_snapshot_does_is_sent_once() {
+        // The search's rows show transaction 12, which committed after its snapshot: the
+        // handover that follows is what the relay learns it from, once.
+        let mut relay = plenty();
+        let first = relay.begin_search();
+        relay.searched(first, snapshot(10, &[]), [], at(0), &mut || 0);
+        let early = written(1, 1, 12);
+        let later = relay.begin_search();
+        relay.searched(later, snapshot(12, &[]), [early], at(0), &mut || 0);
+        assert_eq!(relay.step(at(0)).attempts, []);
+        relay.hand_over([early], at(1));
+        assert_eq!(relay.step(at(1)).attempts, [early]);
+        let record = Effect::Record(early.id);
+        assert_eq!(relay.answered(early.id, OK, at(2), 0), Some(record));
+        relay.recorded(record);
+        assert_eq!(relay.step(at(3)).attempts, []);
+    }
+
+    #[test]
+    fn a_handover_that_comes_after_its_delivery_succeeded_is_left() {
+        // The catch-up stalled between its COMMIT and its handover while a search learned
+        // the delivery and the relay delivered it.
+        let mut relay = plenty();
+        let first = relay.begin_search();
+        relay.searched(first, snapshot(10, &[]), [], at(0), &mut || 0);
+        let stalled = written(1, 1, 11);
+        let later = relay.begin_search();
+        relay.searched(later, snapshot(12, &[]), [stalled], at(0), &mut || 0);
+        assert_eq!(relay.step(at(0)).attempts, [stalled]);
+        let record = Effect::Record(stalled.id);
+        assert_eq!(relay.answered(stalled.id, OK, at(1), 0), Some(record));
+        relay.recorded(record);
+        relay.hand_over([stalled], at(2));
+        assert_eq!(relay.step(at(2)).attempts, []);
+    }
+
+    #[test]
+    fn the_first_search_leaves_what_committed_during_it_to_the_next_as_a_first_attempt() {
+        // Transaction 10 committed after the first snapshot, so after this process
+        // started: no earlier process attempted its delivery.
+        let mut relay = broke();
+        let during = written(1, 1, 10);
+        let first = relay.begin_search();
+        relay.searched(first, snapshot(10, &[]), [during], at(0), &mut || 0);
+        let later = relay.begin_search();
+        relay.searched(later, snapshot(11, &[]), [during], at(0), &mut || 0);
+        assert_eq!(relay.step(at(0)).attempts, [during]);
+    }
+
+    #[test]
     fn a_delivery_handed_over_during_a_search_is_kept() {
         let mut relay = plenty();
         let late = delivery(1, 1);
@@ -1122,7 +1246,7 @@ mod tests {
 
     proptest! {
         #[test]
-        fn after_each_search_the_relay_holds_every_delivery_not_finished(
+        fn after_each_search_the_relay_holds_every_delivery_not_finished_that_its_snapshot_shows(
             txs in prop::collection::vec(tx(), 1..120)
         ) {
             let mut relay = plenty();
@@ -1130,7 +1254,7 @@ mod tests {
             let mut latest_completed = 0_u64;
             let mut open: Vec<u64> = Vec::new();
             let mut rows: Vec<(u64, Delivery, Row)> = Vec::new();
-            let mut written = 0_u128;
+            let mut count = 0_u128;
             let mut pending: Option<(Search, Snapshot)> = None;
             for tx in txs {
                 match tx {
@@ -1140,8 +1264,9 @@ mod tests {
                     }
                     Tx::Write { which } => {
                         if let Some(place) = which.checked_rem(open.len()) {
-                            written = written.checked_add(1).expect("few deliveries");
-                            rows.push((open[place], delivery(1, written), Row::Uncommitted));
+                            count = count.checked_add(1).expect("few deliveries");
+                            let xact = open[place];
+                            rows.push((xact, written(1, count, xact), Row::Uncommitted));
                         }
                     }
                     Tx::End { which, commit } => {
@@ -1177,11 +1302,14 @@ mod tests {
                                 .filter(|row| row.2 == Row::Unfinished && reads(&search, row.0))
                                 .map(|row| row.1)
                                 .collect();
+                            let taken = snapshot.clone();
                             relay.searched(search, snapshot, found, at(0), &mut || 0);
-                            // Every delivery not finished that this statement sees, the relay
-                            // now holds, whichever transactions the search read.
+                            // Every delivery not finished whose transaction had completed at
+                            // the snapshot, the relay now holds, whichever transactions the
+                            // search read. The others wait for their handovers or the next
+                            // search (ADR-0064).
                             for (xact, delivery, row) in &rows {
-                                if *row == Row::Unfinished {
+                                if *row == Row::Unfinished && taken.completed(XactId(*xact)) {
                                     prop_assert!(
                                         relay.known.contains_key(&delivery.id.get()),
                                         "{:?} of {} missed", delivery, xact
@@ -1242,13 +1370,15 @@ mod tests {
         let mut relay = plenty();
         let search = relay.begin_search();
         relay.searched(search, snapshot(1, &[]), [], at(0), &mut || 0);
-        let done = delivery(1, 1);
+        // Written by transaction 1, which completed after the first snapshot.
+        let done = written(1, 1, 1);
         relay.hand_over([done], at(0));
         assert_eq!(relay.step(at(0)).attempts, [done]);
         let record = Effect::Record(done.id);
         assert_eq!(relay.answered(done.id, OK, at(1), 0), Some(record));
         // Its record failed, so it is not finished, and the next search, which reads its
-        // transaction, finds it: the relay holds its success, and leaves it.
+        // transaction and shows it completed, finds it: the relay holds its success, and
+        // leaves it.
         let search = relay.begin_search();
         relay.searched(search, snapshot(2, &[]), [done], at(2), &mut || 0);
         assert_eq!(
@@ -1301,13 +1431,25 @@ mod tests {
         assert!(relay.step(at(after)).effects.is_empty());
     }
 
+    /// When a committed delivery's handover reaches the relay.
+    #[derive(Debug, Clone, Copy)]
+    enum Handed {
+        Now,
+        /// Later, when the task reads the handovers queued: a catch-up that stalls between
+        /// its `COMMIT` and its handover, or a task busy with other events.
+        Late,
+        /// Never, as a full channel drops it (ADR-0052).
+        Dropped,
+    }
+
     /// One thing that happens around a relay, in a random run.
     #[derive(Debug, Clone)]
     enum Op {
         /// The catch-up commits a delivery to endpoint `to`, in a transaction of its own,
-        /// and hands it over, unless the handover is dropped, as a full channel drops it
-        /// (ADR-0052).
-        Commit { to: u128, dropped: bool },
+        /// and hands it over.
+        Commit { to: u128, handover: Handed },
+        /// The task reads every handover queued so far.
+        Deliver,
         /// A step, this many milliseconds after the last thing, whose effects the task
         /// records, or fails to.
         Step { after: i64, recorded: bool },
@@ -1325,7 +1467,10 @@ mod tests {
         /// The attempt at this place among those in flight is not sent: the service's
         /// database did not give what it needed.
         NotSent { which: usize, draw: u64 },
-        /// A search, which reads what changed since the previous one (ADR-0062).
+        /// A search begins and reads the snapshot, in a statement of its own (ADR-0062).
+        ReadSnapshot,
+        /// The search that began reads its rows, in a later statement: a commit in between
+        /// shows in the rows and not in the snapshot (ADR-0064).
         Search,
     }
 
@@ -1342,8 +1487,14 @@ mod tests {
         ];
         // Most records go through; the others wait for a later step.
         let recorded = || prop::bool::weighted(0.8);
+        let handed = prop_oneof![
+            2 => Just(Handed::Now),
+            1 => Just(Handed::Late),
+            1 => Just(Handed::Dropped),
+        ];
         prop_oneof![
-            (1_u128..=3, any::<bool>()).prop_map(|(to, dropped)| Op::Commit { to, dropped }),
+            (1_u128..=3, handed).prop_map(|(to, handover)| Op::Commit { to, handover }),
+            Just(Op::Deliver),
             (0_i64..3_000, recorded()).prop_map(|(after, recorded)| Op::Step { after, recorded }),
             // A day or more, so that the three days pass in a run.
             (86_400_000_i64..90_000_000, recorded())
@@ -1358,6 +1509,7 @@ mod tests {
             ),
             any::<usize>().prop_map(|which| Op::FoundDisabled { which }),
             (any::<usize>(), any::<u64>()).prop_map(|(which, draw)| Op::NotSent { which, draw }),
+            Just(Op::ReadSnapshot),
             Just(Op::Search),
         ]
     }
@@ -1410,8 +1562,8 @@ mod tests {
     /// disabled as failing only once one of its attempts got an answer that failed, and
     /// every effect that the relay returned comes back at each step until the task records
     /// it. A relay without tokens must never retry: it attempts each delivery once at most,
-    /// and never one that only the first search found, which may have been attempted
-    /// before a restart.
+    /// whether its handover comes at once, late or never, and never one that only the first
+    /// search found, which may have been attempted before a restart.
     fn run(ops: &[Op], tokens: u32) -> Result<(), TestCaseError> {
         let mut relay = holding(tokens);
         let mut pending: Vec<Effect> = Vec::new();
@@ -1420,6 +1572,10 @@ mod tests {
         // Each commit is a transaction of its own, so no snapshot has one in progress.
         let mut xact = 0_u64;
         let mut db = Db::default();
+        // The handovers that the task has not read yet.
+        let mut queued: Vec<Delivery> = Vec::new();
+        // The search that has read its snapshot and not its rows yet.
+        let mut taken: Option<(Search, Snapshot)> = None;
         let mut in_flight: Vec<Delivery> = Vec::new();
         // The endpoints that the relay knows are disabled: those it disabled, which the
         // database learns of once the task records it, and those an attempt found disabled.
@@ -1431,18 +1587,27 @@ mod tests {
         let mut failed: HashSet<EndpointId> = HashSet::new();
         for op in ops {
             match *op {
-                Op::Commit { to, dropped } => {
+                Op::Commit { to, handover } => {
                     // The catch-up writes to each endpoint that the database holds enabled.
                     if !db.disabled.contains(&endpoint(to)) {
                         next = next.checked_add(1).expect("few deliveries");
                         xact = xact.checked_add(1).expect("few transactions");
-                        let new = delivery(to, next);
+                        let new = written(to, next, xact);
                         db.unfinished.push((new, xact));
-                        if !dropped {
-                            heard.insert(new.id);
-                            relay.hand_over([new], at(now));
+                        match handover {
+                            Handed::Now => {
+                                heard.insert(new.id);
+                                relay.hand_over([new], at(now));
+                            }
+                            Handed::Late => queued.push(new),
+                            Handed::Dropped => {}
                         }
                     }
+                }
+                Op::Deliver => {
+                    let late = std::mem::take(&mut queued);
+                    heard.extend(late.iter().map(|delivery| delivery.id));
+                    relay.hand_over(late, at(now));
                 }
                 Op::Step { after, recorded } => {
                     now = now.checked_add(after).expect("a short run");
@@ -1534,24 +1699,33 @@ mod tests {
                     disabled.insert(attempt.endpoint);
                     db.disable(attempt.endpoint);
                 }
+                Op::ReadSnapshot => {
+                    if taken.is_none() {
+                        taken = Some((relay.begin_search(), snapshot_of(&[], xact)));
+                    }
+                }
                 Op::Search => {
-                    let search = relay.begin_search();
-                    let snapshot = snapshot_of(&[], xact);
+                    let Some((search, snapshot)) = taken.take() else {
+                        continue;
+                    };
                     let found: Vec<Delivery> = db
                         .unfinished
                         .iter()
-                        .filter(|(_, written)| reads(&search, *written))
+                        .filter(|(_, writer)| reads(&search, *writer))
                         .map(|(delivery, _)| *delivery)
                         .collect();
+                    // What the search tells the relay: the deliveries of transactions
+                    // completed at its snapshot. The others wait for their handovers or the
+                    // next search (ADR-0064).
+                    let told: Vec<DeliveryId> = found
+                        .iter()
+                        .filter(|delivery| snapshot.completed(delivery.xact))
+                        .map(|delivery| delivery.id)
+                        .collect();
                     if search == Search::Full {
-                        found_first.extend(
-                            found
-                                .iter()
-                                .filter(|delivery| !heard.contains(&delivery.id))
-                                .map(|delivery| delivery.id),
-                        );
+                        found_first.extend(told.iter().filter(|id| !heard.contains(id)));
                     }
-                    heard.extend(found.iter().map(|delivery| delivery.id));
+                    heard.extend(told);
                     relay.searched(search, snapshot, found, at(now), &mut || 0);
                 }
             }

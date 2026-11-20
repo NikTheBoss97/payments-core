@@ -1,0 +1,26 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO webhook_deliveries (id, event_id, endpoint_id, merchant_id)\n               SELECT d.id, $3::uuid, d.endpoint_id, $4::uuid\n                 FROM unnest($1::uuid[], $2::uuid[]) AS d (id, endpoint_id)\n               RETURNING xact_id::text::bigint AS \"xact!\"",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "xact!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "UuidArray",
+        "UuidArray",
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "6023912011a158c27980110ec064cd2990229f10f46170b83c75ca18e8e76cd1"
+}

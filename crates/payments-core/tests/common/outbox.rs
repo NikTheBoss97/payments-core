@@ -8,7 +8,7 @@
 use std::error::Error;
 
 use payments_core::ids::{DeliveryId, EndpointId, EventId, PaymentId};
-use payments_core::relay::Delivery;
+use payments_core::relay::{Delivery, XactId};
 use payments_core::signing::MasterKey;
 use sqlx::{PgConnection, PgPool};
 use tokio::sync::mpsc;
@@ -94,26 +94,32 @@ pub async fn write_event(
     )
     .execute(&mut *conn)
     .await?;
-    for (delivery, endpoint) in deliveries {
-        sqlx::query!(
-            "INSERT INTO webhook_deliveries (id, event_id, endpoint_id, merchant_id) \
-             VALUES ($1, $2, $3, $4)",
-            delivery.get(),
+    let mut written = Vec::new();
+    for &(id, endpoint) in deliveries {
+        let xact = sqlx::query_scalar!(
+            r#"INSERT INTO webhook_deliveries (id, event_id, endpoint_id, merchant_id)
+               VALUES ($1, $2, $3, $4)
+               RETURNING xact_id::text::bigint AS "xact!""#,
+            id.get(),
             event.get(),
             endpoint.get(),
             merchant
         )
-        .execute(&mut *conn)
+        .fetch_one(&mut *conn)
         .await?;
-    }
-    Ok(deliveries
-        .iter()
-        .map(|&(id, endpoint)| Delivery {
+        written.push(Delivery {
             id,
             endpoint,
             event,
-        })
-        .collect())
+            xact: xact_id(xact),
+        });
+    }
+    Ok(written)
+}
+
+/// A transaction's ID read through text as a `bigint`, as the server reads it.
+fn xact_id(id: i64) -> XactId {
+    XactId::new(u64::try_from(id).expect("an xid8 cast to a bigint is not negative"))
 }
 
 /// [`write_event`] in a transaction of its own, committed.
@@ -137,11 +143,11 @@ pub async fn deliveries_of(
     payment: PaymentId,
 ) -> Result<Vec<Delivery>, Box<dyn Error>> {
     let rows = sqlx::query!(
-        "SELECT d.id, d.endpoint_id, d.event_id
-           FROM webhook_deliveries d
-           JOIN payment_events e ON e.id = d.event_id
-          WHERE e.payment_id = $1
-          ORDER BY d.id",
+        r#"SELECT d.id, d.endpoint_id, d.event_id, d.xact_id::text::bigint AS "xact_id!"
+             FROM webhook_deliveries d
+             JOIN payment_events e ON e.id = d.event_id
+            WHERE e.payment_id = $1
+            ORDER BY d.id"#,
         payment.get()
     )
     .fetch_all(pool)
@@ -152,6 +158,7 @@ pub async fn deliveries_of(
                 id: DeliveryId::try_from(row.id)?,
                 endpoint: EndpointId::try_from(row.endpoint_id)?,
                 event: EventId::try_from(row.event_id)?,
+                xact: xact_id(row.xact_id),
             })
         })
         .collect()
