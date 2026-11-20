@@ -29,6 +29,7 @@ use mock_psp::{Attempt, Failure, MockPsp, Route, new_api_key};
 use payments_core::api::problem::Problem;
 use payments_core::catch_up::catch_up;
 use payments_core::credentials::ApiKeySecret;
+use payments_core::deliveries::Handover;
 use payments_core::idempotency::Fingerprint;
 use payments_core::ids::{MerchantId, PaymentId};
 use payments_core::lifecycle::PaymentStatus;
@@ -1247,7 +1248,7 @@ async fn the_binary_sweeps_as_it_starts_and_sends_what_is_recorded(pool: PgPool)
     let (settled, authorize) = requested(&pools, 1).await?;
     send(&fake, &authorize).await;
     fake.approve_for(authorize.request.get(), AUTHORIZED);
-    catch_up(&pools.system, &client, settled).await?;
+    catch_up(&pools.system, &client, settled, &Handover::none()).await?;
     let capture = RecordRequest {
         request: request_id(101),
         payment: settled,
@@ -1256,7 +1257,7 @@ async fn the_binary_sweeps_as_it_starts_and_sends_what_is_recorded(pool: PgPool)
     record_request(Tenant::new(&pools.tenant, merchant_id(1)), &capture).await?;
     send(&fake, &capture).await;
     fake.approve(capture.request.get());
-    catch_up(&pools.system, &client, settled).await?;
+    catch_up(&pools.system, &client, settled, &Handover::none()).await?;
     fake.settle(settled.get());
     // Payment 2 has a request that only the binary's steps can send.
     let (_, waiting) = requested(&pools, 2).await?;

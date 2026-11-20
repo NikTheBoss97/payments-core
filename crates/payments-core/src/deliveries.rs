@@ -1,10 +1,10 @@
 // Author: Nicola Antonello
 
-//! The relay's input and output (ADR-0052, ADR-0053, ADR-0062): one attempt to deliver an
-//! event to a merchant's endpoint, the search for the deliveries not finished, and the
-//! records of what the relay decided. The relay decides which attempts to make and what
-//! their answers mean; this module reads the database, posts the attempts and writes the
-//! records.
+//! The relay's input and output (ADR-0052, ADR-0053, ADR-0062): the handover of the
+//! deliveries that a catch-up committed, one attempt to deliver an event to a merchant's
+//! endpoint, the search for the deliveries not finished, and the records of what the relay
+//! decided. The relay decides which attempts to make and what their answers mean; this
+//! module reads the database, posts the attempts and writes the records.
 
 use std::time::Duration;
 
@@ -16,6 +16,7 @@ use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::rt::TokioExecutor;
 use sqlx::PgPool;
 use sqlx::types::time::OffsetDateTime;
+use tokio::sync::mpsc;
 use uuid::Uuid;
 
 use crate::db::{CommitError, commit};
@@ -35,6 +36,42 @@ const DRAIN_BYTES: usize = 65_536;
 
 /// How long an answer's body may take to end after its head (ADR-0053).
 const DRAIN_TIME: Duration = Duration::from_secs(1);
+
+/// How many deliveries the catch-ups can hand over before the relay's task takes them
+/// (ADR-0052). Beyond it, a delivery is dropped, and the task's search finds it.
+pub const HANDOVERS: usize = 1_024;
+
+/// Where a catch-up hands over the deliveries that it committed (ADR-0052, ADR-0057): a
+/// channel to the relay's task, which drops a delivery when it is full or closed, so that
+/// a catch-up never waits on the relay. Without a channel, as in tests and in a process
+/// that runs no relay, it hands over nothing, and the relay's search finds every delivery.
+#[derive(Debug, Clone)]
+pub struct Handover(Option<mpsc::Sender<Delivery>>);
+
+impl Handover {
+    /// A handover through this channel.
+    #[must_use]
+    pub fn new(channel: mpsc::Sender<Delivery>) -> Self {
+        Self(Some(channel))
+    }
+
+    /// A handover that hands over nothing.
+    #[must_use]
+    pub fn none() -> Self {
+        Self(None)
+    }
+
+    /// Hands over each delivery, dropping one that the channel cannot take at once.
+    pub fn hand_over(&self, deliveries: impl IntoIterator<Item = Delivery>) {
+        let Some(channel) = &self.0 else {
+            return;
+        };
+        for delivery in deliveries {
+            // A full or closed channel drops it, and the relay's search finds it.
+            let _dropped = channel.try_send(delivery);
+        }
+    }
+}
 
 /// Posts the attempts to deliver events, each signed under its endpoint's secret
 /// (ADR-0051), through a client that follows no redirect and sends nothing again by itself
@@ -310,5 +347,43 @@ pub async fn record(pool: &PgPool, effect: Effect) -> Result<(), RecordError> {
             drop(tx);
             Err(RecordError::Database(failed))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Delivery `n`, its endpoint and its event, with UUIDv7 IDs made from `n`.
+    fn delivery(n: u128) -> Delivery {
+        let id = |kind: u128| {
+            Uuid::from_u128(0x019b_76da_a800_7000_8000_0000_0000_0000 | (kind << 32) | n)
+        };
+        Delivery {
+            id: DeliveryId::try_from(id(1)).expect("a UUIDv7"),
+            endpoint: EndpointId::try_from(id(2)).expect("a UUIDv7"),
+            event: EventId::try_from(id(3)).expect("a UUIDv7"),
+        }
+    }
+
+    #[test]
+    fn a_handover_passes_each_delivery_and_drops_what_the_channel_cannot_hold() {
+        let (channel, mut handed) = mpsc::channel(2);
+        let handover = Handover::new(channel);
+        handover.hand_over([delivery(1), delivery(2), delivery(3)]);
+        assert_eq!(handed.try_recv().ok(), Some(delivery(1)));
+        assert_eq!(handed.try_recv().ok(), Some(delivery(2)));
+        assert!(
+            handed.try_recv().is_err(),
+            "the third was dropped, not waited for"
+        );
+        // A closed channel drops them too, and nothing waits.
+        drop(handed);
+        handover.hand_over([delivery(4)]);
+    }
+
+    #[test]
+    fn no_handover_hands_over_nothing() {
+        Handover::none().hand_over([delivery(1)]);
     }
 }

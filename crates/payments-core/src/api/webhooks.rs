@@ -25,6 +25,7 @@ use super::AppState;
 use super::problem::{Problem, chain};
 use crate::accounts::Psp;
 use crate::catch_up::{CatchUpError, CaughtUp, catch_up};
+use crate::deliveries::Handover;
 use crate::ids::PaymentId;
 use crate::notifications::{RecordError, Recorded, SigningKeys, record, verify};
 use crate::psp::PspClient;
@@ -77,7 +78,7 @@ impl Webhooks {
         };
         let (system, psp) = (system.clone(), Arc::clone(&self.psp));
         tokio::spawn(async move {
-            let caught_up = catch_up(&system, &psp, payment).await;
+            let caught_up = catch_up(&system, &psp, payment, &Handover::none()).await;
             drop(permit);
             report(payment, &caught_up);
         });

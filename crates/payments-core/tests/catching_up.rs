@@ -27,6 +27,7 @@ use payments_core::catch_up::{
     CatchUpError, CaughtUp, Stop, StopReason, SweepError, Swept, apply, catch_up, read, sweep,
 };
 use payments_core::db::commit;
+use payments_core::deliveries::Handover;
 use payments_core::ids::{MerchantId, PaymentId};
 use payments_core::lifecycle::PaymentStatus;
 use payments_core::money::PositiveAmount;
@@ -111,7 +112,13 @@ impl World {
     }
 
     async fn catch_up(&self, payment: PaymentId) -> Result<CaughtUp, CatchUpError> {
-        catch_up(&self.system, &client_of(&self.fake), payment).await
+        catch_up(
+            &self.system,
+            &client_of(&self.fake),
+            payment,
+            &Handover::none(),
+        )
+        .await
     }
 
     /// Payment `n`, authorized by the PSP for [`AUTHORIZED`] and caught up. Its requests
@@ -558,14 +565,14 @@ async fn a_read_older_than_the_facts_held_applies_nothing(pool: PgPool) -> TestR
     world.fake.expire(payment.get());
     let late = read(&world.system, &client, payment).await?;
     assert_eq!(
-        apply(&world.system, late).await?,
+        apply(&world.system, late, &Handover::none()).await?,
         CaughtUp::Current { applied: 2 }
     );
 
     // The early read holds fewer facts than are held now, but not fewer than were held
     // when it began: it is stale, and nothing changed at the PSP.
     assert_eq!(
-        apply(&world.system, early).await?,
+        apply(&world.system, early, &Handover::none()).await?,
         CaughtUp::Current { applied: 0 }
     );
     assert_eq!(stop_of(&pool, payment).await?, None);
@@ -595,13 +602,19 @@ async fn a_history_shorter_than_the_facts_counted_before_it_was_read_has_changed
     scripted.answer(StatusCode::OK, None, serde_json::to_vec(&history)?);
     let read_lost = read(&world.system, &scripted.client(), lost_one).await?;
     assert_eq!(
-        apply(&world.system, read_lost).await?,
+        apply(&world.system, read_lost, &Handover::none()).await?,
         stopped(0, 2, StopReason::HistoryChanged)
     );
     // It forgot the other payment entirely: a 404, so a history without facts.
     scripted.answer(StatusCode::NOT_FOUND, None, Vec::new());
     assert_eq!(
-        catch_up(&world.system, &scripted.client(), forgotten).await?,
+        catch_up(
+            &world.system,
+            &scripted.client(),
+            forgotten,
+            &Handover::none()
+        )
+        .await?,
         stopped(0, 1, StopReason::HistoryChanged)
     );
 
@@ -637,7 +650,7 @@ async fn a_fact_whose_id_changed_stops_the_payment_at_its_position(pool: PgPool)
     history.facts[1].id = "fct_other".to_owned();
     scripted.answer(StatusCode::OK, None, serde_json::to_vec(&history)?);
     assert_eq!(
-        catch_up(&world.system, &scripted.client(), second).await?,
+        catch_up(&world.system, &scripted.client(), second, &Handover::none()).await?,
         stopped(0, 2, StopReason::HistoryChanged)
     );
     // A change at a position held stops the payment before any new fact applies.
@@ -645,7 +658,7 @@ async fn a_fact_whose_id_changed_stops_the_payment_at_its_position(pool: PgPool)
     history.facts[0].id = "fct_other".to_owned();
     scripted.answer(StatusCode::OK, None, serde_json::to_vec(&history)?);
     assert_eq!(
-        catch_up(&world.system, &scripted.client(), first).await?,
+        catch_up(&world.system, &scripted.client(), first, &Handover::none()).await?,
         stopped(0, 1, StopReason::HistoryChanged)
     );
     assert_eq!(kinds_of(&pool, first).await?, ["authorize"]);
@@ -685,7 +698,13 @@ async fn a_fact_without_a_place_stops_the_payment_after_the_facts_before_it(
     let scripted = ScriptedPsp::start().await;
     scripted.answer(StatusCode::OK, None, serde_json::to_vec(&history)?);
     assert_eq!(
-        catch_up(&world.system, &scripted.client(), unknown).await?,
+        catch_up(
+            &world.system,
+            &scripted.client(),
+            unknown,
+            &Handover::none()
+        )
+        .await?,
         stopped(0, 2, StopReason::NoPlace)
     );
 
@@ -857,7 +876,10 @@ async fn a_stopped_payment_takes_no_more_facts(pool: PgPool) -> TestResult {
     assert_eq!(world.catch_up(payment).await?, CaughtUp::AlreadyStopped);
     let client = client_of(&world.fake);
     let read = read(&world.system, &client, payment).await?;
-    assert_eq!(apply(&world.system, read).await?, CaughtUp::AlreadyStopped);
+    assert_eq!(
+        apply(&world.system, read, &Handover::none()).await?,
+        CaughtUp::AlreadyStopped
+    );
     assert!(facts_of(&pool, payment).await?.is_empty());
     assert_eq!(
         stop_of(&pool, payment).await?,
@@ -943,7 +965,14 @@ async fn a_failed_read_applies_nothing(pool: PgPool) -> TestResult {
     let mut history = serde_json::to_value(world.history(payment))?;
     history["facts"][0]["position"] = json!(2);
     scripted.answer(StatusCode::OK, None, serde_json::to_vec(&history)?);
-    match catch_up(&world.system, &scripted.client(), payment).await {
+    match catch_up(
+        &world.system,
+        &scripted.client(),
+        payment,
+        &Handover::none(),
+    )
+    .await
+    {
         Err(CatchUpError::Psp {
             source: ReadError::Unreadable { source },
             ..
@@ -1004,7 +1033,7 @@ async fn sweep_all(
     now: OffsetDateTime,
 ) -> Result<Swept, SweepError> {
     let mut plenty = RetryBudget::new(1_000, Duration::from_secs(1), now);
-    sweep(pool, psp, now, &mut plenty, None).await
+    sweep(pool, psp, now, &mut plenty, None, &Handover::none()).await
 }
 
 /// `seconds` after `time`.
@@ -1196,21 +1225,69 @@ async fn a_pass_spends_a_token_a_payment_and_resumes_after_its_last_one(
     };
 
     // Two tokens catch up the first two payments, and the third waits (ADR-0042).
-    let first = swept(sweep(&world.system, &client, now, &mut budget, None).await?);
+    let first = swept(
+        sweep(
+            &world.system,
+            &client,
+            now,
+            &mut budget,
+            None,
+            &Handover::none(),
+        )
+        .await?,
+    );
     assert_eq!(first, [due[0], due[1]]);
     // A second later the bucket holds one token, and the pass resumes after the second.
     let place = first.last().copied();
-    let second = swept(sweep(&world.system, &client, after(now, 1), &mut budget, place).await?);
+    let second = swept(
+        sweep(
+            &world.system,
+            &client,
+            after(now, 1),
+            &mut budget,
+            place,
+            &Handover::none(),
+        )
+        .await?,
+    );
     assert_eq!(second, [due[2]]);
     // Then it wraps round to the first.
     let place = second.last().copied();
-    let third = swept(sweep(&world.system, &client, after(now, 2), &mut budget, place).await?);
+    let third = swept(
+        sweep(
+            &world.system,
+            &client,
+            after(now, 2),
+            &mut budget,
+            place,
+            &Handover::none(),
+        )
+        .await?,
+    );
     assert_eq!(third, [due[0]]);
     // From the first payment every pass, the third would wait as long as tokens ran short.
-    let again = swept(sweep(&world.system, &client, after(now, 3), &mut budget, None).await?);
+    let again = swept(
+        sweep(
+            &world.system,
+            &client,
+            after(now, 3),
+            &mut budget,
+            None,
+            &Handover::none(),
+        )
+        .await?,
+    );
     assert_eq!(again, [due[0]]);
     // With no token left, a pass catches up nothing.
-    let empty = sweep(&world.system, &client, after(now, 3), &mut budget, None).await?;
+    let empty = sweep(
+        &world.system,
+        &client,
+        after(now, 3),
+        &mut budget,
+        None,
+        &Handover::none(),
+    )
+    .await?;
     assert!(empty.is_empty());
     world.close().await;
     Ok(())

@@ -30,6 +30,7 @@ use common::{
 };
 use futures_util::future::join;
 use payments_core::catch_up::{CatchUpError, CaughtUp, catch_up};
+use payments_core::deliveries::Handover;
 use payments_core::ids::{MerchantId, PaymentId};
 use payments_core::lifecycle::PaymentStatus;
 use payments_core::money::PositiveAmount;
@@ -105,7 +106,7 @@ impl CatchUpTest {
 
     /// Catches `payment` up on the session that may die.
     async fn catch_up(&self, payment: PaymentId) -> Result<CaughtUp, CatchUpError> {
-        catch_up(&self.app, &self.client, payment).await
+        catch_up(&self.app, &self.client, payment, &Handover::none()).await
     }
 
     async fn close(self) {
@@ -401,7 +402,7 @@ async fn a_commit_that_commits_and_loses_its_session_is_settled_by_catching_up_a
             .fetch_one(&app)
             .await?;
         let (answer, killed) = join(
-            catch_up(&app, &test.client, payment),
+            catch_up(&app, &test.client, payment, &Handover::none()),
             kill_during_commit(&pool, pid),
         )
         .await;
@@ -414,7 +415,7 @@ async fn a_commit_that_commits_and_loses_its_session_is_settled_by_catching_up_a
             }
             // The one answer that may go either way, and catching up again settles it.
             Err(CatchUpError::NotConfirmed { .. }) => {
-                let settled = catch_up(&app, &test.client, payment).await?;
+                let settled = catch_up(&app, &test.client, payment, &Handover::none()).await?;
                 if committed {
                     assert_eq!(settled, CaughtUp::Current { applied: 0 }, "attempt {n}");
                     hits += 1;

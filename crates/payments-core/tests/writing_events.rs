@@ -20,6 +20,7 @@ use common::{merchant_id, request_id, runtime_pool, tenant_pool, transition_id};
 use mock_psp::MockPsp;
 use mock_psp::wire::Detail;
 use payments_core::catch_up::{CaughtUp, Stop, StopReason, catch_up};
+use payments_core::deliveries::Handover;
 use payments_core::ids::{MerchantId, PaymentId};
 use payments_core::money::PositiveAmount;
 use payments_core::payments::{StepCommand, cancel, create_payment, register_merchant};
@@ -83,7 +84,13 @@ impl World {
 
     /// Catches the payment up, and checks that it applied `applied` new facts.
     async fn caught_up(&self, payment: PaymentId, applied: u32) -> TestResult {
-        let caught_up = catch_up(&self.system, &client_of(&self.fake), payment).await?;
+        let caught_up = catch_up(
+            &self.system,
+            &client_of(&self.fake),
+            payment,
+            &Handover::none(),
+        )
+        .await?;
         assert_eq!(caught_up, CaughtUp::Current { applied }, "{payment}");
         Ok(())
     }
@@ -306,7 +313,13 @@ async fn a_creation_a_cancellation_and_a_stopping_fact_have_no_event(pool: PgPoo
         .await?;
     world.fake.approve(authorize);
     world.fake.append(stopped.get(), Detail::Settled);
-    let caught_up = catch_up(&world.system, &client_of(&world.fake), stopped).await?;
+    let caught_up = catch_up(
+        &world.system,
+        &client_of(&world.fake),
+        stopped,
+        &Handover::none(),
+    )
+    .await?;
     let stop = Stop {
         position: 2,
         reason: StopReason::NoPlace,

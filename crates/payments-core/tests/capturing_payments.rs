@@ -26,6 +26,7 @@ use mock_psp::wire::Detail;
 use payments_core::accounts::{AccountRef, Psp};
 use payments_core::catch_up::{CatchUpError, CaughtUp, catch_up};
 use payments_core::db::commit;
+use payments_core::deliveries::Handover;
 use payments_core::ids::{MerchantId, PaymentId};
 use payments_core::lifecycle::{Event, IllegalTransition, PaymentStatus, Refused};
 use payments_core::money::{BasisPoints, PositiveAmount};
@@ -309,7 +310,7 @@ async fn a_payment_written_without_its_accounts_is_reported(pool: PgPool) -> Tes
         },
     );
     let id = PaymentId::try_from(payment.id)?;
-    let err = catch_up(&psp.system, &client_of(&psp.fake), id)
+    let err = catch_up(&psp.system, &client_of(&psp.fake), id, &Handover::none())
         .await
         .unwrap_err();
     let CatchUpError::MissingAccount { key } = err else {
@@ -330,7 +331,9 @@ async fn eight_concurrent_copies_apply_once(pool: PgPool) -> TestResult {
     let payment = authorized_at(&mut psp, me, merchant, 1, 250).await?;
     capture_approved(&mut psp, me, payment).await;
     let client = client_of(&psp.fake);
-    let results = join_all((0..8).map(|_| catch_up(&psp.system, &client, payment))).await;
+    let handover = Handover::none();
+    let results =
+        join_all((0..8).map(|_| catch_up(&psp.system, &client, payment, &handover))).await;
     let mut applied = 0;
     for result in results {
         let CaughtUp::Current { applied: these } = result? else {
@@ -432,9 +435,14 @@ async fn a_posting_that_a_trigger_corrupts_fails_at_commit(pool: PgPool) -> Test
     )
     .execute(&pool)
     .await?;
-    let err = catch_up(&psp.system, &client_of(&psp.fake), payment)
-        .await
-        .unwrap_err();
+    let err = catch_up(
+        &psp.system,
+        &client_of(&psp.fake),
+        payment,
+        &Handover::none(),
+    )
+    .await
+    .unwrap_err();
     let CatchUpError::Invariant { source, .. } = err else {
         panic!("expected Invariant, got {err:?}");
     };
@@ -470,9 +478,14 @@ async fn a_record_that_a_trigger_loses_fails_at_commit(pool: PgPool) -> TestResu
     )
     .execute(&pool)
     .await?;
-    let err = catch_up(&psp.system, &client_of(&psp.fake), payment)
-        .await
-        .unwrap_err();
+    let err = catch_up(
+        &psp.system,
+        &client_of(&psp.fake),
+        payment,
+        &Handover::none(),
+    )
+    .await
+    .unwrap_err();
     let CatchUpError::Invariant { source, .. } = err else {
         panic!("expected Invariant, got {err:?}");
     };
@@ -509,9 +522,14 @@ async fn a_record_that_a_trigger_corrupts_is_a_bug(pool: PgPool) -> TestResult {
     )
     .execute(&pool)
     .await?;
-    let err = catch_up(&psp.system, &client_of(&psp.fake), payment)
-        .await
-        .unwrap_err();
+    let err = catch_up(
+        &psp.system,
+        &client_of(&psp.fake),
+        payment,
+        &Handover::none(),
+    )
+    .await
+    .unwrap_err();
     let CatchUpError::Invariant { source, .. } = err else {
         panic!("expected Invariant, got {err:?}");
     };
@@ -546,14 +564,16 @@ async fn an_unproven_commit_failure_is_settled_by_catching_up_again(pool: PgPool
     .execute(&pool)
     .await?;
     let client = client_of(&psp.fake);
-    let err = catch_up(&psp.system, &client, payment).await.unwrap_err();
+    let err = catch_up(&psp.system, &client, payment, &Handover::none())
+        .await
+        .unwrap_err();
     assert!(matches!(err, CatchUpError::NotConfirmed { .. }), "{err:?}");
     assert_eq!(postings(&pool).await?, 0);
     sqlx::query!("DROP TRIGGER zz_end_session ON payment_captures")
         .execute(&pool)
         .await?;
     assert_eq!(
-        catch_up(&psp.system, &client, payment).await?,
+        catch_up(&psp.system, &client, payment, &Handover::none()).await?,
         CaughtUp::Current { applied: 1 }
     );
     assert_eq!(postings(&pool).await?, 1);

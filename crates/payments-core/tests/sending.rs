@@ -19,6 +19,7 @@ use mock_psp::wire::Detail;
 use mock_psp::{Failure, MockPsp, Route};
 use payments_core::accounts::Psp;
 use payments_core::catch_up::{StopReason, Swept, catch_up};
+use payments_core::deliveries::Handover;
 use payments_core::ids::{MerchantId, PaymentId};
 use payments_core::money::PositiveAmount;
 use payments_core::payments::{create_payment, register_merchant};
@@ -533,7 +534,13 @@ async fn a_decided_request_leaves_the_sender(pool: PgPool) -> TestResult {
     // Meanwhile the PSP took a copy and decided it, and a catch-up applied the decision.
     post(&world.fake, &request).await;
     world.fake.approve(id);
-    catch_up(&world.system, &client_of(&world.fake), request.payment).await?;
+    catch_up(
+        &world.system,
+        &client_of(&world.fake),
+        request.payment,
+        &Handover::none(),
+    )
+    .await?;
     // Decided, the request needs no answer of its own (ADR-0042).
     let report = sender
         .send_due(&world.system, at(3_600), &mut none())
