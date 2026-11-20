@@ -15,6 +15,7 @@ use common::psp::{ScriptedPsp, caught_up, decided, hand_over_and_step, sender_of
 use common::{merchant_id, request_id, runtime_pool, tenant_pool};
 use mock_psp::MockPsp;
 use mock_psp::wire::Detail;
+use payments_core::deliveries::Handover;
 use payments_core::ids::{MerchantId, PaymentId, RequestId};
 use payments_core::money::PositiveAmount;
 use payments_core::payments::{create_payment, register_merchant};
@@ -325,7 +326,7 @@ async fn a_request_that_the_psp_calls_malformed_stays_recorded(pool: PgPool) -> 
         .await?;
     let psp = ScriptedPsp::start().await;
     psp.answer_sends(StatusCode::UNPROCESSABLE_ENTITY, None, Vec::new());
-    let mut sender = Sender::new(psp.client(), OffsetDateTime::now_utc());
+    let mut sender = Sender::new(psp.client(), Handover::none(), OffsetDateTime::now_utc());
     hand_over_and_step(&mut sender, &world.system, &authorize).await;
     let answer = sqlx::query_scalar!(
         "SELECT answer FROM payment_request_answers WHERE request_id = $1",

@@ -36,9 +36,12 @@ use crate::retries::{self, RetryBudget};
 pub const FLAG_AFTER: Duration = Duration::from_secs(3600);
 
 /// The sender of one PSP: what it knows of the requests that it sends, the budget of
-/// retries that it shares with the sweep, and where the sweep's next pass begins.
+/// retries that it shares with the sweep, where the sweep's next pass begins, and where
+/// its catch-ups hand the deliveries that they commit over to the relay's task
+/// (ADR-0052).
 pub struct Sender {
     client: PspClient,
+    deliveries: Handover,
     budget: RetryBudget,
     /// Requests handed over and not yet seen by a step: each one's first send needs no
     /// lookup (ADR-0042).
@@ -148,18 +151,20 @@ pub enum AnswerError {
 }
 
 impl Sender {
-    /// The sender of the PSP that `client` reads, with the budget of ADR-0042, full at
-    /// `now`.
+    /// The sender of the PSP that `client` reads, whose catch-ups hand deliveries over to
+    /// `deliveries`, with the budget of ADR-0042, full at `now`.
     #[must_use]
-    pub fn new(client: PspClient, now: OffsetDateTime) -> Self {
-        Self::with_budget(client, RetryBudget::standard(now))
+    pub fn new(client: PspClient, deliveries: Handover, now: OffsetDateTime) -> Self {
+        Self::with_budget(client, deliveries, RetryBudget::standard(now))
     }
 
-    /// The sender of the PSP that `client` reads, with this budget.
+    /// The sender of the PSP that `client` reads, whose catch-ups hand deliveries over to
+    /// `deliveries`, with this budget.
     #[must_use]
-    pub fn with_budget(client: PspClient, budget: RetryBudget) -> Self {
+    pub fn with_budget(client: PspClient, deliveries: Handover, budget: RetryBudget) -> Self {
         Self {
             client,
+            deliveries,
             budget,
             handed_over: HashSet::new(),
             pending: BTreeMap::new(),
@@ -229,7 +234,7 @@ impl Sender {
             now,
             &mut self.budget,
             self.place,
-            &Handover::none(),
+            &self.deliveries,
         )
         .await?;
         if let Some(&(last, _)) = swept.last() {
@@ -312,7 +317,7 @@ impl Sender {
                 }
             };
             let held = read.history().holds(&id);
-            let caught = catch_up::apply(pool, read, &Handover::none()).await;
+            let caught = catch_up::apply(pool, read, &self.deliveries).await;
             let stopped = matches!(
                 caught,
                 Ok(CaughtUp::Stopped { .. } | CaughtUp::AlreadyStopped)

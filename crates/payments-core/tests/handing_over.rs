@@ -11,7 +11,7 @@ mod common;
 use std::error::Error;
 
 use common::crashes::{AT_COMMIT, install_crash_points, plan_death};
-use common::outbox::insert_endpoint;
+use common::outbox::{deliveries_of, handed, insert_endpoint};
 use common::payments::{REQUESTED, create_command, fee_rate};
 use common::psp::{client_of, send};
 use common::{
@@ -21,10 +21,10 @@ use mock_psp::MockPsp;
 use mock_psp::wire::Detail;
 use payments_core::catch_up::{CatchUpError, CaughtUp, Stop, StopReason, catch_up};
 use payments_core::deliveries::{HANDOVERS, Handover, search};
-use payments_core::ids::{DeliveryId, EndpointId, EventId, MerchantId, PaymentId};
+use payments_core::ids::{MerchantId, PaymentId};
 use payments_core::money::PositiveAmount;
 use payments_core::payments::{create_payment, register_merchant};
-use payments_core::relay::{Delivery, Search};
+use payments_core::relay::Search;
 use payments_core::requests::{Ask, RecordRequest, record_request};
 use payments_core::tenancy::Tenant;
 use sqlx::PgPool;
@@ -87,39 +87,6 @@ impl World {
         self.system.close().await;
         self.tenant.close().await;
     }
-}
-
-/// The deliveries of `payment`'s events, as the relay learns of them, by ID.
-async fn deliveries_of(pool: &PgPool, payment: PaymentId) -> Result<Vec<Delivery>, Box<dyn Error>> {
-    let rows = sqlx::query!(
-        "SELECT d.id, d.endpoint_id, d.event_id
-           FROM webhook_deliveries d
-           JOIN payment_events e ON e.id = d.event_id
-          WHERE e.payment_id = $1
-          ORDER BY d.id",
-        payment.get()
-    )
-    .fetch_all(pool)
-    .await?;
-    rows.into_iter()
-        .map(|row| {
-            Ok(Delivery {
-                id: DeliveryId::try_from(row.id)?,
-                endpoint: EndpointId::try_from(row.endpoint_id)?,
-                event: EventId::try_from(row.event_id)?,
-            })
-        })
-        .collect()
-}
-
-/// What the channel holds now, by ID, taken without waiting.
-fn handed(channel: &mut mpsc::Receiver<Delivery>) -> Vec<Delivery> {
-    let mut handed = Vec::new();
-    while let Ok(delivery) = channel.try_recv() {
-        handed.push(delivery);
-    }
-    handed.sort_by_key(|delivery| delivery.id.get());
-    handed
 }
 
 #[sqlx::test]

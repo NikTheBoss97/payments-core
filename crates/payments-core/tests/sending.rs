@@ -11,15 +11,18 @@ use std::error::Error;
 use std::time::Duration;
 
 use axum::http::StatusCode;
+use common::outbox::{deliveries_of, handed, insert_endpoint};
 use common::payments::{REQUESTED, create_command, fee_rate};
 use common::psp::{ScriptedPsp, client_of, outgoing, send as post};
-use common::{merchant_id, request_id, runtime_pool, runtime_transaction, tenant_pool};
+use common::{
+    endpoint_id, merchant_id, request_id, runtime_pool, runtime_transaction, tenant_pool,
+};
 use futures_util::future::join;
 use mock_psp::wire::Detail;
 use mock_psp::{Failure, MockPsp, Route};
 use payments_core::accounts::Psp;
-use payments_core::catch_up::{StopReason, Swept, catch_up};
-use payments_core::deliveries::Handover;
+use payments_core::catch_up::{CaughtUp, StopReason, Swept, catch_up};
+use payments_core::deliveries::{HANDOVERS, Handover};
 use payments_core::ids::{MerchantId, PaymentId};
 use payments_core::money::PositiveAmount;
 use payments_core::payments::{create_payment, register_merchant};
@@ -32,6 +35,7 @@ use payments_core::times::from_unix_micros;
 use serde_json::json;
 use sqlx::PgPool;
 use sqlx::types::time::OffsetDateTime;
+use tokio::sync::mpsc;
 use uuid::Uuid;
 
 type TestResult = Result<(), Box<dyn Error>>;
@@ -104,7 +108,7 @@ impl World {
 
     /// A sender of the fake, as a process starts one.
     fn sender(&self) -> Sender {
-        Sender::new(client_of(&self.fake), at(0))
+        Sender::new(client_of(&self.fake), Handover::none(), at(0))
     }
 
     async fn close(self) {
@@ -175,7 +179,7 @@ async fn a_request_handed_over_is_sent_at_once_without_a_lookup(pool: PgPool) ->
     let id = request.request.get();
     let psp = ScriptedPsp::start().await;
     psp.answer(StatusCode::ACCEPTED, None, Vec::new());
-    let mut sender = Sender::new(psp.client(), at(0));
+    let mut sender = Sender::new(psp.client(), Handover::none(), at(0));
     sender.hand_over(&request.request);
 
     let report = sender
@@ -258,7 +262,7 @@ async fn a_malformed_request_is_recorded_and_never_sent_again(pool: PgPool) -> T
     let id = request.request.get();
     let psp = ScriptedPsp::start().await;
     psp.answer_sends(StatusCode::BAD_REQUEST, None, Vec::new());
-    let mut sender = Sender::new(psp.client(), at(0));
+    let mut sender = Sender::new(psp.client(), Handover::none(), at(0));
     sender.hand_over(&request.request);
 
     let report = sender.send_due(&world.system, at(0), &mut none()).await?;
@@ -283,7 +287,7 @@ async fn each_retry_waits_up_to_twice_as_long_as_the_one_before(pool: PgPool) ->
     let request = world.requested(1).await?;
     let psp = ScriptedPsp::start().await;
     psp.answer(StatusCode::SERVICE_UNAVAILABLE, None, Vec::new());
-    let mut sender = Sender::new(psp.client(), at(0));
+    let mut sender = Sender::new(psp.client(), Handover::none(), at(0));
     sender.hand_over(&request.request);
     // Jitter that draws the top of each bound: 2 seconds, then 4, 8 and 16 (ADR-0032).
     let mut tops = [2_000_u64, 4_000, 8_000, 16_000].into_iter();
@@ -312,7 +316,7 @@ async fn when_tokens_run_short_the_request_due_longest_goes_first(pool: PgPool) 
     let psp = ScriptedPsp::start().await;
     psp.answer(StatusCode::SERVICE_UNAVAILABLE, None, Vec::new());
     let budget = RetryBudget::new(1, Duration::from_secs(60), at(0));
-    let mut sender = Sender::with_budget(psp.client(), budget);
+    let mut sender = Sender::with_budget(psp.client(), Handover::none(), budget);
     // Found after a restart, in the order of their IDs: the first due in a second and a
     // half, the second in half a second.
     let mut draws = [1_500_u64, 500, 2_000].into_iter();
@@ -337,7 +341,7 @@ async fn a_lookup_that_is_asked_to_wait_holds_the_next_attempt_back(pool: PgPool
     let id = request.request.get();
     let psp = ScriptedPsp::start().await;
     psp.answer(StatusCode::SERVICE_UNAVAILABLE, Some(300), Vec::new());
-    let mut sender = Sender::new(psp.client(), at(0));
+    let mut sender = Sender::new(psp.client(), Handover::none(), at(0));
 
     let report = sender.send_due(&world.system, at(0), &mut none()).await?;
     assert_eq!(attempts(&report), [(id, "lookup failed")]);
@@ -359,7 +363,7 @@ async fn a_retry_after_holds_the_next_attempt_back(pool: PgPool) -> TestResult {
     let psp = ScriptedPsp::start().await;
     psp.answer_sends(StatusCode::TOO_MANY_REQUESTS, Some(120), Vec::new());
     psp.answer_history(StatusCode::OK, None, empty_history(request.payment));
-    let mut sender = Sender::new(psp.client(), at(0));
+    let mut sender = Sender::new(psp.client(), Handover::none(), at(0));
     sender.hand_over(&request.request);
 
     let report = sender.send_due(&world.system, at(0), &mut none()).await?;
@@ -383,7 +387,7 @@ async fn any_other_answer_is_an_unknown_outcome_that_the_next_attempt_looks_up(
 ) -> TestResult {
     let world = World::new(&pool).await?;
     let psp = ScriptedPsp::start().await;
-    let mut sender = Sender::new(psp.client(), at(0));
+    let mut sender = Sender::new(psp.client(), Handover::none(), at(0));
     // A 503 without Retry-After, a 5xx, and 4xx answers that ADR-0032's table does not
     // name, a wrong key among them: none makes a request malformed (ADR-0042).
     for (n, status) in [
@@ -433,7 +437,7 @@ async fn the_budget_bounds_the_retries_of_an_outage(pool: PgPool) -> TestResult 
     psp.answer(StatusCode::SERVICE_UNAVAILABLE, None, Vec::new());
     // Two tokens, and one more every ten seconds.
     let budget = RetryBudget::new(2, Duration::from_secs(10), at(0));
-    let mut sender = Sender::with_budget(psp.client(), budget);
+    let mut sender = Sender::with_budget(psp.client(), Handover::none(), budget);
 
     let mut rng = jitter(7);
     let mut waited = 0;
@@ -467,7 +471,7 @@ async fn a_stopped_payments_request_is_held(pool: PgPool) -> TestResult {
     let id = request.request.get();
     let psp = ScriptedPsp::start().await;
     psp.answer(StatusCode::ACCEPTED, None, Vec::new());
-    let mut sender = Sender::new(psp.client(), at(0));
+    let mut sender = Sender::new(psp.client(), Handover::none(), at(0));
     sender.hand_over(&request.request);
     stop(&pool, request.payment).await?;
 
@@ -559,7 +563,7 @@ async fn a_request_unacknowledged_for_an_hour_is_flagged(pool: PgPool) -> TestRe
     let id = request.request.get();
     let psp = ScriptedPsp::start().await;
     psp.answer(StatusCode::SERVICE_UNAVAILABLE, None, Vec::new());
-    let mut sender = Sender::new(psp.client(), at(0));
+    let mut sender = Sender::new(psp.client(), Handover::none(), at(0));
     sender.hand_over(&request.request);
 
     for (seconds, flagged) in [(0, false), (3_599, false), (3_600, true)] {
@@ -610,7 +614,7 @@ async fn the_sweep_and_the_sender_share_one_budget(pool: PgPool) -> TestResult {
         due.push(request.payment);
     }
     let budget = RetryBudget::new(2, Duration::from_secs(1), at(0));
-    let mut sender = Sender::with_budget(client_of(&world.fake), budget);
+    let mut sender = Sender::with_budget(client_of(&world.fake), Handover::none(), budget);
     let swept = |swept: Swept| -> Vec<PaymentId> {
         swept.into_iter().map(|(payment, _)| payment).collect()
     };
@@ -636,6 +640,59 @@ async fn the_sweep_and_the_sender_share_one_budget(pool: PgPool) -> TestResult {
     Ok(())
 }
 
+/// Where the endpoints of the tests that hand deliveries over are. No test here posts to
+/// them.
+const URL: &str = "http://localhost:8080/webhooks";
+
+#[sqlx::test]
+async fn the_sweeps_catch_up_hands_its_deliveries_over_to_the_relay(pool: PgPool) -> TestResult {
+    let world = World::new(&pool).await?;
+    insert_endpoint(&world.system, endpoint_id(1), world.merchant.get(), URL).await?;
+    let request = world.requested(1).await?;
+    // Sent and approved before a restart: only a catch-up applies the approval.
+    post(&world.fake, &request).await;
+    world.fake.approve(request.request.get());
+    let (deliveries, mut handed_over) = mpsc::channel(HANDOVERS);
+    let mut sender = Sender::new(client_of(&world.fake), Handover::new(deliveries), at(0));
+
+    let swept = sender.sweep(&world.system, at(0)).await?;
+    assert!(
+        matches!(swept[..], [(payment, Ok(CaughtUp::Current { applied: 1 }))] if payment == request.payment),
+        "{swept:?}"
+    );
+    let committed = deliveries_of(&world.system, request.payment).await?;
+    assert_eq!(committed.len(), 1, "one delivery to the one endpoint");
+    assert_eq!(handed(&mut handed_over), committed);
+    world.close().await;
+    Ok(())
+}
+
+#[sqlx::test]
+async fn a_lookups_catch_up_hands_its_deliveries_over_to_the_relay(pool: PgPool) -> TestResult {
+    let world = World::new(&pool).await?;
+    insert_endpoint(&world.system, endpoint_id(1), world.merchant.get(), URL).await?;
+    let request = world.requested(1).await?;
+    // Sent and approved before a restart: the search finds the request, and its lookup
+    // applies the approval.
+    post(&world.fake, &request).await;
+    world.fake.approve(request.request.get());
+    let (deliveries, mut handed_over) = mpsc::channel(HANDOVERS);
+    let mut sender = Sender::new(client_of(&world.fake), Handover::new(deliveries), at(0));
+
+    let report = sender.send_due(&world.system, at(0), &mut || 2_000).await?;
+    assert!(report.attempts.is_empty(), "{report:?}");
+    let report = sender.send_due(&world.system, at(2), &mut none()).await?;
+    assert!(
+        matches!(report.caught_up[..], [(payment, Ok(CaughtUp::Current { applied: 1 }))] if payment == request.payment),
+        "{report:?}"
+    );
+    let committed = deliveries_of(&world.system, request.payment).await?;
+    assert_eq!(committed.len(), 1, "one delivery to the one endpoint");
+    assert_eq!(handed(&mut handed_over), committed);
+    world.close().await;
+    Ok(())
+}
+
 /// A client of the fake that waits a second: long enough for the fake's answers, and
 /// short for a reply that never comes.
 fn impatient(fake: &MockPsp) -> PspClient {
@@ -655,7 +712,7 @@ fn impatient(fake: &MockPsp) -> PspClient {
 async fn taken_unanswered_and_forgotten(world: &World) -> Result<RecordRequest, Box<dyn Error>> {
     let request = world.requested(1).await?;
     let id = request.request.get();
-    let mut sender = Sender::new(impatient(&world.fake), at(0));
+    let mut sender = Sender::new(impatient(&world.fake), Handover::none(), at(0));
     sender.hand_over(&request.request);
     world.fake.lose_replies(1);
     let report = sender.send_due(&world.system, at(0), &mut none()).await?;
@@ -673,7 +730,7 @@ async fn a_request_takes_effect_at_the_psp_at_most_once(pool: PgPool) -> TestRes
 
     // A new sender, as after a restart. Nothing acknowledged the request, so the search
     // finds it, and its first attempt is a retry, which looks it up (ADR-0042).
-    let mut restarted = Sender::new(impatient(&world.fake), at(60));
+    let mut restarted = Sender::new(impatient(&world.fake), Handover::none(), at(60));
     let report = restarted
         .send_due(&world.system, at(60), &mut none())
         .await?;

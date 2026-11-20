@@ -1,8 +1,9 @@
 // Author: Nicola Antonello
 
 //! The server (ADR-0023). It reads its configuration, logs in as the two roles, and
-//! serves, with the sender's task beside the routes (ADR-0043, ADR-0044). It never runs
-//! migrations (ADR-0008), and it speaks plain HTTP: TLS ends in front of it.
+//! serves, with the sender's task and the relay's beside the routes (ADR-0043, ADR-0044,
+//! ADR-0052). It never runs migrations (ADR-0008), and it speaks plain HTTP: TLS ends in
+//! front of it.
 
 use std::env;
 use std::error::Error;
@@ -13,8 +14,11 @@ use payments_core::accounts::Psp;
 use payments_core::api::{AppState, Webhooks, router};
 use payments_core::background::{self, Cadence};
 use payments_core::credentials::SecretDigest;
+use payments_core::deliveries::{self, DeliveryClient, Handover};
 use payments_core::notifications::SigningKeys;
 use payments_core::psp::{InvalidClient, PspClient};
+use payments_core::relay::Relay;
+use payments_core::relaying::{self, Relaying};
 use payments_core::sender::Sender;
 use payments_core::signing::MasterKey;
 use sqlx::PgPool;
@@ -60,7 +64,11 @@ async fn run() -> Result<(), Box<dyn Error>> {
     let tenant = PgPool::connect(&tenant_url).await?;
     let system = PgPool::connect(&system_url).await?;
     let listener = TcpListener::bind(&address).await?;
-    let sender = Sender::new(sender, OffsetDateTime::now_utc());
+    // Where the route's catch-ups and the sender's hand the deliveries that they commit over
+    // to the relay's task (ADR-0052).
+    let (to_relay, handed_to_relay) = mpsc::channel(deliveries::HANDOVERS);
+    let to_relay = Handover::new(to_relay);
+    let sender = Sender::new(sender, to_relay.clone(), OffsetDateTime::now_utc());
     let (handovers, handed_over) = mpsc::channel(background::HANDOVERS);
     let work = tokio::spawn(background::run(
         system.clone(),
@@ -68,22 +76,33 @@ async fn run() -> Result<(), Box<dyn Error>> {
         Cadence::STANDARD,
         handed_over,
     ));
+    let relaying = Relaying::new(
+        system.clone(),
+        DeliveryClient::new(master.clone(), deliveries::TIMEOUT),
+        Relay::new(OffsetDateTime::now_utc()),
+    );
+    let relay = tokio::spawn(relaying.run(relaying::TICK, handed_to_relay));
     tracing::info!("listening on {}", listener.local_addr()?);
     let state = AppState::new(
         tenant,
         system,
         operator,
         master,
-        Webhooks::new(psp, keys),
+        Webhooks::new(psp, keys, to_relay),
         handovers,
     );
-    // The task never returns, so if it ends, it panicked. The server then stops, as from
-    // a crash, rather than serve requests that nothing sends (ADR-0044).
+    // Neither task returns, so if one ends, it panicked. The server then stops, as from a
+    // crash, rather than serve requests that nothing sends or events that nothing delivers
+    // (ADR-0044).
     tokio::select! {
         served = axum::serve(listener, router(state)) => served?,
         ended = work => {
             let Err(ended) = ended;
             return Err(format!("the sender's task stopped: {ended}").into());
+        }
+        ended = relay => {
+            let Err(ended) = ended;
+            return Err(format!("the relay's task stopped: {ended}").into());
         }
     }
     Ok(())
