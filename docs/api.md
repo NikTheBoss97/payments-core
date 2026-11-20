@@ -6,10 +6,13 @@ What a client of this service can rely on. The decisions behind it are in
 [ADR-0023](adr/0023-the-http-api.md) (routes and answers),
 [ADR-0024](adr/0024-authentication.md) (credentials),
 [ADR-0025](adr/0025-tenant-isolation.md) (isolation),
-[ADR-0026](adr/0026-idempotency-keys.md) (idempotency keys), and
+[ADR-0026](adr/0026-idempotency-keys.md) (idempotency keys),
 [ADR-0030](adr/0030-signed-notifications.md),
 [ADR-0032](adr/0032-answers-and-retries.md) and
-[ADR-0043](adr/0043-the-servers-psp-routes-and-tasks.md) (the provider's notifications).
+[ADR-0043](adr/0043-the-servers-psp-routes-and-tasks.md) (the provider's notifications), and
+[ADR-0049](adr/0049-thin-events-in-an-outbox.md),
+[ADR-0051](adr/0051-signing-deliveries-with-derived-keys.md) and
+[ADR-0053](adr/0053-delivering-events.md) (deliveries to merchants).
 
 ## Running the server
 
@@ -32,7 +35,18 @@ the payments that wait for it: a step every second and a pass every minute, the 
 each as it starts ([ADR-0043](adr/0043-the-servers-psp-routes-and-tasks.md),
 [ADR-0044](adr/0044-what-the-senders-task-logs-and-how-it-runs.md)). Its log holds each
 send, lookup and catch-up that did something, and a request once when it waits for an
-operator. If that work ever stops, the server stops with an error, as from a crash.
+operator.
+
+It also delivers the merchants' events, as [Deliveries to merchants](#deliveries-to-merchants)
+describes: each delivery as soon as the transaction that wrote it commits, and, through a
+search every second that starts as the server does, any that it has not heard of
+([ADR-0052](adr/0052-how-the-relay-finds-what-to-send.md),
+[ADR-0062](adr/0062-searching-by-snapshot-delta.md),
+[ADR-0063](adr/0063-the-relays-task.md)). Its log holds each endpoint that it disables,
+with the reason; each search that fails; a delivery that the database kept it from sending,
+and a record that failed, once while that lasts; and an attempt that panicked, as an error,
+since that is a bug. If either piece of work ever stops, the server stops with an error, as
+from a crash.
 
 It never runs migrations. It speaks plain HTTP/1.1, so TLS ends in front of it, and
 in any real deployment it must: a secret sent in the clear is a stolen key. Stopping it
@@ -298,7 +312,8 @@ Revokes an API key, which stops working on its next request. It takes no body, n
 
 ### `POST /merchants/{id}/webhook-endpoints`
 
-Registers an endpoint that the merchant's events will be delivered to. Its URL is absolute and
+Registers an endpoint that the merchant's events will be delivered to, as
+[Deliveries to merchants](#deliveries-to-merchants) describes. Its URL is absolute and
 `http`, without user information or a fragment
 ([ADR-0050](adr/0050-webhook-endpoints-registered-by-the-operator.md)). Text that is not an
 absolute URL with a host, and with a port of at most 65535 if it names one, is a
@@ -370,6 +385,72 @@ Once it has answered, the service reads the payment's history from the provider 
 applies what the provider decided, in a task of its own: the answer never waits for that
 read. At most 4 such reads run at once. A notification that finds them all busy, or whose
 read fails, is recorded and answered all the same, and its payment waits for a later read.
+
+## Deliveries to merchants
+
+Each time the service applies a fact of the provider's history to a payment, it writes an
+event, `payment.updated`, and in the same transaction one delivery of it to each endpoint that
+the merchant has enabled then ([ADR-0049](adr/0049-thin-events-in-an-outbox.md),
+[ADR-0053](adr/0053-delivering-events.md)). That includes a fact that leaves the payment where
+it was, such as a refusal of one of the merchant's requests. Creating and cancelling a payment
+write none, and an endpoint registered later never gets an earlier event.
+
+Each attempt is a `POST` to the endpoint's URL, with `Content-Type: application/json` and the
+same body every time:
+
+```json
+{
+  "type": "payment.updated",
+  "timestamp": "2026-11-20T15:04:05.123456Z",
+  "data": {
+    "payment_id": "019b76da-a800-7000-8000-000000000001",
+    "request_id": "019b76da-a800-7000-8000-000000000004"
+  }
+}
+```
+
+`timestamp` is when the service wrote the event, and `data.request_id` appears only when the
+event decides one of the merchant's requests. The event says which payment it is about, not
+what happened: read its state with [`GET /payments/{id}`](#get-paymentsid), and a request's with
+[`GET /payments/{id}/requests/{request_id}`](#get-paymentsidrequestsrequest_id). Events
+promise no order, so a handler that reads the state never acts on an old one.
+
+Each attempt is signed as Standard Webhooks `v1` signs it
+([ADR-0051](adr/0051-signing-deliveries-with-derived-keys.md)):
+
+| Header | Holds |
+|---|---|
+| `webhook-id` | The event's ID, the same at every attempt and every endpoint. |
+| `webhook-timestamp` | The attempt's time, in whole Unix seconds. |
+| `webhook-signature` | `v1,` and the base64 of the HMAC-SHA256 of the ID, the timestamp and the body, joined by `.`, under the endpoint's secret. |
+
+To check a delivery, the endpoint takes the 32 bytes whose base64 follows `whsec_` in the
+secret that registering it answered, computes the HMAC over the body's bytes as received,
+before it parses them, and compares the result in constant time with each `v1,` entry of
+the signature, which can hold several, separated by spaces. It refuses a timestamp more than
+5 minutes from its own clock. An event can arrive more than once, so the endpoint drops a copy
+by its `webhook-id`.
+
+| The endpoint answers | The service |
+|---|---|
+| `2xx` | counts the event delivered, and sends it no more |
+| `410` | disables the endpoint for good: its deliveries end, and it gets no new ones |
+| any other status with `Retry-After`, in seconds or as a date | tries again, not before that |
+| a redirect, any other status, a refused or reset connection, or nothing within 15 seconds | tries again later |
+
+The service follows no redirect. It waits up to 15 seconds for the answer's status and
+headers, then reads at most 64 KiB of the body for up to a second, only to use the
+connection again: the body changes nothing.
+
+Before its *n*th retry of a delivery, the service waits a random time between zero and
+`min(1 hour, 1 second × 2^n)`, and never less than a `Retry-After`. The retries to every
+endpoint share one budget of 60, which gains one a second and which the endpoints take in
+turn, and one endpoint gets at most 4 attempts at once. An endpoint one of whose deliveries
+has gone 3 days without a success, counted from its first failed attempt since the service
+started, is disabled as `failing`, and its deliveries end. After a disablement, by the
+endpoint's `410`, by the service or by the operator, the operator registers a new endpoint,
+which gets the events written from then on; what the merchant missed, it reads through the
+API.
 
 ## Problems
 
