@@ -23,6 +23,7 @@ use common::payments::{
 use common::psp::{client_of, send};
 use common::{merchant_id, request_id, test_uuid, wait_for_lock_waits};
 use futures_util::future::{join, join_all};
+use mock_merchant::MockMerchant;
 use mock_psp::signing::SigningKey;
 use mock_psp::wire::Detail;
 use mock_psp::{Attempt, Failure, MockPsp, Route, new_api_key};
@@ -606,6 +607,69 @@ async fn the_whole_flow_runs_on_the_binary_and_moves_the_money_once(pool: PgPool
     assert!(!log.contains("ERROR"), "{log}");
     assert_no_credential(&log, &operator);
     assert_no_credential(&log, &secret);
+    Ok(())
+}
+
+/// How many deliveries have a recorded success. Pass the test's own pool.
+async fn successes(pool: &PgPool) -> sqlx::Result<i64> {
+    sqlx::query_scalar!(r#"SELECT count(*) AS "count!" FROM webhook_delivery_successes"#)
+        .fetch_one(pool)
+        .await
+}
+
+#[sqlx::test]
+async fn the_binary_delivers_an_event_to_the_merchants_endpoint(pool: PgPool) -> TestResult {
+    let (server, fake) = next_to_a_fake(&pool).await?;
+    let endpoint = MockMerchant::start().await?;
+    let operator = server.operator.expose().to_owned();
+
+    // The operator takes a merchant on, issues its key, and registers its endpoint at the
+    // fake merchant, which trusts the secret that the answer shows once.
+    let body = server
+        .applied(CREATED, "/merchants", &operator, "register", REGISTER)
+        .await?;
+    let merchant = member(&body, "merchant_id");
+    let keys = format!("/merchants/{merchant}/api-keys");
+    let (status, issued) = server.post(&keys, &operator, "issue", "").await?;
+    assert_eq!(status, CREATED, "{issued}");
+    let secret = member(&issued, "secret");
+    let endpoints = format!("/merchants/{merchant}/webhook-endpoints");
+    let url = format!(r#"{{"url":"{}"}}"#, endpoint.url());
+    let (status, registered) = server.post(&endpoints, &operator, "endpoint", &url).await?;
+    assert_eq!(status, CREATED, "{registered}");
+    endpoint.trust(&member(&registered, "secret"))?;
+
+    // The merchant asks for an authorization, and the PSP approves it.
+    let body = server
+        .applied(CREATED, "/payments", &secret, "create", CREATE)
+        .await?;
+    let payment = member(&body, "payment_id");
+    let authorize = format!("/payments/{payment}/authorize");
+    let answer = server
+        .applied(ACCEPTED, &authorize, &secret, "authorize", AUTHORIZE)
+        .await?;
+    applied_on(&server, &fake, &secret, &answer).await?;
+
+    // The relay's task, which the binary runs, delivers the event that the catch-up wrote,
+    // signed under the endpoint's secret, and records its success.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while successes(&pool).await? < 1 {
+        assert!(
+            Instant::now() < deadline,
+            "the event never reached the endpoint"
+        );
+        sleep(Duration::from_millis(20)).await;
+    }
+    let taken = endpoint.events();
+    assert_eq!(taken.len(), 1, "{taken:?}");
+    assert_eq!(taken[0].event.data.payment_id, Uuid::parse_str(&payment)?);
+    assert_eq!(
+        taken[0].event.data.request_id,
+        Some(Uuid::parse_str(&member(&answer, "request_id"))?)
+    );
+    let log = server.stop().await?;
+    assert!(!log.contains("ERROR"), "{log}");
+    assert!(!log.contains("WARN"), "{log}");
     Ok(())
 }
 
