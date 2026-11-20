@@ -107,7 +107,8 @@ impl Reason {
     }
 }
 
-/// What a step asks of the server: the endpoints to disable, then the attempts to start.
+/// What a step asks of the server: the effects to carry out, each one not recorded yet,
+/// then the attempts to start.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Step {
     pub effects: Vec<Effect>,
@@ -154,11 +155,15 @@ pub enum Search {
 }
 
 /// What the relay holds in memory: the deliveries it will attempt, the attempts in flight,
-/// the endpoints that it knows are disabled, its budget of retries, whose turn is next and
-/// the previous search's snapshot. A restart starts it empty (ADR-0052, ADR-0062).
+/// the endpoints that it knows are disabled, the effects not recorded yet, its budget of
+/// retries, whose turn is next and the previous search's snapshot. A restart starts it
+/// empty (ADR-0052, ADR-0062).
 #[derive(Debug)]
 pub struct Relay {
     budget: RetryBudget,
+    /// The effects returned and not recorded yet, oldest first, which each step hands back
+    /// until the task records them.
+    pending: Vec<Effect>,
     /// The deliveries to attempt, by ID.
     known: BTreeMap<Uuid, Known>,
     /// The attempts started and not answered yet, by delivery, with their endpoints.
@@ -198,6 +203,7 @@ impl Relay {
     pub fn with_budget(budget: RetryBudget) -> Self {
         Self {
             budget,
+            pending: Vec::new(),
             known: BTreeMap::new(),
             in_flight: HashMap::new(),
             disabled: HashSet::new(),
@@ -207,8 +213,8 @@ impl Relay {
     }
 
     /// Takes deliveries that the catch-up has just committed: each is a first attempt, due
-    /// at `now`, which takes no token (ADR-0052). One that the relay knows already, or of
-    /// an endpoint that it disabled, is left as it is.
+    /// at `now`, which takes no token (ADR-0052). One that the relay knows already, whose
+    /// success it holds, or of an endpoint that it disabled, is left as it is.
     pub fn hand_over(
         &mut self,
         deliveries: impl IntoIterator<Item = Delivery>,
@@ -244,7 +250,8 @@ impl Relay {
         random: &mut impl FnMut() -> u64,
     ) {
         let first = search == Search::Full;
-        // `learn` leaves a delivery that the relay knows as it is.
+        // `learn` leaves a delivery that the relay knows as it is, and one whose success it
+        // holds: only its record failed.
         for delivery in found {
             if first {
                 let due = retries::after(now, retries::delay(1, None, random()));
@@ -256,12 +263,12 @@ impl Relay {
         self.snapshot = Some(snapshot);
     }
 
-    /// One step at `now` (ADR-0053): the endpoints to disable, each one with a delivery
-    /// that has gone [`FAILING_AFTER`] without a success, then the attempts to start: every
-    /// first attempt that is due, then the retries that are due, one per endpoint per
-    /// round, each for a token, in the order of the endpoints' IDs from after the one
-    /// served last, until the tokens or the retries run out. An endpoint with [`AT_ONCE`]
-    /// attempts in flight gets none.
+    /// One step at `now` (ADR-0053): the effects not recorded yet, among them a disablement
+    /// of each endpoint with a delivery that has gone [`FAILING_AFTER`] without a success,
+    /// then the attempts to start: every first attempt that is due, then the retries that
+    /// are due, one per endpoint per round, each for a token, in the order of the
+    /// endpoints' IDs from after the one served last, until the tokens or the retries run
+    /// out. An endpoint with [`AT_ONCE`] attempts in flight gets none.
     pub fn step(&mut self, now: OffsetDateTime) -> Step {
         let failing: Vec<EndpointId> = self
             .known
@@ -273,12 +280,16 @@ impl Relay {
             })
             .map(|known| known.delivery.endpoint)
             .collect();
-        let effects = failing
-            .into_iter()
-            .filter_map(|endpoint| self.disable(endpoint, Reason::Failing))
-            .collect();
+        for endpoint in failing {
+            if let Some(effect) = self.disable(endpoint, Reason::Failing) {
+                self.pending.push(effect);
+            }
+        }
         let attempts = self.attempts(now);
-        Step { effects, attempts }
+        Step {
+            effects: self.pending.clone(),
+            attempts,
+        }
     }
 
     /// The attempts to start at `now`.
@@ -335,8 +346,9 @@ impl Relay {
     }
 
     /// What the attempt of `delivery` got, at `now`, with `draw` for the next delay: the
-    /// effect for the server to carry out, if any. A `2xx` is recorded even when the
-    /// delivery is forgotten, and an answer to no attempt in flight changes nothing.
+    /// effect for the server to carry out, if any, which each step hands back until the
+    /// server reports it recorded. A `2xx` is recorded even when the delivery is forgotten,
+    /// and an answer to no attempt in flight changes nothing.
     pub fn answered(
         &mut self,
         delivery: DeliveryId,
@@ -345,7 +357,7 @@ impl Relay {
         draw: u64,
     ) -> Option<Effect> {
         let endpoint = self.in_flight.remove(&delivery.get())?;
-        match verdict(answer) {
+        let effect = match verdict(answer) {
             Verdict::Delivered => {
                 self.known.remove(&delivery.get());
                 Some(Effect::Record(delivery))
@@ -362,7 +374,18 @@ impl Relay {
                 }
                 None
             }
-        }
+        };
+        self.pending.extend(effect);
+        effect
+    }
+
+    /// The task recorded `effect` (ADR-0053): the relay stops handing it back. Until then,
+    /// every step hands back each effect that the relay returned, from `answered` or from a
+    /// step. Nothing else records it before a restart: a search after the first reads only
+    /// the transactions not completed at the previous one (ADR-0062), and the relay leaves
+    /// a delivery whose success it holds or whose endpoint it disabled.
+    pub fn recorded(&mut self, effect: Effect) {
+        self.pending.retain(|owed| *owed != effect);
     }
 
     /// The attempt of `delivery` found its endpoint disabled, by the operator or before a
@@ -375,9 +398,10 @@ impl Relay {
     }
 
     /// The attempt of `delivery` was not made: the service's database did not give the
-    /// endpoint's URL, its disablement or the event's body (ADR-0053). The attempt ends,
-    /// and the delivery waits like a retry, for its delay drawn with `draw` and a token,
-    /// but its three days do not start: only the endpoint's answers count against it.
+    /// endpoint's URL, its disablement or the event's body (ADR-0053), or the attempt
+    /// panicked, a bug of ours that the task logs as an error. The attempt ends, and the
+    /// delivery waits like a retry, for its delay drawn with `draw` and a token, but its
+    /// three days do not start: only the endpoint's answers count against it.
     pub fn not_sent(&mut self, delivery: DeliveryId, now: OffsetDateTime, draw: u64) {
         if self.in_flight.remove(&delivery.get()).is_none() {
             return;
@@ -391,9 +415,12 @@ impl Relay {
         }
     }
 
-    /// Adds a delivery that the relay does not know, unless its endpoint is disabled.
+    /// Adds a delivery that the relay does not know, unless its endpoint is disabled or the
+    /// relay holds its success.
     fn learn(&mut self, delivery: Delivery, retry: u32, due: OffsetDateTime) {
-        if self.disabled.contains(&delivery.endpoint.get()) {
+        if self.disabled.contains(&delivery.endpoint.get())
+            || self.pending.contains(&Effect::Record(delivery.id))
+        {
             return;
         }
         self.known.entry(delivery.id.get()).or_insert(Known {
@@ -895,6 +922,7 @@ mod tests {
                     relay.answered(attempt.id, OK, at(1_000), 0),
                     Some(Effect::Record(attempt.id))
                 );
+                relay.recorded(Effect::Record(attempt.id));
             }
         }
         // Counted from its first failed attempt, at the start: not a microsecond before.
@@ -908,6 +936,7 @@ mod tests {
             [Effect::Disable(endpoint(1), Reason::Failing)]
         );
         assert_eq!(at_three_days.attempts, []);
+        relay.recorded(Effect::Disable(endpoint(1), Reason::Failing));
         // Once: its deliveries leave with it, and none comes back.
         relay.hand_over([delivery(1, 4)], due);
         assert_eq!(
@@ -936,6 +965,7 @@ mod tests {
             let answer = if attempt == elsewhere { OK } else { FAILED };
             relay.answered(attempt.id, answer, at(3_600_000), 0);
         }
+        relay.recorded(Effect::Record(elsewhere.id));
         let due = relay.step(at(THREE_DAYS));
         assert_eq!(due.effects, [Effect::Disable(endpoint(1), Reason::Failing)]);
         assert_eq!(due.attempts, []);
@@ -1005,10 +1035,12 @@ mod tests {
             relay.answered(other.id, OK, at(0), 0),
             Some(Effect::Record(other.id))
         );
+        relay.recorded(Effect::Record(other.id));
         assert_eq!(
             relay.answered(ended[1].id, OK, at(0), 0),
             Some(Effect::Record(ended[1].id))
         );
+        relay.recorded(Effect::Record(ended[1].id));
         relay.found_disabled(ended[2].id);
         assert_eq!(relay.answered(ended[3].id, FAILED, at(0), 0), None);
         assert_eq!(relay.answered(ended[3].id, GONE, at(0), 0), None);
@@ -1163,6 +1195,112 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_success_comes_back_at_each_step_until_it_is_recorded() {
+        let mut relay = plenty();
+        let done = delivery(1, 1);
+        relay.hand_over([done], at(0));
+        assert_eq!(relay.step(at(0)).attempts, [done]);
+        let record = Effect::Record(done.id);
+        assert_eq!(relay.answered(done.id, OK, at(1), 0), Some(record));
+        // Its record failed: each step hands it back, and attempts nothing again.
+        for later in [2, 3] {
+            assert_eq!(
+                relay.step(at(later)),
+                Step {
+                    effects: vec![record],
+                    attempts: vec![]
+                }
+            );
+        }
+        relay.recorded(record);
+        assert_eq!(
+            relay.step(at(4)),
+            Step {
+                effects: vec![],
+                attempts: vec![]
+            }
+        );
+    }
+
+    #[test]
+    fn recording_one_effect_leaves_the_others_owed() {
+        let mut relay = plenty();
+        let (first, second) = (delivery(1, 1), delivery(2, 2));
+        relay.hand_over([first, second], at(0));
+        assert_eq!(relay.step(at(0)).attempts, [first, second]);
+        let (one, two) = (Effect::Record(first.id), Effect::Record(second.id));
+        assert_eq!(relay.answered(first.id, OK, at(1), 0), Some(one));
+        assert_eq!(relay.answered(second.id, OK, at(1), 0), Some(two));
+        // The first record failed, and the second went through.
+        relay.recorded(two);
+        assert_eq!(relay.step(at(2)).effects, [one]);
+    }
+
+    #[test]
+    fn a_success_not_recorded_yet_is_not_sent_again() {
+        let mut relay = plenty();
+        let search = relay.begin_search();
+        relay.searched(search, snapshot(1, &[]), [], at(0), &mut || 0);
+        let done = delivery(1, 1);
+        relay.hand_over([done], at(0));
+        assert_eq!(relay.step(at(0)).attempts, [done]);
+        let record = Effect::Record(done.id);
+        assert_eq!(relay.answered(done.id, OK, at(1), 0), Some(record));
+        // Its record failed, so it is not finished, and the next search, which reads its
+        // transaction, finds it: the relay holds its success, and leaves it.
+        let search = relay.begin_search();
+        relay.searched(search, snapshot(2, &[]), [done], at(2), &mut || 0);
+        assert_eq!(
+            relay.step(at(2)),
+            Step {
+                effects: vec![record],
+                attempts: vec![]
+            }
+        );
+    }
+
+    #[test]
+    fn a_disablement_comes_back_at_each_step_until_it_is_recorded() {
+        let mut relay = plenty();
+        let (gone, other) = (delivery(1, 1), delivery(1, 2));
+        relay.hand_over([gone], at(0));
+        assert_eq!(relay.step(at(0)).attempts, [gone]);
+        let disable = Effect::Disable(endpoint(1), Reason::Gone);
+        assert_eq!(relay.answered(gone.id, GONE, at(1), 0), Some(disable));
+        // A delivery of the endpoint handed over since is left, as the endpoint is.
+        relay.hand_over([other], at(2));
+        for later in [2, 3] {
+            assert_eq!(
+                relay.step(at(later)),
+                Step {
+                    effects: vec![disable],
+                    attempts: vec![]
+                }
+            );
+        }
+        relay.recorded(disable);
+        assert!(relay.step(at(4)).effects.is_empty());
+    }
+
+    #[test]
+    fn a_failing_endpoints_disablement_comes_back_until_it_is_recorded() {
+        let mut relay = plenty();
+        let refused = delivery(1, 1);
+        relay.hand_over([refused], at(0));
+        assert_eq!(relay.step(at(0)).attempts, [refused]);
+        assert_eq!(relay.answered(refused.id, FAILED, at(0), 0), None);
+        let three_days = i64::try_from(FAILING_AFTER.as_millis()).expect("three days in ms");
+        let disable = Effect::Disable(endpoint(1), Reason::Failing);
+        for later in [0, 1] {
+            let now = three_days.checked_add(later).expect("near the start");
+            assert_eq!(relay.step(at(now)).effects, [disable]);
+        }
+        relay.recorded(disable);
+        let after = three_days.checked_add(2).expect("near the start");
+        assert!(relay.step(at(after)).effects.is_empty());
+    }
+
     /// One thing that happens around a relay, in a random run.
     #[derive(Debug, Clone)]
     enum Op {
@@ -1170,13 +1308,16 @@ mod tests {
         /// and hands it over, unless the handover is dropped, as a full channel drops it
         /// (ADR-0052).
         Commit { to: u128, dropped: bool },
-        /// A step, this many milliseconds after the last thing.
-        Step { after: i64 },
-        /// The attempt at this place among those in flight gets this answer.
+        /// A step, this many milliseconds after the last thing, whose effects the task
+        /// records, or fails to.
+        Step { after: i64, recorded: bool },
+        /// The attempt at this place among those in flight gets this answer, whose effect
+        /// the task records, or fails to.
         Answered {
             which: usize,
             answer: Answer,
             draw: u64,
+            recorded: bool,
         },
         /// The attempt at this place among those in flight finds its endpoint disabled by
         /// the operator.
@@ -1199,39 +1340,89 @@ mod tests {
                 retry_after: Some(seconds)
             }),
         ];
+        // Most records go through; the others wait for a later step.
+        let recorded = || prop::bool::weighted(0.8);
         prop_oneof![
             (1_u128..=3, any::<bool>()).prop_map(|(to, dropped)| Op::Commit { to, dropped }),
-            (0_i64..3_000).prop_map(|after| Op::Step { after }),
+            (0_i64..3_000, recorded()).prop_map(|(after, recorded)| Op::Step { after, recorded }),
             // A day or more, so that the three days pass in a run.
-            (86_400_000_i64..90_000_000).prop_map(|after| Op::Step { after }),
-            (any::<usize>(), answer, any::<u64>()).prop_map(|(which, answer, draw)| {
-                Op::Answered {
+            (86_400_000_i64..90_000_000, recorded())
+                .prop_map(|(after, recorded)| Op::Step { after, recorded }),
+            (any::<usize>(), answer, any::<u64>(), recorded()).prop_map(
+                |(which, answer, draw, recorded)| Op::Answered {
                     which,
                     answer,
                     draw,
+                    recorded,
                 }
-            }),
+            ),
             any::<usize>().prop_map(|which| Op::FoundDisabled { which }),
             (any::<usize>(), any::<u64>()).prop_map(|(which, draw)| Op::NotSent { which, draw }),
             Just(Op::Search),
         ]
     }
 
+    /// The database, as far as a run needs it: the deliveries not finished, each with its
+    /// transaction, and the endpoints disabled.
+    #[derive(Default)]
+    struct Db {
+        unfinished: Vec<(Delivery, u64)>,
+        disabled: HashSet<EndpointId>,
+    }
+
+    impl Db {
+        /// The endpoint is disabled, and its deliveries are finished with it.
+        fn disable(&mut self, endpoint: EndpointId) {
+            self.disabled.insert(endpoint);
+            self.unfinished
+                .retain(|(delivery, _)| delivery.endpoint != endpoint);
+        }
+    }
+
+    /// The task's record of `effect`: when it goes through, the database holds the success
+    /// or the disablement, the relay hears so, and the effect is owed no longer; otherwise
+    /// it stays owed, and the database is as it was.
+    fn settle(
+        relay: &mut Relay,
+        pending: &mut Vec<Effect>,
+        db: &mut Db,
+        effect: Effect,
+        recorded: bool,
+    ) {
+        if !recorded {
+            if !pending.contains(&effect) {
+                pending.push(effect);
+            }
+            return;
+        }
+        match effect {
+            Effect::Record(id) => db.unfinished.retain(|(delivery, _)| delivery.id != id),
+            Effect::Disable(endpoint, _) => db.disable(endpoint),
+        }
+        relay.recorded(effect);
+        pending.retain(|owed| *owed != effect);
+    }
+
     /// Runs `ops` against a relay and a model of the database, and checks after each that
     /// no endpoint has more than [`AT_ONCE`] attempts in flight, that nothing is attempted
     /// for an endpoint after it is disabled, and that the relay holds every delivery that
-    /// is not finished and that it has heard of. An endpoint is disabled as failing only
-    /// once one of its attempts got an answer that failed. A relay without tokens must
-    /// never retry: it attempts each delivery once at most, and never one that only the
-    /// first search found, which may have been attempted before a restart.
+    /// is not finished and that it has heard of, or owes what finishes it. An endpoint is
+    /// disabled as failing only once one of its attempts got an answer that failed, and
+    /// every effect that the relay returned comes back at each step until the task records
+    /// it. A relay without tokens must never retry: it attempts each delivery once at most,
+    /// and never one that only the first search found, which may have been attempted
+    /// before a restart.
     fn run(ops: &[Op], tokens: u32) -> Result<(), TestCaseError> {
         let mut relay = holding(tokens);
+        let mut pending: Vec<Effect> = Vec::new();
         let mut now = 0_i64;
         let mut next = 0_u128;
         // Each commit is a transaction of its own, so no snapshot has one in progress.
         let mut xact = 0_u64;
-        let mut unfinished: Vec<(Delivery, u64)> = Vec::new();
+        let mut db = Db::default();
         let mut in_flight: Vec<Delivery> = Vec::new();
+        // The endpoints that the relay knows are disabled: those it disabled, which the
+        // database learns of once the task records it, and those an attempt found disabled.
         let mut disabled: HashSet<EndpointId> = HashSet::new();
         let mut attempted: HashSet<DeliveryId> = HashSet::new();
         let mut found_first: HashSet<DeliveryId> = HashSet::new();
@@ -1241,27 +1432,44 @@ mod tests {
         for op in ops {
             match *op {
                 Op::Commit { to, dropped } => {
-                    if !disabled.contains(&endpoint(to)) {
+                    // The catch-up writes to each endpoint that the database holds enabled.
+                    if !db.disabled.contains(&endpoint(to)) {
                         next = next.checked_add(1).expect("few deliveries");
                         xact = xact.checked_add(1).expect("few transactions");
                         let new = delivery(to, next);
-                        unfinished.push((new, xact));
+                        db.unfinished.push((new, xact));
                         if !dropped {
                             heard.insert(new.id);
                             relay.hand_over([new], at(now));
                         }
                     }
                 }
-                Op::Step { after } => {
+                Op::Step { after, recorded } => {
                     now = now.checked_add(after).expect("a short run");
                     let step = relay.step(at(now));
-                    for effect in step.effects {
+                    // Each effect not recorded yet comes back, and the others are new.
+                    for effect in &pending {
+                        prop_assert!(step.effects.contains(effect), "not handed back: {effect:?}");
+                    }
+                    let new: Vec<Effect> = step
+                        .effects
+                        .iter()
+                        .filter(|effect| !pending.contains(effect))
+                        .copied()
+                        .collect();
+                    prop_assert_eq!(
+                        step.effects.len(),
+                        pending.len().checked_add(new.len()).expect("few effects")
+                    );
+                    for effect in new {
                         let Effect::Disable(endpoint, Reason::Failing) = effect else {
                             return Err(TestCaseError::fail(format!("{effect:?}")));
                         };
                         prop_assert!(disabled.insert(endpoint), "disabled twice: {endpoint:?}");
                         prop_assert!(failed.contains(&endpoint), "never failed: {endpoint:?}");
-                        unfinished.retain(|(delivery, _)| delivery.endpoint != endpoint);
+                    }
+                    for effect in step.effects {
+                        settle(&mut relay, &mut pending, &mut db, effect, recorded);
                     }
                     for attempt in step.attempts {
                         prop_assert!(!disabled.contains(&attempt.endpoint), "{attempt:?}");
@@ -1280,6 +1488,7 @@ mod tests {
                     which,
                     answer,
                     draw,
+                    recorded,
                 } => {
                     if in_flight.is_empty() {
                         continue;
@@ -1290,21 +1499,21 @@ mod tests {
                     match verdict(answer) {
                         Verdict::Delivered => {
                             prop_assert_eq!(effect, Some(Effect::Record(attempt.id)));
-                            unfinished.retain(|(delivery, _)| delivery.id != attempt.id);
                         }
                         Verdict::Gone if disabled.insert(attempt.endpoint) => {
                             prop_assert_eq!(
                                 effect,
                                 Some(Effect::Disable(attempt.endpoint, Reason::Gone))
                             );
-                            unfinished
-                                .retain(|(delivery, _)| delivery.endpoint != attempt.endpoint);
                         }
                         Verdict::Gone => prop_assert_eq!(effect, None),
                         Verdict::Again { .. } => {
                             prop_assert_eq!(effect, None);
                             failed.insert(attempt.endpoint);
                         }
+                    }
+                    if let Some(effect) = effect {
+                        settle(&mut relay, &mut pending, &mut db, effect, recorded);
                     }
                 }
                 Op::NotSent { which, draw } => {
@@ -1323,12 +1532,13 @@ mod tests {
                     let attempt = in_flight.remove(place);
                     relay.found_disabled(attempt.id);
                     disabled.insert(attempt.endpoint);
-                    unfinished.retain(|(delivery, _)| delivery.endpoint != attempt.endpoint);
+                    db.disable(attempt.endpoint);
                 }
                 Op::Search => {
                     let search = relay.begin_search();
                     let snapshot = snapshot_of(&[], xact);
-                    let found: Vec<Delivery> = unfinished
+                    let found: Vec<Delivery> = db
+                        .unfinished
                         .iter()
                         .filter(|(_, written)| reads(&search, *written))
                         .map(|(delivery, _)| *delivery)
@@ -1352,13 +1562,19 @@ mod tests {
                     .count();
                 prop_assert!(at_once <= AT_ONCE, "{at_once} at once to {endpoint:?}");
             }
-            for (delivery, _) in unfinished
+            for (delivery, _) in db
+                .unfinished
                 .iter()
                 .filter(|(delivery, _)| heard.contains(&delivery.id))
             {
                 let id = delivery.id.get();
+                // What finishes it once recorded: its success, or its endpoint's disablement.
+                let owed = pending.iter().any(|effect| match *effect {
+                    Effect::Record(done) => done == delivery.id,
+                    Effect::Disable(endpoint, _) => endpoint == delivery.endpoint,
+                });
                 prop_assert!(
-                    relay.known.contains_key(&id) || relay.in_flight.contains_key(&id),
+                    relay.known.contains_key(&id) || relay.in_flight.contains_key(&id) || owed,
                     "lost: {delivery:?}"
                 );
             }
