@@ -27,7 +27,7 @@ use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
 use crate::accounts::{AccountKey, Psp};
-use crate::deliveries::Handover;
+use crate::deliveries::{Handover, read_xact_id};
 use crate::ids::{DeliveryId, EndpointId, EventId, PaymentId, TransactionId, TransitionId};
 use crate::lifecycle::{Event, IllegalTransition, PaymentStatus, StepKind};
 use crate::payments::{
@@ -797,24 +797,29 @@ impl Applying<'_> {
             .map(|_| DeliveryId::now_v7())
             .collect();
         let ids: Vec<Uuid> = deliveries.iter().map(|delivery| delivery.get()).collect();
-        sqlx::query!(
-            "INSERT INTO webhook_deliveries (id, event_id, endpoint_id, merchant_id)
-             SELECT d.id, $3::uuid, d.endpoint_id, $4::uuid
-               FROM unnest($1::uuid[], $2::uuid[]) AS d (id, endpoint_id)",
+        // Each row returns the ID of this transaction, which its handover carries
+        // (ADR-0064).
+        let xacts = sqlx::query_scalar!(
+            r#"INSERT INTO webhook_deliveries (id, event_id, endpoint_id, merchant_id)
+               SELECT d.id, $3::uuid, d.endpoint_id, $4::uuid
+                 FROM unnest($1::uuid[], $2::uuid[]) AS d (id, endpoint_id)
+               RETURNING xact_id::text::bigint AS "xact!""#,
             &ids,
             &self.endpoints,
             event.get(),
             self.merchant
         )
-        .execute(&mut *self.tx)
+        .fetch_all(&mut *self.tx)
         .await
         .map_err(|source| database(payment, source))?;
-        for (id, &endpoint) in deliveries.into_iter().zip(&self.endpoints) {
+        // Every row holds the one transaction's ID, so the rows' order does not matter.
+        for ((id, &endpoint), xact) in deliveries.into_iter().zip(&self.endpoints).zip(xacts) {
             self.handed.push(Delivery {
                 id,
                 endpoint: EndpointId::try_from(endpoint)
                     .expect("webhook_endpoints_id_check allows only UUIDv7 IDs"),
                 event,
+                xact: read_xact_id(xact),
             });
         }
         Ok(())

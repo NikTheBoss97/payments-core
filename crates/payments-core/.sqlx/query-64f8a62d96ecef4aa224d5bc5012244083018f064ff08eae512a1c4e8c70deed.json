@@ -1,0 +1,26 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO webhook_deliveries (id, event_id, endpoint_id, merchant_id)\n               VALUES ($1, $2, $3, $4)\n               RETURNING xact_id::text::bigint AS \"xact!\"",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "xact!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "64f8a62d96ecef4aa224d5bc5012244083018f064ff08eae512a1c4e8c70deed"
+}

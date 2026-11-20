@@ -1,0 +1,60 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT d.id, d.endpoint_id, d.event_id,\n                          d.xact_id::text::bigint AS \"xact_id!\"\n                   FROM webhook_deliveries d\n                  WHERE (d.xact_id >= $1::bigint::text::xid8\n                         OR d.xact_id = ANY ($2::bigint[]::text[]::xid8[]))\n                    AND NOT EXISTS (SELECT 1 FROM webhook_delivery_successes s\n                                     WHERE s.delivery_id = d.id)\n                    AND NOT EXISTS (SELECT 1 FROM webhook_endpoint_disablements x\n                                     WHERE x.endpoint_id = d.endpoint_id)\n                  ORDER BY d.id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "webhook_deliveries",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "endpoint_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "webhook_deliveries",
+            "name": "endpoint_id"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "event_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "webhook_deliveries",
+            "name": "event_id"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "xact_id!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8Array"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      null
+    ]
+  },
+  "hash": "f88e10d7e9e0c5d06e88714a9932b0834244718237dcd51d0ff7da6090abbd2d"
+}

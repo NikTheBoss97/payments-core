@@ -216,7 +216,9 @@ impl DeliveryClient {
 /// transactions then in progress. A later statement reads the deliveries not finished,
 /// with no success and an endpoint not disabled: of every transaction for a full search,
 /// and otherwise of the transactions that had not completed at the previous snapshot, in
-/// its list or at or above its `xmax`. The relay keeps the new snapshot for the next search.
+/// its list or at or above its `xmax`. Each comes with the transaction that wrote it, which
+/// the relay compares with the new snapshot (ADR-0064). The relay keeps the new snapshot for
+/// the next search.
 ///
 /// # Errors
 ///
@@ -242,13 +244,14 @@ pub async fn search(
         Search::Full => {
             sqlx::query_as!(
                 Found,
-                "SELECT d.id, d.endpoint_id, d.event_id
+                r#"SELECT d.id, d.endpoint_id, d.event_id,
+                          d.xact_id::text::bigint AS "xact_id!"
                    FROM webhook_deliveries d
                   WHERE NOT EXISTS (SELECT 1 FROM webhook_delivery_successes s
                                      WHERE s.delivery_id = d.id)
                     AND NOT EXISTS (SELECT 1 FROM webhook_endpoint_disablements x
                                      WHERE x.endpoint_id = d.endpoint_id)
-                  ORDER BY d.id"
+                  ORDER BY d.id"#
             )
             .fetch_all(pool)
             .await
@@ -259,7 +262,8 @@ pub async fn search(
             // them, so that the index on xact_id serves both conditions.
             sqlx::query_as!(
                 Found,
-                "SELECT d.id, d.endpoint_id, d.event_id
+                r#"SELECT d.id, d.endpoint_id, d.event_id,
+                          d.xact_id::text::bigint AS "xact_id!"
                    FROM webhook_deliveries d
                   WHERE (d.xact_id >= $1::bigint::text::xid8
                          OR d.xact_id = ANY ($2::bigint[]::text[]::xid8[]))
@@ -267,7 +271,7 @@ pub async fn search(
                                      WHERE s.delivery_id = d.id)
                     AND NOT EXISTS (SELECT 1 FROM webhook_endpoint_disablements x
                                      WHERE x.endpoint_id = d.endpoint_id)
-                  ORDER BY d.id",
+                  ORDER BY d.id"#,
                 bound(previous.xmax),
                 &in_progress
             )
@@ -279,11 +283,12 @@ pub async fn search(
     Ok((snapshot, found.into_iter().map(Found::delivery).collect()))
 }
 
-/// A delivery as a search reads it.
+/// A delivery as a search reads it, with the transaction that wrote it (ADR-0064).
 struct Found {
     id: Uuid,
     endpoint_id: Uuid,
     event_id: Uuid,
+    xact_id: i64,
 }
 
 impl Found {
@@ -295,12 +300,14 @@ impl Found {
                 .expect("an endpoint's ID is a UUIDv7: webhook_endpoints_id_check"),
             event: EventId::try_from(self.event_id)
                 .expect("an event's ID is a UUIDv7: payment_events_id_check"),
+            xact: read_xact_id(self.xact_id),
         }
     }
 }
 
-/// A transaction's ID as a snapshot gives it: an `xid8` read through text as a `bigint`.
-fn read_xact_id(id: i64) -> XactId {
+/// A transaction's ID as a snapshot or a row gives it: an `xid8` read through text as a
+/// `bigint`.
+pub(crate) fn read_xact_id(id: i64) -> XactId {
     XactId::new(u64::try_from(id).expect("an xid8 cast to a bigint is not negative"))
 }
 
@@ -363,6 +370,7 @@ mod tests {
             id: DeliveryId::try_from(id(1)).expect("a UUIDv7"),
             endpoint: EndpointId::try_from(id(2)).expect("a UUIDv7"),
             event: EventId::try_from(id(3)).expect("a UUIDv7"),
+            xact: XactId::new(1),
         }
     }
 

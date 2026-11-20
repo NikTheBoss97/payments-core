@@ -19,7 +19,7 @@ use common::{delivery_id, endpoint_id, event_id, runtime_pool};
 use mock_merchant::{Answer as Scripted, MockMerchant};
 use payments_core::deliveries::{DeliveryClient, HANDOVERS, NotSent, TIMEOUT};
 use payments_core::ids::DeliveryId;
-use payments_core::relay::{Delivery, Effect, FAILING_AFTER, Reason, Relay};
+use payments_core::relay::{Delivery, Effect, FAILING_AFTER, Reason, Relay, XactId};
 use payments_core::relaying::{Ending, Relaying, Report};
 use payments_core::retries::RetryBudget;
 use sqlx::PgPool;
@@ -160,6 +160,9 @@ fn bogus() -> Delivery {
         id: delivery_id(2_001),
         endpoint: endpoint_id(99),
         event: event_id(1),
+        // A transaction that no snapshot shows as completed, so that its handover is
+        // always learned.
+        xact: XactId::new(u64::MAX),
     }
 }
 

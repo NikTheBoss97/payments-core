@@ -20,13 +20,20 @@ type TestResult = Result<(), Box<dyn Error>>;
 /// Where the endpoints are. No test here posts to them.
 const URL: &str = "http://localhost:8080/webhooks";
 
-/// Delivery `n` of event `event` to endpoint `endpoint`, as a search returns it.
-fn delivery(n: u32, endpoint: u32, event: u32) -> Delivery {
-    Delivery {
+/// Delivery `n` of event `event` to endpoint `endpoint`, as a search returns it: with the
+/// transaction that wrote it, as `pool` reads it.
+async fn delivery(
+    pool: &PgPool,
+    n: u32,
+    endpoint: u32,
+    event: u32,
+) -> Result<Delivery, Box<dyn Error>> {
+    Ok(Delivery {
         id: delivery_id(n),
         endpoint: endpoint_id(endpoint),
         event: event_id(event),
-    }
+        xact: writer_of(pool, n).await?,
+    })
 }
 
 /// The ID of the transaction that `conn` is in, which PostgreSQL assigns if it has not.
@@ -82,7 +89,13 @@ async fn the_first_search_reads_every_delivery_not_finished(pool: PgPool) -> Tes
     disable(&system, endpoint_id(2), "operator").await?;
 
     let (_, found) = search(&system, &Search::Full).await?;
-    assert_eq!(found, [delivery(3, 3, 1), delivery(4, 1, 2)]);
+    assert_eq!(
+        found,
+        [
+            delivery(&system, 3, 3, 1).await?,
+            delivery(&system, 4, 1, 2).await?
+        ]
+    );
     system.close().await;
     Ok(())
 }
@@ -106,7 +119,7 @@ async fn a_later_search_reads_only_what_completed_after_the_previous_snapshot(
     )
     .await?;
     let (first, found) = search(&system, &Search::Full).await?;
-    assert_eq!(found, [delivery(1, 1, 1)]);
+    assert_eq!(found, [delivery(&system, 1, 1, 1).await?]);
 
     event(
         &system,
@@ -126,7 +139,7 @@ async fn a_later_search_reads_only_what_completed_after_the_previous_snapshot(
     disable(&system, endpoint_id(3), "operator").await?;
     let (second, found) = search(&system, &Search::Since(first)).await?;
     // Delivery 1 is not finished, but its transaction completed before the first snapshot.
-    assert_eq!(found, [delivery(2, 1, 2)]);
+    assert_eq!(found, [delivery(&system, 2, 1, 2).await?]);
     // Nothing completed after the second snapshot.
     let (_, found) = search(&system, &Search::Since(second)).await?;
     assert!(found.is_empty(), "{found:?}");
@@ -166,7 +179,13 @@ async fn a_later_search_reads_its_previous_snapshots_list_and_from_its_xmax_up(
     };
 
     let (_, found) = search(&system, &Search::Since(previous)).await?;
-    assert_eq!(found, [delivery(2, 1, 2), delivery(3, 1, 3)]);
+    assert_eq!(
+        found,
+        [
+            delivery(&system, 2, 1, 2).await?,
+            delivery(&system, 3, 1, 3).await?
+        ]
+    );
     system.close().await;
     Ok(())
 }
@@ -211,7 +230,7 @@ async fn a_transaction_held_open_in_another_database_holds_no_later_search_back(
     let (_, found) = search(&system, &Search::Since(first)).await?;
     // Delivery 2 alone: not delivery 1, whose transaction completed before the first
     // snapshot, though the open transaction began before both.
-    assert_eq!(found, [delivery(2, 1, 2)]);
+    assert_eq!(found, [delivery(&system, 2, 1, 2).await?]);
     open.rollback().await?;
     elsewhere.close().await?;
     system.close().await;
@@ -248,7 +267,7 @@ async fn an_event_whose_transaction_is_open_is_found_once_it_commits(pool: PgPoo
     );
     open.commit().await?;
     let (_, found) = search(&system, &Search::Since(first)).await?;
-    assert_eq!(found, [delivery(1, 1, 1)]);
+    assert_eq!(found, [delivery(&system, 1, 1, 1).await?]);
     system.close().await;
     Ok(())
 }
