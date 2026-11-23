@@ -1,0 +1,26 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT endpoint_id FROM webhook_endpoint_disablements",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "endpoint_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "webhook_endpoint_disablements",
+            "name": "endpoint_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "3a2d7f0677fad332f8d16d23846adbd45353205d0cc149ef6caf20a3b782a84b"
+}
