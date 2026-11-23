@@ -2,7 +2,7 @@
 
 # ADR-0056: The mock merchant's answers and checks
 
-- Status: accepted
+- Status: accepted; partly superseded by ADR-0065
 - Date: 2026-11-16
 
 ## Context
@@ -100,6 +100,14 @@ How the fake learns its secret:
   uses it, in the library's pull request.
 - The fake's tests check its verifier against the specification's test vector, and
   sign their deliveries with HMAC code of their own.
+
+## Amendments
+
+- 2026-11-23: "The true time" and the consequence on the relay's tests are superseded by
+  ADR-0065. The relay stamps each attempt with its step's time, including a time that a
+  test passes; the running task reads the clock at each event, so the server's attempts
+  carry the true time, and a test keeps the times that it passes within the fake's five
+  minutes.
 
 ## References
 
