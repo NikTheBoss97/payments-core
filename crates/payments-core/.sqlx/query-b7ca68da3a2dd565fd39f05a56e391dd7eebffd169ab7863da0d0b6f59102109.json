@@ -1,0 +1,54 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT d.event_id, d.endpoint_id,\n                      EXISTS (SELECT 1 FROM webhook_delivery_successes s\n                               WHERE s.delivery_id = d.id) AS \"delivered!\",\n                      EXISTS (SELECT 1 FROM webhook_endpoint_disablements x\n                               WHERE x.endpoint_id = d.endpoint_id) AS \"disabled!\"\n                 FROM webhook_deliveries d\n                WHERE d.merchant_id = ANY($1)",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "event_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "webhook_deliveries",
+            "name": "event_id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "endpoint_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "webhook_deliveries",
+            "name": "endpoint_id"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "delivered!",
+        "type_info": "Bool",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 3,
+        "name": "disabled!",
+        "type_info": "Bool",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "UuidArray"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      null,
+      null
+    ]
+  },
+  "hash": "b7ca68da3a2dd565fd39f05a56e391dd7eebffd169ab7863da0d0b6f59102109"
+}

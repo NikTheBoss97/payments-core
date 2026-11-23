@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "LOCK TABLE webhook_deliveries IN SHARE MODE",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "73b78c0b7938a4c89711916d223ccc26f05a13ed5f9d0189e1141e7211983479"
+}

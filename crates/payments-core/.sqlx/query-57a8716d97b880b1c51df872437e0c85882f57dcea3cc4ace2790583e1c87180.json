@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT count(*) AS \"unfinished!\" FROM webhook_deliveries d\n                WHERE d.merchant_id = ANY($1)\n                  AND NOT EXISTS (SELECT 1 FROM webhook_delivery_successes s\n                                   WHERE s.delivery_id = d.id)\n                  AND NOT EXISTS (SELECT 1 FROM webhook_endpoint_disablements x\n                                   WHERE x.endpoint_id = d.endpoint_id)",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "unfinished!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "UuidArray"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "57a8716d97b880b1c51df872437e0c85882f57dcea3cc4ace2790583e1c87180"
+}
