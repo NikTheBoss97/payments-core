@@ -1,9 +1,10 @@
 // Author: Nicola Antonello
 
 //! The backend killed around each statement of a create, and of a catch-up as it applies
-//! each move of the PSP's (ADR-0014, ADR-0034, ADR-0041, invariant I6): a step, its
-//! posting, its record, its fact and its request's decision commit together or not at
-//! all, and the identical command, or the next catch-up, settles the outcome.
+//! each move of the PSP's (ADR-0014, ADR-0034, ADR-0041, ADR-0057, ADR-0065, invariant
+//! I6): a step, its posting, its record, its fact, its request's decision, and the fact's
+//! event with a delivery to each endpoint, commit together or not at all, and the identical
+//! command, or the next catch-up, settles the outcome.
 //!
 //! A trigger on each table ends its own session when the session asked for that:
 //! `crash.point`, a session setting, names the trigger and its table. Setting it
@@ -17,15 +18,17 @@ mod common;
 use std::error::Error;
 
 use common::crashes::{
-    AT_COMMIT, ATTEMPTS, FACT_POINTS, POSTING_POINTS, Role, STEP_POINTS, assert_books_are_whole,
-    balances, install_crash_points, kill_during_commit, plan_death, slow_commit_pool, stored,
+    AT_COMMIT, ATTEMPTS, EVENT_POINTS, FACT_POINTS, POSTING_POINTS, Role, STEP_POINTS,
+    assert_books_are_whole, balances, install_crash_points, kill_during_commit, plan_death,
+    slow_commit_pool, stored,
 };
+use common::outbox::insert_endpoint;
 use common::payments::{
     AUTHORIZED, FEE, REQUESTED, create_command, fee_rate, status_of, take_lock,
 };
 use common::psp::{PspSide, client_of};
 use common::{
-    merchant_id, request_id, runtime_pool_of_one, runtime_transaction, tenant_pool,
+    endpoint_id, merchant_id, request_id, runtime_pool_of_one, runtime_transaction, tenant_pool,
     wait_for_lock_wait,
 };
 use futures_util::future::join;
@@ -42,6 +45,13 @@ use sqlx::PgPool;
 
 type TestResult = Result<(), Box<dyn Error>>;
 
+/// How many endpoints the merchant of a catch-up's test has, each of which gets every
+/// event. More than one, so that an event's deliveries are one statement of several rows,
+/// which a kill before its first row or after its last leaves unwritten.
+const ENDPOINTS: u32 = 2;
+/// Where those endpoints point. Nothing is sent to them here.
+const URL: &str = "http://localhost:8080/webhooks";
+
 /// A pool of one session, a merchant, and the crash points.
 async fn crash_test(pool: &PgPool) -> Result<(PgPool, MerchantId), Box<dyn Error>> {
     let app = runtime_pool_of_one(pool).await?;
@@ -51,9 +61,9 @@ async fn crash_test(pool: &PgPool) -> Result<(PgPool, MerchantId), Box<dyn Error
     Ok((app, merchant))
 }
 
-/// What a test of the PSP's moves runs on: the PSP's side, a merchant on a pool of the
-/// tenant role, and a pool of one session of the system role, on which the catch-up
-/// runs and dies.
+/// What a test of the PSP's moves runs on: the PSP's side, a merchant with its endpoints
+/// on a pool of the tenant role, and a pool of one session of the system role, on which
+/// the catch-up runs and dies.
 struct CatchUpTest {
     psp: PspSide,
     tenant: PgPool,
@@ -67,6 +77,9 @@ impl CatchUpTest {
         let psp = PspSide::start(pool).await?;
         let merchant = merchant_id(1);
         register_merchant(&psp.system, merchant, fee_rate()).await?;
+        for n in 1..=ENDPOINTS {
+            insert_endpoint(pool, endpoint_id(n), merchant.get(), URL).await?;
+        }
         install_crash_points(pool).await?;
         Ok(Self {
             client: client_of(&psp.fake),
@@ -121,25 +134,39 @@ fn amount(minor: i64) -> PositiveAmount {
 }
 
 /// What [`stored`] counts, and the rows that a catch-up writes with each fact: the facts,
-/// the links of their steps, and the decisions of requests. A catch-up that died must
-/// leave these as they were.
-async fn rows(pool: &PgPool) -> Result<([i64; 8], [i64; 3]), Box<dyn Error>> {
+/// the links of their steps, the decisions of requests, and the facts' events and their
+/// deliveries. A catch-up that died must leave these as they were.
+async fn rows(pool: &PgPool) -> Result<([i64; 8], [i64; 5]), Box<dyn Error>> {
     let facts = sqlx::query!(
         r#"SELECT (SELECT count(*) FROM payment_facts) AS "facts!",
                   (SELECT count(*) FROM payment_transition_facts) AS "links!",
-                  (SELECT count(*) FROM payment_request_decisions) AS "decisions!""#
+                  (SELECT count(*) FROM payment_request_decisions) AS "decisions!",
+                  (SELECT count(*) FROM payment_events) AS "events!",
+                  (SELECT count(*) FROM webhook_deliveries) AS "deliveries!""#
     )
     .fetch_one(pool)
     .await?;
     Ok((
         stored(pool).await?,
-        [facts.facts, facts.links, facts.decisions],
+        [
+            facts.facts,
+            facts.links,
+            facts.decisions,
+            facts.events,
+            facts.deliveries,
+        ],
     ))
+}
+
+/// How many events and deliveries `rows` counted.
+fn outbox((_, [.., events, deliveries]): ([i64; 8], [i64; 5])) -> [i64; 2] {
+    [events, deliveries]
 }
 
 /// Kills the catch-up of `payment` at `point`, checks that none of it stayed, that no
 /// money moved and that the payment still stands at `status`, then catches it up twice:
-/// the first applies the fact, the second finds it held.
+/// the first applies the fact, with one event and a delivery to each endpoint, and the
+/// second finds it held and writes nothing.
 async fn killed_then_caught_up(
     pool: &PgPool,
     test: &CatchUpTest,
@@ -171,11 +198,19 @@ async fn killed_then_caught_up(
         CaughtUp::Current { applied: 1 },
         "{point}"
     );
+    let applied = rows(pool).await?;
+    let [events, deliveries] = outbox(before);
+    assert_eq!(
+        outbox(applied),
+        [events + 1, deliveries + i64::from(ENDPOINTS)],
+        "{point}"
+    );
     assert_eq!(
         test.catch_up(payment).await?,
         CaughtUp::Current { applied: 0 },
         "{point}"
     );
+    assert_eq!(rows(pool).await?, applied, "{point}");
     Ok(())
 }
 
@@ -237,6 +272,7 @@ async fn an_authorization_killed_anywhere_stores_nothing_and_settles(pool: PgPoo
             "die_after payment_authorizations",
         ])
         .chain(FACT_POINTS)
+        .chain(EVENT_POINTS)
         .chain([AT_COMMIT]);
     for (n, point) in (1..).zip(points) {
         let command = create_command(n, test.merchant);
@@ -259,6 +295,7 @@ async fn a_void_killed_anywhere_stores_nothing_and_settles(pool: PgPool) -> Test
     let points = STEP_POINTS
         .into_iter()
         .chain(FACT_POINTS)
+        .chain(EVENT_POINTS)
         .chain([AT_COMMIT]);
     for (n, point) in (1..).zip(points) {
         let payment = test.authorized(n).await?;
@@ -283,6 +320,7 @@ async fn a_capture_killed_anywhere_moves_no_money_and_settles(pool: PgPool) -> T
         .chain(POSTING_POINTS)
         .chain(["die_before payment_captures", "die_after payment_captures"])
         .chain(FACT_POINTS)
+        .chain(EVENT_POINTS)
         .chain([AT_COMMIT])
         .collect();
     let mut captures = 0;
@@ -319,6 +357,7 @@ async fn a_refund_killed_anywhere_moves_no_money_and_settles(pool: PgPool) -> Te
         .chain(POSTING_POINTS)
         .chain(["die_before payment_refunds", "die_after payment_refunds"])
         .chain(FACT_POINTS)
+        .chain(EVENT_POINTS)
         .chain([AT_COMMIT])
         .collect();
     let mut refunds = 0;
@@ -438,6 +477,12 @@ async fn a_commit_that_commits_and_loses_its_session_is_settled_by_catching_up_a
             attempts * (FEE - AUTHORIZED),
             -attempts * FEE
         ]
+    );
+    // Each payment's authorization and capture wrote one event each, with a delivery to
+    // each endpoint: the commit that lost its session wrote its event once.
+    assert_eq!(
+        outbox(rows(&pool).await?),
+        [2 * attempts, 2 * attempts * i64::from(ENDPOINTS)]
     );
     assert_books_are_whole(&pool).await?;
     app.close().await;
