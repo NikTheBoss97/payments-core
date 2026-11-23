@@ -240,15 +240,46 @@ Catching SQL built at run time, which CodeQL misses:
   ADR-0059 the crate in use is time, so the candidate is `chrono`, and it needs no ban
   either: RUSTSEC-2026-0543 fails this check wherever chrono returns, and enabling
   sqlx's `chrono` next to `time` fails the build.
+- 2026-11-23: CodeQL 2.27.5 brought a new query, `rust/unsafe-deserialization`, rated
+  critical. Its first scan of `main` (`1c74f5c`, 2026-11-20) raised four alerts on code
+  that no commit had touched, the case the weekly scan is there for. Its sinks are the
+  input of `serde_json`'s `from_slice`, `from_str` and `from_reader`, and of similar
+  functions of other formats. Its sources include every parameter of an axum handler, and
+  its only barriers are values of numeric, `bool` or fieldless-enum type. So it reports
+  every parse of a request body, whatever the type parsed into and the checks before it.
+  Its own tests mark two parses behind a size check as false positives (`SPURIOUS`). The
+  parse where the 2026-11-05 entry has the taint stop is now itself a sink. The four were
+  dismissed on 2026-11-23, each with a comment:
+
+  | Alert | Where | Reason |
+  |---|---|---|
+  | 30 | `KeyedRequest::body_as`, which six routes reach | False positive |
+  | 28 | `notifications::verify`, on the PSP's notification | False positive |
+  | 29 | The fake PSP's `POST /v1/requests` | Used in tests |
+  | 27 | The fake merchant's `Event::read` | Used in tests |
+
+  axum's `Bytes` extractor caps a body at 2 MiB before any parse, and tests check the cap
+  on a merchant's route and on the PSP's. `serde_json` stops at 128 levels of nesting, and
+  each type parsed into has a fixed shape, with no list and no trait object. A merchant's
+  or the operator's body is read only after the credential and parsed only after the
+  idempotency lookup. A notification is parsed only after its signature verifies. The fakes
+  never ship (ADR-0029, ADR-0054). A dismissal holds on every branch for the same code, and
+  a route that goes through `body_as` joins alert 30. A new parse of a body, or an edit of
+  one of these lines, raises a new alert to read the same way: neither a size check nor a
+  signature clears it. As with the dismissals in the Consequences, the decision lives in
+  GitHub, and this entry is the record that a visitor can read.
 
 ## References
 
 - Rust Secure Code Working Group, [RustSec Advisory Database](https://rustsec.org/).
 - Embark Studios, [cargo-deny](https://embarkstudios.github.io/cargo-deny/), and its action's [Dockerfile at v2.1.1](https://github.com/EmbarkStudios/cargo-deny-action/blob/v2.1.1/Dockerfile).
 - The Cargo Book, [Publishing on crates.io](https://doc.rust-lang.org/cargo/reference/publishing.html) ("The version can never be overwritten") and [`cargo install`](https://doc.rust-lang.org/cargo/commands/cargo-install.html) (`--locked`).
-- GitHub Docs, [About Dependabot alerts](https://docs.github.com/en/code-security/dependabot/dependabot-alerts/about-dependabot-alerts), [About the GitHub Advisory Database](https://docs.github.com/en/code-security/security-advisories/working-with-global-security-advisories-from-the-github-advisory-database/about-the-github-advisory-database), [Dependabot options reference](https://docs.github.com/en/code-security/reference/supply-chain-security/dependabot-options-reference) (`cooldown`, `ignore`, `allow`), [About code scanning with CodeQL](https://docs.github.com/en/code-security/code-scanning/introduction-to-code-scanning/about-code-scanning-with-codeql), [Customizing your advanced setup](https://docs.github.com/en/code-security/code-scanning/creating-an-advanced-setup-for-code-scanning/customizing-your-advanced-setup-for-code-scanning) (`paths-ignore`) and [Events that trigger workflows](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows) (`schedule`).
+- GitHub Docs, [About Dependabot alerts](https://docs.github.com/en/code-security/dependabot/dependabot-alerts/about-dependabot-alerts), [About the GitHub Advisory Database](https://docs.github.com/en/code-security/security-advisories/working-with-global-security-advisories-from-the-github-advisory-database/about-the-github-advisory-database), [Dependabot options reference](https://docs.github.com/en/code-security/reference/supply-chain-security/dependabot-options-reference) (`cooldown`, `ignore`, `allow`), [About code scanning with CodeQL](https://docs.github.com/en/code-security/code-scanning/introduction-to-code-scanning/about-code-scanning-with-codeql), [Customizing your advanced setup](https://docs.github.com/en/code-security/code-scanning/creating-an-advanced-setup-for-code-scanning/customizing-your-advanced-setup-for-code-scanning) (`paths-ignore`), [Resolving code scanning alerts](https://docs.github.com/en/code-security/how-tos/manage-security-alerts/manage-code-scanning-alerts/resolve-alerts) (dismissing) and [Events that trigger workflows](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows) (`schedule`).
 - dependabot-core `6a43f5c`: [cargo/lib/dependabot/cargo/file_parser.rb](https://github.com/dependabot/dependabot-core/blob/6a43f5c18a7120386064c4afabb6a3e803d63d90/cargo/lib/dependabot/cargo/file_parser.rb#L39-L40) (`# TODO: Handle patched dependencies`).
 - CodeQL, [Supported languages and frameworks](https://codeql.github.com/docs/codeql-overview/supported-languages-and-frameworks/), and at CLI 2.27.4 its [model of sqlx](https://github.com/github/codeql/blob/codeql-cli/v2.27.4/rust/ql/lib/codeql/rust/frameworks/sqlx.model.yml), its [model of axum](https://github.com/github/codeql/blob/codeql-cli/v2.27.4/rust/ql/lib/codeql/rust/frameworks/axum.model.yml) and its [list of models](https://github.com/github/codeql/tree/codeql-cli/v2.27.4/rust/ql/lib/codeql/rust/frameworks).
+- CodeQL at CLI 2.27.5: [`rust/unsafe-deserialization`](https://github.com/github/codeql/blob/codeql-cli/v2.27.5/rust/ql/src/queries/security/CWE-502/UnsafeDeserialization.ql), its [sources, sinks and barriers](https://github.com/github/codeql/blob/codeql-cli/v2.27.5/rust/ql/lib/codeql/rust/security/UnsafeDeserializationExtensions.qll), its sinks in the [model of serde](https://github.com/github/codeql/blob/codeql-cli/v2.27.5/rust/ql/lib/codeql/rust/frameworks/serde.model.json) and its [test](https://github.com/github/codeql/blob/codeql-cli/v2.27.5/rust/ql/test/query-tests/security/CWE-502/main.rs) (`SPURIOUS` at lines 58 and 128).
+- axum-core 0.5.6: [axum-core/src/ext_traits/request.rs](https://github.com/tokio-rs/axum/blob/axum-core-v0.5.6/axum-core/src/ext_traits/request.rs#L316-L328) (`with_limited_body`, 2 MiB unless `DefaultBodyLimit` says otherwise).
+- serde_json 1.0.154: [src/de.rs](https://github.com/serde-rs/json/blob/v1.0.154/src/de.rs#L59-L69) (`remaining_depth: 128`).
 - sqlx `f1e94ec`: [sqlx-core/src/sql_str.rs](https://github.com/transact-rs/sqlx/blob/f1e94ec34dd5f11ad6488a3a8ac7988439a3f757/sqlx-core/src/sql_str.rs) (`SqlSafeStr` and `AssertSqlSafe`).
 - Clippy, [Lint configuration](https://doc.rust-lang.org/clippy/lint_configuration.html) (`disallowed-methods`, `disallowed-types`).
 - Piergiorgio Ladisa et al., [SoK: Taxonomy of Attacks on Open-Source Software Supply Chains](https://doi.org/10.1109/SP46215.2023.10179304) (IEEE S&P, 2023).
