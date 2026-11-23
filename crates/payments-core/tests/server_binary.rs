@@ -23,7 +23,7 @@ use common::payments::{
 use common::psp::{client_of, send};
 use common::{merchant_id, request_id, test_uuid, wait_for_lock_waits};
 use futures_util::future::{join, join_all};
-use mock_merchant::MockMerchant;
+use mock_merchant::{MockMerchant, Verdict};
 use mock_psp::signing::SigningKey;
 use mock_psp::wire::Detail;
 use mock_psp::{Attempt, Failure, MockPsp, Route, new_api_key};
@@ -96,19 +96,30 @@ fn configured(pool: &PgPool, operator: &ApiKeySecret) -> Command {
     command
 }
 
-/// A running server, the operator's secret that it holds the digest of, and everything that
-/// it has written since it said where it listens.
+/// The configuration of [`configured`], with this master key.
+fn configured_with(pool: &PgPool, operator: &ApiKeySecret, master: &str) -> Command {
+    let mut command = configured(pool, operator);
+    command.env("WEBHOOK_MASTER_KEY", master);
+    command
+}
+
+/// A running server, the operator's secret that it holds the digest of, its master key, and
+/// everything that it has written since it said where it listens.
 struct Server {
     child: Child,
     address: String,
     operator: ApiKeySecret,
+    master: String,
     log: Arc<Mutex<String>>,
     collectors: Vec<JoinHandle<()>>,
 }
 
-/// What outlives a server that was killed: what starts it again, and what it wrote.
+/// What outlives a server that was killed: what starts it again, and what it wrote. Its
+/// master key is part of its configuration, which a restart keeps: with another, every
+/// endpoint's secret would change (ADR-0051).
 struct Killed {
     operator: ApiKeySecret,
+    master: String,
     log: Arc<Mutex<String>>,
 }
 
@@ -119,8 +130,8 @@ impl Killed {
         pool: &PgPool,
         fake: &MockPsp,
     ) -> Result<Server, Box<dyn Error>> {
-        let command = next_to(configured(pool, &self.operator), fake);
-        let server = Server::spawned(command, self.operator, self.log).await?;
+        let command = next_to(configured_with(pool, &self.operator, &self.master), fake);
+        let server = Server::spawned(command, self.operator, self.master, self.log).await?;
         fake.deliver_to(&format!("http://{}/webhooks/mock", server.address));
         Ok(server)
     }
@@ -164,9 +175,10 @@ impl Server {
     /// API key, and verifies notifications with the fake's keys.
     async fn start_next_to(pool: &PgPool, fake: &MockPsp) -> Result<Self, Box<dyn Error>> {
         let operator = ApiKeySecret::generate();
-        let command = next_to(configured(pool, &operator), fake);
+        let master = new_master_key();
+        let command = next_to(configured_with(pool, &operator, &master), fake);
         let log = Arc::new(Mutex::new(String::new()));
-        Self::spawned(command, operator, log).await
+        Self::spawned(command, operator, master, log).await
     }
 
     async fn launched(
@@ -174,12 +186,15 @@ impl Server {
         operator: ApiKeySecret,
         log: Arc<Mutex<String>>,
     ) -> Result<Self, Box<dyn Error>> {
-        Self::spawned(configured(pool, &operator), operator, log).await
+        let master = new_master_key();
+        let command = configured_with(pool, &operator, &master);
+        Self::spawned(command, operator, master, log).await
     }
 
     async fn spawned(
         mut command: Command,
         operator: ApiKeySecret,
+        master: String,
         log: Arc<Mutex<String>>,
     ) -> Result<Self, Box<dyn Error>> {
         let mut child = command.spawn()?;
@@ -210,6 +225,7 @@ impl Server {
             child,
             address,
             operator,
+            master,
             log,
             collectors: vec![from_stderr, from_stdout],
         })
@@ -366,6 +382,7 @@ impl Server {
         }
         Ok(Killed {
             operator: self.operator,
+            master: self.master,
             log: self.log,
         })
     }
@@ -670,6 +687,82 @@ async fn the_binary_delivers_an_event_to_the_merchants_endpoint(pool: PgPool) ->
     let log = server.stop().await?;
     assert!(!log.contains("ERROR"), "{log}");
     assert!(!log.contains("WARN"), "{log}");
+    Ok(())
+}
+
+#[sqlx::test]
+async fn the_binary_killed_between_a_2xx_and_its_record_sends_the_event_again(
+    pool: PgPool,
+) -> TestResult {
+    // The window that at least once is about (ADR-0054, ADR-0065): the merchant has taken
+    // the event, and the success is not recorded. The server that dies there must send the
+    // event again once it is back, and the merchant drops the copy by its webhook-id.
+    let (server, fake) = next_to_a_fake(&pool).await?;
+    let endpoint = MockMerchant::start().await?;
+    let operator = server.operator.expose().to_owned();
+    let body = server
+        .applied(CREATED, "/merchants", &operator, "register", REGISTER)
+        .await?;
+    let merchant = member(&body, "merchant_id");
+    let keys = format!("/merchants/{merchant}/api-keys");
+    let (status, issued) = server.post(&keys, &operator, "issue", "").await?;
+    assert_eq!(status, CREATED, "{issued}");
+    let secret = member(&issued, "secret");
+    let endpoints = format!("/merchants/{merchant}/webhook-endpoints");
+    let url = format!(r#"{{"url":"{}"}}"#, endpoint.url());
+    let (status, registered) = server.post(&endpoints, &operator, "endpoint", &url).await?;
+    assert_eq!(status, CREATED, "{registered}");
+    endpoint.trust(&member(&registered, "secret"))?;
+
+    // SHARE conflicts with the ROW EXCLUSIVE lock that an INSERT takes, and not with the
+    // ACCESS SHARE of a SELECT: the relay searches and sends, and its record waits.
+    let mut holder = pool.begin().await?;
+    sqlx::query!("LOCK TABLE webhook_delivery_successes IN SHARE MODE")
+        .execute(&mut *holder)
+        .await?;
+    let body = server
+        .applied(CREATED, "/payments", &secret, "create", CREATE)
+        .await?;
+    let payment = member(&body, "payment_id");
+    let authorize = format!("/payments/{payment}/authorize");
+    let answer = server
+        .applied(ACCEPTED, &authorize, &secret, "authorize", AUTHORIZE)
+        .await?;
+    applied_on(&server, &fake, &secret, &answer).await?;
+
+    // The record waits only once the fake has answered 200, so the event is taken.
+    wait_for_lock_waits(&pool, "relation", 1).await?;
+    assert_eq!(endpoint.events().len(), 1);
+    let killed = server.kill().await?;
+    // The dead server's session gets its lock, finds its client gone, and ends without a
+    // COMMIT.
+    holder.rollback().await?;
+    wait_for_sessions_to_end(&pool).await?;
+    assert_eq!(successes(&pool).await?, 0);
+
+    // Back up, its first search finds the delivery unfinished and sends it again.
+    let server = killed.restart_next_to(&pool, &fake).await?;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while successes(&pool).await? < 1 {
+        assert!(
+            Instant::now() < deadline,
+            "the event never reached the endpoint again: {:?}",
+            endpoint.arrivals()
+        );
+        sleep(Duration::from_millis(20)).await;
+    }
+    let arrivals = endpoint.arrivals();
+    assert_eq!(arrivals.len(), 2, "{arrivals:?}");
+    assert_eq!(arrivals[0].id, arrivals[1].id, "{arrivals:?}");
+    assert!(
+        matches!(arrivals[0].verdict, Verdict::Taken(_)),
+        "{arrivals:?}"
+    );
+    assert_eq!(arrivals[1].verdict, Verdict::Copy, "{arrivals:?}");
+    assert_eq!(endpoint.events().len(), 1);
+    assert_eq!(successes(&pool).await?, 1);
+    let log = server.stop().await?;
+    assert!(!log.contains("ERROR"), "{log}");
     Ok(())
 }
 
