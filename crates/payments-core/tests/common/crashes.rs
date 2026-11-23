@@ -61,6 +61,14 @@ pub const FACT_POINTS: [&str; 6] = [
 ];
 /// During `COMMIT` of a recorded request, which writes no step.
 pub const REQUEST_AT_COMMIT: &str = "zz_die_at_commit payment_requests";
+/// The points around the rows that a catch-up writes with each fact's event: the event,
+/// and its deliveries in one statement (ADR-0057).
+pub const EVENT_POINTS: [&str; 4] = [
+    "die_before payment_events",
+    "die_after payment_events",
+    "die_before webhook_deliveries",
+    "die_after webhook_deliveries",
+];
 
 /// Adds the triggers to the test's own database, as the owner. The function runs
 /// as its owner too, the superuser, which may end a session that it opened.
@@ -86,7 +94,8 @@ pub async fn install_crash_points(pool: &PgPool) -> sqlx::Result<()> {
                  'payment_captures', 'payment_refunds', 'idempotency_records', 'merchants', \
                  'api_keys', 'api_key_revocations', 'operator_idempotency_records', \
                  'payment_requests', 'payment_facts', 'payment_transition_facts', \
-                 'payment_request_decisions', 'psp_notifications'] LOOP \
+                 'payment_request_decisions', 'psp_notifications', 'payment_events', \
+                 'webhook_deliveries'] LOOP \
                  EXECUTE format('CREATE TRIGGER die_before BEFORE INSERT ON %I \
                      FOR EACH ROW EXECUTE FUNCTION die_if_planned()', target); \
                  EXECUTE format('CREATE TRIGGER die_after AFTER INSERT ON %I \
