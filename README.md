@@ -20,7 +20,7 @@ invariants, and [`docs/adr/`](docs/adr/) for the decisions behind them.
 | 3 | Idempotency keys, HTTP API, authentication and tenant isolation | done |
 | 4 | Mock PSP, signed webhooks | done |
 | 5 | Transactional outbox | done |
-| 6 | Reconciliation | — |
+| 6 | Reconciliation | in progress |
 | 7 | Failure-injection and property tests | — |
 | 8 | Benchmarks | — |
 
@@ -129,10 +129,13 @@ guard, and the failures they reproduce.
 | I4 | One idempotency key produces at most one effect. | Guaranteed since phase 3 | [API](docs/correctness/api.md) |
 | I5 | A payment never makes an invalid state transition. | Guaranteed since phase 2 | [Payments](docs/correctness/payments.md) |
 | I6 | A payment's state change, its ledger entries and its outbound event commit atomically. | The state change and its entries guaranteed since phase 2; the outbound event since phase 5 | [Payments](docs/correctness/payments.md), [Outbox](docs/correctness/outbox.md) |
-| I7 | A merchant can read or change only its own payments, and is told only about its own. | Reading and changing guaranteed since phase 3; being told since phase 5 | [API](docs/correctness/api.md), [Outbox](docs/correctness/outbox.md) |
+| I7 | A merchant can read or change only its own payments, and is told only about its own. | Reading and changing guaranteed since phase 3; being told since phase 5; told nothing of reconciliation in phase 6, in progress: designed in [ADR-0071](docs/adr/0071-what-phase-6-promises-and-how-it-is-tested.md) | [API](docs/correctness/api.md), [Outbox](docs/correctness/outbox.md) |
 | I8 | Only the PSP's word moves a payment: after its creation, every step but a cancellation comes from the PSP's history, once and in its order. | Guaranteed since phase 4 | [PSP](docs/correctness/psp.md) |
 | I9 | A request sent to the PSP takes effect there at most once. | Guaranteed since phase 4 | [PSP](docs/correctness/psp.md) |
 | I10 | Every event reaches every endpoint enabled when it was written, at least once, unless that endpoint is disabled first. | Guaranteed since phase 5 | [Outbox](docs/correctness/outbox.md) |
+| I11 | Every batch that the PSP publishes is booked once, as reported: each line settles the one movement that it agrees with, or is a discrepancy. | Phase 6, in progress: designed in [ADR-0067](docs/adr/0067-booking-a-batch.md) and [ADR-0068](docs/adr/0068-matching-a-batchs-lines.md) | |
+| I12 | Every disagreement is recorded once, a movement left unsettled and a posting that nothing causes among them. | Phase 6, in progress: designed in [ADR-0068](docs/adr/0068-matching-a-batchs-lines.md) and [ADR-0070](docs/adr/0070-running-reconciliation.md) | |
+| I13 | Each discrepancy closes by its evidence or by one operator's outcome, and the settlement accounts hold exactly what is still open. | Phase 6, in progress: designed in [ADR-0069](docs/adr/0069-resolving-discrepancies.md) | |
 
 ### Running the tests
 
