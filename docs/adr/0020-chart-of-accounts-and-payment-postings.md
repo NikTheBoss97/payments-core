@@ -134,6 +134,12 @@ Keeping account keys typed:
   the operator sets (ADR-0024), because a merchant that authenticates must not
   choose its own fee. It is still copied onto the payment and fixed there, so
   nothing above changes.
+- 2026-11-24: phase 6 seeds five kinds in a migration of its own, as this
+  record asks of a later phase (ADR-0072): `psp_payouts`, `psp_fees` and
+  `settlement_suspense` (ADR-0067), and `psp_claims` and
+  `settlement_writeoffs` (ADR-0069). `AccountRef` gains a variant for each,
+  whose party is the PSP's label, but the write-offs', which is `platform`,
+  so its variants number eight.
 
 ## References
 

@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM psp_terms",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "ae030f2a0805806d6ec61438e9d56295c5edac8bfc92f9b49ae5c768fcca6f5b"
+}

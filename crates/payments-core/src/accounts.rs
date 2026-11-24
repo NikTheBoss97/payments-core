@@ -204,6 +204,20 @@ pub enum AccountRef {
     MerchantPayable(MerchantId, Currency),
     /// The platform's fees.
     FeeRevenue(Currency),
+    /// The payouts that a PSP reports sending, which no bank statement
+    /// confirms (ADR-0067).
+    PspPayouts(Psp, Currency),
+    /// A PSP's fees on the platform's own movements: an expense (ADR-0067).
+    PspFees(Psp, Currency),
+    /// Money that a PSP reported and that nothing of ours explains yet
+    /// (ADR-0067).
+    SettlementSuspense(Psp, Currency),
+    /// What a PSP owes outside settlement, negative when the platform owes it
+    /// (ADR-0069).
+    PspClaims(Psp, Currency),
+    /// What reconciliation wrote off: an expense, negative for a gain
+    /// (ADR-0069).
+    SettlementWriteoffs(Currency),
 }
 
 impl AccountRef {
@@ -226,6 +240,31 @@ impl AccountRef {
                 Party::label("platform").expect("platform is a valid party"),
                 currency,
             ),
+            Self::PspPayouts(psp, currency) => (
+                "psp_payouts",
+                Party::label(psp.as_str()).expect("a PSP's label is a valid party"),
+                currency,
+            ),
+            Self::PspFees(psp, currency) => (
+                "psp_fees",
+                Party::label(psp.as_str()).expect("a PSP's label is a valid party"),
+                currency,
+            ),
+            Self::SettlementSuspense(psp, currency) => (
+                "settlement_suspense",
+                Party::label(psp.as_str()).expect("a PSP's label is a valid party"),
+                currency,
+            ),
+            Self::PspClaims(psp, currency) => (
+                "psp_claims",
+                Party::label(psp.as_str()).expect("a PSP's label is a valid party"),
+                currency,
+            ),
+            Self::SettlementWriteoffs(currency) => (
+                "settlement_writeoffs",
+                Party::label("platform").expect("platform is a valid party"),
+                currency,
+            ),
         };
         AccountKey {
             kind: AccountKind::parse(kind).expect("the chart's kinds are valid labels"),
@@ -238,8 +277,14 @@ impl AccountRef {
     #[must_use]
     pub fn normal_side(self) -> NormalSide {
         match self {
-            Self::PspReceivable(..) => NormalSide::Debit,
-            Self::MerchantPayable(..) | Self::FeeRevenue(_) => NormalSide::Credit,
+            Self::PspReceivable(..)
+            | Self::PspPayouts(..)
+            | Self::PspFees(..)
+            | Self::PspClaims(..)
+            | Self::SettlementWriteoffs(_) => NormalSide::Debit,
+            Self::MerchantPayable(..) | Self::FeeRevenue(_) | Self::SettlementSuspense(..) => {
+                NormalSide::Credit
+            }
         }
     }
 }
@@ -677,6 +722,31 @@ mod tests {
                 AccountRef::FeeRevenue(currency("JPY")),
                 "fee_revenue/platform/JPY",
                 NormalSide::Credit,
+            ),
+            (
+                AccountRef::PspPayouts(Psp::Mock, currency("EUR")),
+                "psp_payouts/mock/EUR",
+                NormalSide::Debit,
+            ),
+            (
+                AccountRef::PspFees(Psp::Mock, currency("USD")),
+                "psp_fees/mock/USD",
+                NormalSide::Debit,
+            ),
+            (
+                AccountRef::SettlementSuspense(Psp::Mock, currency("GBP")),
+                "settlement_suspense/mock/GBP",
+                NormalSide::Credit,
+            ),
+            (
+                AccountRef::PspClaims(Psp::Mock, currency("JPY")),
+                "psp_claims/mock/JPY",
+                NormalSide::Debit,
+            ),
+            (
+                AccountRef::SettlementWriteoffs(currency("KWD")),
+                "settlement_writeoffs/platform/KWD",
+                NormalSide::Debit,
             ),
         ] {
             assert_eq!(reference.key().to_string(), key);
