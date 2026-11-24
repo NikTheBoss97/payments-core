@@ -1,0 +1,25 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO settlement_missing_batches (discrepancy_id, psp, currency, number, cause) VALUES ($1, $2, $3, $4, $5)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        {
+          "Custom": {
+            "name": "currency_code",
+            "kind": {
+              "Domain": "Text"
+            }
+          }
+        },
+        "Int8",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "ba81fcf925e383828e6e92659c4a29fb0e8809a40b3ef51216cb45ffe0fba3a6"
+}

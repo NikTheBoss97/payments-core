@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO settlement_uncaused_postings (discrepancy_id, ledger_transaction_id) VALUES ($1, $2)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "23290171b02616f1453eb12a1b7d48f16f809c83d058e04ca58bae1f020f9773"
+}

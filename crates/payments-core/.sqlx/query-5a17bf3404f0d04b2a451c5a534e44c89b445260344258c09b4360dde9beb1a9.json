@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO settlement_unmatched_lines (discrepancy_id, batch_id, line_no, net) VALUES ($1, $2, $3, $4)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Int4",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "5a17bf3404f0d04b2a451c5a534e44c89b445260344258c09b4360dde9beb1a9"
+}

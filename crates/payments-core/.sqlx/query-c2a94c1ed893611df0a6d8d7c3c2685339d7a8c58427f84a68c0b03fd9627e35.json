@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "TRUNCATE settlement_overdue_movements",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "c2a94c1ed893611df0a6d8d7c3c2685339d7a8c58427f84a68c0b03fd9627e35"
+}

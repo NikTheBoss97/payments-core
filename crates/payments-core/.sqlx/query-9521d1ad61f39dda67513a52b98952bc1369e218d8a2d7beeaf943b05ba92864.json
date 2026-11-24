@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "TRUNCATE settlement_uncaused_postings",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "9521d1ad61f39dda67513a52b98952bc1369e218d8a2d7beeaf943b05ba92864"
+}

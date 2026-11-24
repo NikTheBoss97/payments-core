@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE settlement_discrepancy_steps SET kind = kind",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "6bb57983b48a3d5c515ff7330f4bf0411683934a6d018c203e65d5949ad6cc84"
+}

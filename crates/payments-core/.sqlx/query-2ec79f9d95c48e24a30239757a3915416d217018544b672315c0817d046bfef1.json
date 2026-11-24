@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE settlement_fee_differences SET agreed = agreed",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "2ec79f9d95c48e24a30239757a3915416d217018544b672315c0817d046bfef1"
+}

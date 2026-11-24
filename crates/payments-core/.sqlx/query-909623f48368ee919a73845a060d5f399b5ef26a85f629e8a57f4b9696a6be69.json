@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE settlement_overdue_movements SET as_of = as_of",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "909623f48368ee919a73845a060d5f399b5ef26a85f629e8a57f4b9696a6be69"
+}
