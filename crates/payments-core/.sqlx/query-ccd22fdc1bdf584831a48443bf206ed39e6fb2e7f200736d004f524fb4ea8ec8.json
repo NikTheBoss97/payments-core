@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE psp_terms SET fee_bps = 0",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "ccd22fdc1bdf584831a48443bf206ed39e6fb2e7f200736d004f524fb4ea8ec8"
+}

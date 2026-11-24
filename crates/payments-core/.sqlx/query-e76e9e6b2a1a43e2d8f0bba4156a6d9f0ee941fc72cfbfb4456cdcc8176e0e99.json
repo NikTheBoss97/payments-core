@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "TRUNCATE psp_terms",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "e76e9e6b2a1a43e2d8f0bba4156a6d9f0ee941fc72cfbfb4456cdcc8176e0e99"
+}

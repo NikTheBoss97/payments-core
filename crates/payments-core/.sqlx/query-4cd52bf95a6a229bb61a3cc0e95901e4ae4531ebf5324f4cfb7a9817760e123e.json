@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO psp_terms (psp, currency, starts_at, fee_bps, fee_fixed, settle_within) VALUES ('mock', 'EUR', '2026-01-01 00:00:00+00', 100, 10, 86400)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "4cd52bf95a6a229bb61a3cc0e95901e4ae4531ebf5324f4cfb7a9817760e123e"
+}

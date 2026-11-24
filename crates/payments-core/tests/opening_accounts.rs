@@ -172,13 +172,18 @@ async fn both_normal_sides_round_trip_through_the_database(pool: PgPool) -> Test
 }
 
 /// One reference to each kind of account in the chart.
-fn references() -> [AccountRef; 3] {
+fn references() -> [AccountRef; 8] {
     let eur = Currency::parse("EUR").expect("valid code");
     let merchant = MerchantId::try_from(test_uuid(1)).expect("test_uuid builds UUIDv7 values");
     [
         AccountRef::PspReceivable(Psp::Mock, eur),
         AccountRef::MerchantPayable(merchant, eur),
         AccountRef::FeeRevenue(eur),
+        AccountRef::PspPayouts(Psp::Mock, eur),
+        AccountRef::PspFees(Psp::Mock, eur),
+        AccountRef::SettlementSuspense(Psp::Mock, eur),
+        AccountRef::PspClaims(Psp::Mock, eur),
+        AccountRef::SettlementWriteoffs(eur),
     ]
 }
 

@@ -16,8 +16,12 @@ use common::{
 };
 use sqlx::PgPool;
 
+/// The kinds that phase 2 posts to (ADR-0020) and the five that reconciliation adds
+/// (ADR-0072), each with its normal side.
 #[sqlx::test]
-async fn the_chart_holds_exactly_the_kinds_phase_2_posts_to(pool: PgPool) -> sqlx::Result<()> {
+async fn the_chart_holds_exactly_the_kinds_of_payments_and_reconciliation(
+    pool: PgPool,
+) -> sqlx::Result<()> {
     let rows = sqlx::query!("SELECT kind, normal_side FROM account_kinds ORDER BY kind")
         .fetch_all(&pool)
         .await?;
@@ -27,7 +31,12 @@ async fn the_chart_holds_exactly_the_kinds_phase_2_posts_to(pool: PgPool) -> sql
         [
             ("fee_revenue".into(), "credit".into()),
             ("merchant_payable".into(), "credit".into()),
+            ("psp_claims".into(), "debit".into()),
+            ("psp_fees".into(), "debit".into()),
+            ("psp_payouts".into(), "debit".into()),
             ("psp_receivable".into(), "debit".into()),
+            ("settlement_suspense".into(), "credit".into()),
+            ("settlement_writeoffs".into(), "debit".into()),
         ]
     );
     Ok(())
