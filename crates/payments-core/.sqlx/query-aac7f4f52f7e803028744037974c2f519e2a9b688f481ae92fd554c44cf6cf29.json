@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE settlement_payout_differences SET amount = amount",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "aac7f4f52f7e803028744037974c2f519e2a9b688f481ae92fd554c44cf6cf29"
+}

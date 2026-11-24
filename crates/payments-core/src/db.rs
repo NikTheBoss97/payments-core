@@ -55,7 +55,16 @@ fn proves_rollback(code: Option<&str>) -> bool {
     matches!(
         code,
         Some(
-            "LG002" | "LG003" | "LG004" | "LG005" | "LG006" | "LG007" | "LG008" | "LG009" | "LG011"
+            "LG002"
+                | "LG003"
+                | "LG004"
+                | "LG005"
+                | "LG006"
+                | "LG007"
+                | "LG008"
+                | "LG009"
+                | "LG011"
+                | "LG012"
         )
     )
 }
@@ -88,6 +97,7 @@ mod tests {
             (Some("LG008"), true),
             (Some("LG009"), true),
             (Some("LG011"), true),
+            (Some("LG012"), true),
             // A cancel or terminate held during the commit can arrive after
             // it, so these prove nothing.
             (Some("57014"), false),
@@ -110,6 +120,7 @@ mod tests {
         fn every_other_code_leaves_the_outcome_unknown(code in "[0-9A-Z]{5}") {
             let expected = [
                 "LG002", "LG003", "LG004", "LG005", "LG006", "LG007", "LG008", "LG009", "LG011",
+                "LG012",
             ]
             .contains(&code.as_str());
             prop_assert_eq!(proves_rollback(Some(&code)), expected);

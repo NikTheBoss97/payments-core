@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "TRUNCATE settlement_unmatched_lines",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "15fff238b6497e853839f56b813f99e8de3f8136ba35a4490e080a9ea57092cf"
+}

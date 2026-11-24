@@ -1,0 +1,21 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO settlement_discrepancy_steps (discrepancy_id, seq, prev_seq, id, kind, from_state, to_state, discrepancy_kind) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Int4",
+        "Int4",
+        "Uuid",
+        "Text",
+        "Text",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "3167ec09211304cc2850b3c314fe4b908c809649b99bc6cf4b9af25d5695c066"
+}

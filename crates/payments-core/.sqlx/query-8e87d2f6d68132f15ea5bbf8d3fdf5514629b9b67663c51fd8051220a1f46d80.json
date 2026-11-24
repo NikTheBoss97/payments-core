@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO settlement_payout_differences (discrepancy_id, batch_id, amount) VALUES ($1, $2, $3)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "8e87d2f6d68132f15ea5bbf8d3fdf5514629b9b67663c51fd8051220a1f46d80"
+}

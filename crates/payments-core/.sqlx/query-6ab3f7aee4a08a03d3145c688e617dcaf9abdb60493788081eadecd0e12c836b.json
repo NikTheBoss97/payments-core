@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE settlement_uncaused_postings SET ledger_transaction_id = ledger_transaction_id",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "6ab3f7aee4a08a03d3145c688e617dcaf9abdb60493788081eadecd0e12c836b"
+}

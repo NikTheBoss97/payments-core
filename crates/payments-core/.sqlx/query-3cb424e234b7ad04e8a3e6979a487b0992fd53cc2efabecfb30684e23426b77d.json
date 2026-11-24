@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "TRUNCATE settlement_fee_differences",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "3cb424e234b7ad04e8a3e6979a487b0992fd53cc2efabecfb30684e23426b77d"
+}

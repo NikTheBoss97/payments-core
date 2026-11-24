@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE settlement_unmatched_lines SET net = net",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "3e85583d80f05183a3b4eef5b4c6c4b07bcedc0922ce1e5a6a7dcba7179732b9"
+}

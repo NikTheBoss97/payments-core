@@ -105,6 +105,9 @@ constraints use one code per kind of constraint, such as `23514` for every
     posting while none does (ADR-0067);
   - `LG011`, by `settlement_movement_steps_record_check`: a step of a
     movement's chain that needs a record and has none (ADR-0069).
+- 2026-11-24: the registry gains `LG012` (ADR-0072), raised at `COMMIT` by
+  `settlement_discrepancies_commit_check`: a discrepancy without its subject,
+  or, unless it is an overdue movement, without the first step of its chain.
 
 ## References
 

@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE settlement_missing_batches SET cause = cause",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "94ceeb094911d285881c090f1f8ac656f410fdff1356889e0b0d2e4b41703929"
+}
