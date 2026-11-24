@@ -793,6 +793,11 @@ async fn every_guard_trigger_fires_always(pool: PgPool) -> sqlx::Result<()> {
         ),
         (
             "settlement_fee_differences",
+            "settlement_fee_differences_commit_check",
+            "check_settlement_fee_difference",
+        ),
+        (
+            "settlement_fee_differences",
             "settlement_fee_differences_no_truncate",
             "reject_change",
         ),
@@ -1007,6 +1012,12 @@ async fn every_guard_function_has_a_pinned_search_path(pool: PgPool) -> sqlx::Re
             ),
             (
                 "check_settlement_discrepancy".to_owned(),
+                pinned.to_owned(),
+                false,
+                false
+            ),
+            (
+                "check_settlement_fee_difference".to_owned(),
                 pinned.to_owned(),
                 false,
                 false
@@ -1588,6 +1599,7 @@ async fn every_constraint_keeps_its_name(pool: PgPool) -> sqlx::Result<()> {
             "settlement_discrepancy_steps_state_key",
             "settlement_discrepancy_steps_step_key",
             "settlement_fee_differences_agreed_check",
+            "settlement_fee_differences_commit_check",
             "settlement_fee_differences_differs_check",
             "settlement_fee_differences_discrepancy_fkey",
             "settlement_fee_differences_line_fkey",

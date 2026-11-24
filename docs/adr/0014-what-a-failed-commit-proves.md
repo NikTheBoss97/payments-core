@@ -106,6 +106,9 @@ Two facts about sqlx 0.9 (rev `f1e94ec`) bear on the same question:
 - 2026-11-24: the registry now holds `LG012` as well (ADR-0072), raised at
   `COMMIT` by `settlement_discrepancies_commit_check`. It proves a rollback
   like the others, and the one function lists all ten.
+- 2026-11-24: the registry now holds `LG013` as well (ADR-0072), raised at
+  `COMMIT` by `settlement_fee_differences_commit_check`. It proves a rollback
+  like the others, and the one function lists all eleven.
 
 ## References
 
