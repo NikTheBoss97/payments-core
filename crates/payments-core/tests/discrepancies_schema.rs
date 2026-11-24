@@ -17,7 +17,8 @@ mod common;
 use common::payments::VERSION_4;
 use common::settlement::{
     Accounts, Movement, MovementStep, SETTLED_POSITION, accounts, insert_batch,
-    insert_capture_match, insert_line, link_posting, post, settled_capture,
+    insert_capture_match, insert_line, insert_refund_match, later_movement, link_posting, post,
+    settled_capture,
 };
 use common::{
     APPEND_ONLY, CHECK_VIOLATION, FOREIGN_KEY_VIOLATION, INSUFFICIENT_PRIVILEGE, UNIQUE_VIOLATION,
@@ -33,6 +34,8 @@ type TestResult = Result<(), Box<dyn std::error::Error>>;
 const NOT_WHOLE: &str = "LG012";
 /// SQLSTATE of a step without the record that it needs (ADR-0069).
 const NO_RECORD: &str = "LG011";
+/// SQLSTATE of a fee's difference on a line that no match names (ADR-0072).
+const NO_MATCH: &str = "LG013";
 /// A time as of which a movement is judged overdue.
 const AS_OF: &str = "2026-11-22T00:00:00Z";
 
@@ -229,6 +232,44 @@ async fn batch_with_a_stray_line(
     Ok(batch)
 }
 
+/// Writes batch `number` in EUR with a payout of `payout` and its posting: line 2 of 500, a
+/// fee of 32 and a net of 468, which settles nothing of ours, and line 3 settling `paid`, a
+/// capture of 10,000, with a fee of 170 where the terms give 165 and a net of 9,830. The
+/// payout less 9,830 goes to suspense. Returns the batch.
+async fn batch_with_a_fee_off_the_terms(
+    conn: &mut PgConnection,
+    accounts: &Accounts,
+    (number, payout): (i64, i64),
+    paid: &Movement,
+) -> sqlx::Result<Uuid> {
+    let batch = Uuid::now_v7();
+    insert_batch(conn, batch, "EUR", number, payout).await?;
+    insert_line(conn, batch, 2, "capture", (500, 32, 468)).await?;
+    insert_line(conn, batch, 3, "capture", (10_000, 170, 9_830)).await?;
+    let open = MovementStep::open(paid);
+    let settle = open.then("settle", "settled");
+    open.insert(conn).await?;
+    settle.insert(conn).await?;
+    insert_capture_match(conn, batch, 3, paid, SETTLED_POSITION, settle.id).await?;
+    let suspense = payout.checked_sub(9_830).expect("small amounts");
+    let posting = post(
+        conn,
+        "EUR",
+        &[
+            (accounts.payouts, payout),
+            (accounts.fees, 170),
+            (accounts.receivable, -10_000),
+            (
+                accounts.suspense,
+                suspense.checked_neg().expect("small amounts"),
+            ),
+        ],
+    )
+    .await?;
+    link_posting(conn, batch, posting).await?;
+    Ok(batch)
+}
+
 /// A committed posting that nothing causes.
 async fn uncaused(pool: &PgPool, accounts: &Accounts) -> sqlx::Result<Uuid> {
     let mut tx = runtime_transaction(pool).await?;
@@ -254,18 +295,17 @@ async fn overdue(conn: &mut PgConnection, movement: &Movement) -> sqlx::Result<M
 #[sqlx::test]
 async fn every_kind_of_discrepancy_commits_whole(pool: PgPool) -> TestResult {
     let accounts = accounts(&pool, "EUR").await?;
+    let paid = settled_capture(&pool, "EUR", 10_000).await?;
 
-    // A line that settles nothing of ours, and a fee difference on the same line. Only a
-    // line that matches has its fee checked (ADR-0068); the schema does not hold that
-    // rule, so any line serves here.
+    // A line that settles nothing of ours, and a fee off the terms on a line that matches.
     let mut tx = runtime_transaction(&pool).await?;
-    let batch = batch_with_a_stray_line(&mut tx, &accounts, 1).await?;
+    let batch = batch_with_a_fee_off_the_terms(&mut tx, &accounts, (1, 10_298), &paid).await?;
     let (line, fee) = (Uuid::now_v7(), Uuid::now_v7());
     insert_discrepancy(&mut tx, line, "unmatched_line").await?;
     insert_unmatched_line(&mut tx, line, (batch, 2, 468)).await?;
     find(&mut tx, line, "unmatched_line").await?;
     insert_discrepancy(&mut tx, fee, "fee_difference").await?;
-    insert_fee_difference(&mut tx, fee, (batch, 2), (32, 25)).await?;
+    insert_fee_difference(&mut tx, fee, (batch, 3), (170, 165)).await?;
     find(&mut tx, fee, "fee_difference").await?;
     commit(tx).await?;
 
@@ -691,6 +731,60 @@ async fn each_subject_agrees_with_what_it_is_about(pool: PgPool) -> TestResult {
 }
 
 #[sqlx::test]
+async fn a_fee_difference_is_on_a_line_that_matches(pool: PgPool) -> TestResult {
+    let accounts = accounts(&pool, "EUR").await?;
+
+    // On line 2 of a batch, a refund line that matches, where the terms charge nothing.
+    // The difference is written before its match: the check runs at COMMIT.
+    let capture = settled_capture(&pool, "EUR", 10_000).await?;
+    let refund = later_movement(&pool, &capture, "refund", 3, 2_500).await?;
+    let mut tx = runtime_transaction(&pool).await?;
+    let batch = Uuid::now_v7();
+    insert_batch(&mut tx, batch, "EUR", 1, -2_505).await?;
+    insert_line(&mut tx, batch, 2, "refund", (-2_500, 5, -2_505)).await?;
+    let id = Uuid::now_v7();
+    insert_discrepancy(&mut tx, id, "fee_difference").await?;
+    find(&mut tx, id, "fee_difference").await?;
+    insert_fee_difference(&mut tx, id, (batch, 2), (5, 0)).await?;
+    let open = MovementStep::open(&refund);
+    let settle = open.then("settle", "settled");
+    open.insert(&mut tx).await?;
+    settle.insert(&mut tx).await?;
+    insert_refund_match(&mut tx, batch, 2, &refund, settle.id).await?;
+    let posting = post(
+        &mut tx,
+        "EUR",
+        &[
+            (accounts.payouts, -2_505),
+            (accounts.fees, 5),
+            (accounts.receivable, 2_500),
+        ],
+    )
+    .await?;
+    link_posting(&mut tx, batch, posting).await?;
+    commit(tx).await?;
+
+    // On a line that settles nothing of ours, whose fee is neither booked nor checked
+    // (ADR-0068), though the next line of its batch matches, and so does line 2 of the
+    // batch above.
+    let paid = settled_capture(&pool, "EUR", 10_000).await?;
+    let mut tx = runtime_transaction(&pool).await?;
+    let batch = batch_with_a_fee_off_the_terms(&mut tx, &accounts, (2, 10_298), &paid).await?;
+    let id = Uuid::now_v7();
+    insert_discrepancy(&mut tx, id, "fee_difference").await?;
+    find(&mut tx, id, "fee_difference").await?;
+    insert_fee_difference(&mut tx, id, (batch, 2), (32, 25)).await?;
+    let err = commit_refused(tx).await;
+    assert_guard(
+        err,
+        NO_MATCH,
+        "settlement_fee_differences_commit_check",
+        "settlement_fee_differences",
+    );
+    Ok(())
+}
+
+#[sqlx::test]
 async fn an_overdue_step_needs_its_subject_and_may_settle_later(pool: PgPool) -> TestResult {
     let capture = settled_capture(&pool, "EUR", 10_000).await?;
     let mut tx = runtime_transaction(&pool).await?;
@@ -850,21 +944,13 @@ async fn a_discrepancys_chain_starts_with_its_finding(pool: PgPool) -> TestResul
 async fn a_discrepancy_never_changes(pool: PgPool) -> TestResult {
     let accounts = accounts(&pool, "EUR").await?;
     let posting = uncaused(&pool, &accounts).await?;
+    let paid = settled_capture(&pool, "EUR", 10_000).await?;
     let capture = settled_capture(&pool, "EUR", 10_000).await?;
     let late = Uuid::now_v7();
 
-    // A discrepancy of each kind, with a batch whose payout is 7 more than its line's net.
+    // A discrepancy of each kind, with a batch whose payout is 7 more than its nets.
     let mut tx = runtime_transaction(&pool).await?;
-    let batch = Uuid::now_v7();
-    insert_batch(&mut tx, batch, "EUR", 1, 475).await?;
-    insert_line(&mut tx, batch, 2, "capture", (500, 32, 468)).await?;
-    let entries = post(
-        &mut tx,
-        "EUR",
-        &[(accounts.payouts, 475), (accounts.suspense, -475)],
-    )
-    .await?;
-    link_posting(&mut tx, batch, entries).await?;
+    let batch = batch_with_a_fee_off_the_terms(&mut tx, &accounts, (1, 10_305), &paid).await?;
     for (kind, id) in [
         ("unmatched_line", Uuid::now_v7()),
         ("payout_difference", Uuid::now_v7()),
@@ -877,7 +963,7 @@ async fn a_discrepancy_never_changes(pool: PgPool) -> TestResult {
         match kind {
             "unmatched_line" => insert_unmatched_line(&mut tx, id, (batch, 2, 468)).await?,
             "payout_difference" => insert_payout_difference(&mut tx, id, batch, 7).await?,
-            "fee_difference" => insert_fee_difference(&mut tx, id, (batch, 2), (32, 25)).await?,
+            "fee_difference" => insert_fee_difference(&mut tx, id, (batch, 3), (170, 165)).await?,
             "missing_batch" => {
                 insert_missing_batch(&mut tx, id, ("mock", "EUR", 5), "not_listed").await?;
             }
