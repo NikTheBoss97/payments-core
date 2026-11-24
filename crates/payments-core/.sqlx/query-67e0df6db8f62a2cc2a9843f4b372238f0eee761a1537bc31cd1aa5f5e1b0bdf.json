@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO accounts (id, kind, party, currency, normal_side) SELECT $1, k.kind, 'mock', $2, k.normal_side FROM account_kinds k WHERE k.kind = $3 ON CONFLICT (kind, party, currency) DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        {
+          "Custom": {
+            "name": "currency_code",
+            "kind": {
+              "Domain": "Text"
+            }
+          }
+        },
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "67e0df6db8f62a2cc2a9843f4b372238f0eee761a1537bc31cd1aa5f5e1b0bdf"
+}

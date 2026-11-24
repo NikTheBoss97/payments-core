@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE settlement_lines SET fee = fee",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "6b92d3011ddf071d051ce798d708c0a53369f48973f9a224637d0f1b94a9fbd2"
+}

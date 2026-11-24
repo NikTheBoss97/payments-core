@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM settlement_lines",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "cdeba05dd09b8e2d9fe12eccbb803a082fe215c4ed9e718a4d4911a8f0db8ff0"
+}

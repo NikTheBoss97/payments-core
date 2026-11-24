@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT (SELECT count(*) FROM settlement_capture_matches WHERE batch_id = $1)\n                + (SELECT count(*) FROM settlement_refund_matches WHERE batch_id = $1)\n                  AS \"matched!\"",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "matched!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "7d7e664b682994e4923a306bb26a52f4006f33bed29c988813173c8f79fe9126"
+}

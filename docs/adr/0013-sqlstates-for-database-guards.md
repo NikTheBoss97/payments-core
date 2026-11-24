@@ -96,6 +96,15 @@ constraints use one code per kind of constraint, such as `23514` for every
 - 2026-11-16: the registry gains `LG008` (ADR-0049), raised at `COMMIT` by
   `payment_facts_event_check`: a fact of the PSP's that no event announces
   (ADR-0057).
+- 2026-11-24: the registry gains two codes for reconciliation's tables
+  (ADR-0072), each raised at `COMMIT`:
+  - `LG009`, by `settlement_batches_commit_check`: a settlement batch whose
+    posting is not exactly the entries that its lines and payout give, was not
+    written by the same database transaction, or is not in the batch's
+    currency, or a batch with no posting while an entry remains, or one with a
+    posting while none does (ADR-0067);
+  - `LG011`, by `settlement_movement_steps_record_check`: a step of a
+    movement's chain that needs a record and has none (ADR-0069).
 
 ## References
 

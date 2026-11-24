@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "TRUNCATE payment_request_decisions CASCADE",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "da16968694dde8dd98b2a49b4f97bf9eabb194c9abe70743d6ae217e3f5cd94e"
+}

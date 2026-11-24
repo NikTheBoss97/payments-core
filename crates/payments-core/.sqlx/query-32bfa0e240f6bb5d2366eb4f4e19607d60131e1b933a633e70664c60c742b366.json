@@ -1,0 +1,24 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO settlement_batches (id, psp, currency, number, settled_at, payout) VALUES ($1, 'mock', $2, $3, '2026-11-20 00:00:00+00', $4)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        {
+          "Custom": {
+            "name": "currency_code",
+            "kind": {
+              "Domain": "Text"
+            }
+          }
+        },
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "32bfa0e240f6bb5d2366eb4f4e19607d60131e1b933a633e70664c60c742b366"
+}
