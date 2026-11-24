@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE settlement_batches SET payout = payout",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "ef6e66fb322bdcaaf5ee390a578799a9a58bc276d9e89515753b7dcfdf90327a"
+}

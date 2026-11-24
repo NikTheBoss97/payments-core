@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE settlement_movement_steps SET amount = amount",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "0a71a68d040be5f1ade38211b95153a06504971019cd71190abb6c6e76e4bf48"
+}

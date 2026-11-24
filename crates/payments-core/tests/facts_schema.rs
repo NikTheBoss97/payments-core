@@ -907,7 +907,8 @@ async fn facts_and_what_hangs_on_them_are_append_only_even_for_the_owner(
         "payment_request_decisions_append_only",
         table,
     );
-    let truncate = sqlx::query!("TRUNCATE payment_request_decisions")
+    // CASCADE, because settlement's matches refer to the decisions (ADR-0068).
+    let truncate = sqlx::query!("TRUNCATE payment_request_decisions CASCADE")
         .execute(&mut *owner)
         .await
         .unwrap_err();

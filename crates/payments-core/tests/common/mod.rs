@@ -18,6 +18,7 @@ pub mod keys;
 pub mod outbox;
 pub mod payments;
 pub mod psp;
+pub mod settlement;
 
 use std::time::{Duration, Instant};
 

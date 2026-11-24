@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "TRUNCATE settlement_refund_matches",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "7632b7794702b18d1add97363cb0c1ac56ad8e5c6bc1b938ee2ccfc5215fe546"
+}
