@@ -181,41 +181,49 @@ pub async fn later_movement(
     })
 }
 
-/// The accounts that a batch of the mock in `currency` posts to.
+/// The accounts that reconciliation posts to for the mock in `currency`: a batch's, and an
+/// outcome's claims and write-offs.
 #[derive(Debug, Clone, Copy)]
 pub struct Accounts {
     pub payouts: Uuid,
     pub fees: Uuid,
     pub receivable: Uuid,
     pub suspense: Uuid,
+    pub claims: Uuid,
+    pub writeoffs: Uuid,
 }
 
-/// Opens the accounts of a batch of the mock in `currency`, each in a statement of its own
-/// and committed before any posting refers to it (ADR-0005), and returns them.
+/// Opens the accounts that reconciliation posts to for the mock in `currency`, each in a
+/// statement of its own and committed before any posting refers to it (ADR-0005), and
+/// returns them. Write-offs belong to the platform, the rest to the PSP (ADR-0069).
 pub async fn accounts(pool: &PgPool, currency: &str) -> sqlx::Result<Accounts> {
     let mut tx = runtime_transaction(pool).await?;
     let mut ids = Vec::new();
-    for kind in [
-        "psp_payouts",
-        "psp_fees",
-        "psp_receivable",
-        "settlement_suspense",
+    for (kind, party) in [
+        ("psp_payouts", "mock"),
+        ("psp_fees", "mock"),
+        ("psp_receivable", "mock"),
+        ("settlement_suspense", "mock"),
+        ("psp_claims", "mock"),
+        ("settlement_writeoffs", "platform"),
     ] {
         sqlx::query!(
             "INSERT INTO accounts (id, kind, party, currency, normal_side) \
-             SELECT $1, k.kind, 'mock', $2, k.normal_side FROM account_kinds k WHERE k.kind = $3 \
+             SELECT $1, k.kind, $4, $2, k.normal_side FROM account_kinds k WHERE k.kind = $3 \
              ON CONFLICT (kind, party, currency) DO NOTHING",
             Uuid::now_v7(),
             currency,
-            kind
+            kind,
+            party
         )
         .execute(&mut *tx)
         .await?;
         ids.push(
             sqlx::query_scalar!(
-                "SELECT id FROM accounts WHERE kind = $1 AND party = 'mock' AND currency = $2",
+                "SELECT id FROM accounts WHERE kind = $1 AND party = $3 AND currency = $2",
                 kind,
-                currency
+                currency,
+                party
             )
             .fetch_one(&mut *tx)
             .await?,
@@ -227,6 +235,8 @@ pub async fn accounts(pool: &PgPool, currency: &str) -> sqlx::Result<Accounts> {
         fees: ids[1],
         receivable: ids[2],
         suspense: ids[3],
+        claims: ids[4],
+        writeoffs: ids[5],
     })
 }
 

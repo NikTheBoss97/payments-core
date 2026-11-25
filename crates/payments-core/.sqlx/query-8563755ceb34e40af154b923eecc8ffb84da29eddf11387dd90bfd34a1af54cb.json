@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "INSERT INTO accounts (id, kind, party, currency, normal_side) SELECT $1, k.kind, 'mock', $2, k.normal_side FROM account_kinds k WHERE k.kind = $3 ON CONFLICT (kind, party, currency) DO NOTHING",
+  "query": "INSERT INTO accounts (id, kind, party, currency, normal_side) SELECT $1, k.kind, $4, $2, k.normal_side FROM account_kinds k WHERE k.kind = $3 ON CONFLICT (kind, party, currency) DO NOTHING",
   "describe": {
     "columns": [],
     "parameters": {
@@ -14,10 +14,11 @@
             }
           }
         },
+        "Text",
         "Text"
       ]
     },
     "nullable": []
   },
-  "hash": "67e0df6db8f62a2cc2a9843f4b372238f0eee761a1537bc31cd1aa5f5e1b0bdf"
+  "hash": "8563755ceb34e40af154b923eecc8ffb84da29eddf11387dd90bfd34a1af54cb"
 }

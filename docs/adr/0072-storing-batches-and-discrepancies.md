@@ -153,3 +153,11 @@ The owner chose the first of each.
   request and `LG010` with the second, each in the commit that first raises it, and so does
   the one function that reads a `COMMIT`'s error, since each is a deferred check that proves
   a rollback (ADR-0014). `LG012` and `LG013` are codes that ADR-0069 did not list.
+
+## Amendments
+
+- 2026-11-25: a discrepancy's outcome carries `xact_id`, and the link to its posting is tied
+  to it, so that no link joins an outcome after its transaction, as a batch's link is tied
+  to its batch. `LG010` refuses a link where no entry remains, as `LG009` does, which a claim
+  on a line whose net is zero meets. `LG011` gains a second trigger, on a discrepancy's
+  chain.

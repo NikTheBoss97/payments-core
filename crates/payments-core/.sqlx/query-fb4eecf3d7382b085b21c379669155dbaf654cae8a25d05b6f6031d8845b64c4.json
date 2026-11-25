@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "TRUNCATE settlement_discrepancy_outcomes CASCADE",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "fb4eecf3d7382b085b21c379669155dbaf654cae8a25d05b6f6031d8845b64c4"
+}
