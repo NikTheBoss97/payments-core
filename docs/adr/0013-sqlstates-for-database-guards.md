@@ -118,6 +118,9 @@ constraints use one code per kind of constraint, such as `23514` for every
   while an entry remains, or present while none does (ADR-0069). `LG011` is
   raised as well by `settlement_discrepancy_steps_record_check`, for a step of
   a discrepancy's chain without its record.
+- 2026-11-25: `LG010` is raised as well by
+  `settlement_movement_outcomes_commit_check`, for an overdue movement's
+  outcome whose posting is not its amount moved off `psp_receivable`.
 
 ## References
 
