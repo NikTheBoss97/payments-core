@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "TRUNCATE settlement_unmatched_lines CASCADE",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "32df84ea54a988aa5804dd3cf549022e72e439cdf510bc573e4b2e3886a1b426"
+}

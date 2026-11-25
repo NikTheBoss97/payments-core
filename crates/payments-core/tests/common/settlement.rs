@@ -129,10 +129,31 @@ async fn decide(
     Ok(())
 }
 
-/// A capture of `amount` in `currency` that the PSP's history settled: the capture's fact
-/// at position 1 and its `settled` fact at [`SETTLED_POSITION`], with the decision on the
-/// merchant's request.
+/// A capture of `amount` in `currency` that the PSP's history settled: an unsettled capture
+/// (see [`unsettled_capture`]) and its `settled` fact at [`SETTLED_POSITION`].
 pub async fn settled_capture(
+    pool: &PgPool,
+    currency: &'static str,
+    amount: i64,
+) -> sqlx::Result<Movement> {
+    let capture = unsettled_capture(pool, currency, amount).await?;
+    let mut tx = runtime_transaction(pool).await?;
+    fact(
+        &mut tx,
+        capture.merchant,
+        capture.payment,
+        SETTLED_POSITION,
+        "settle",
+        0,
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(capture)
+}
+
+/// A capture of `amount` in `currency` that the PSP's history has not settled yet: the
+/// capture's fact at position 1, with the decision on the merchant's request.
+pub async fn unsettled_capture(
     pool: &PgPool,
     currency: &'static str,
     amount: i64,
@@ -141,7 +162,6 @@ pub async fn settled_capture(
     let request = request(pool, merchant, payment, "capture", amount).await?;
     let mut tx = runtime_transaction(pool).await?;
     let fact_id = fact(&mut tx, merchant, payment, 1, "capture", amount).await?;
-    fact(&mut tx, merchant, payment, SETTLED_POSITION, "settle", 0).await?;
     decide(&mut tx, request, payment, "capture", 1).await?;
     tx.commit().await?;
     Ok(Movement {

@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM settlement_late_refund_matches",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "12e46a1b9b1ad41ba1f0b345921c27bdb574822a4ff0b58b841c3c189270d70b"
+}

@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM settlement_late_capture_matches",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "f06566d32d9c24887063457e3668d448aef2867ddcc7eaeaea7b612d5b658535"
+}

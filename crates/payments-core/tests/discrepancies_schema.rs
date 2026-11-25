@@ -760,8 +760,9 @@ async fn a_discrepancy_never_changes(pool: PgPool) -> TestResult {
             "settlement_unmatched_lines_append_only",
             "settlement_unmatched_lines",
         ),
+        // CASCADE, because late matches refer to the lines' discrepancies (ADR-0072).
         (
-            sqlx::query!("TRUNCATE settlement_unmatched_lines")
+            sqlx::query!("TRUNCATE settlement_unmatched_lines CASCADE")
                 .execute(&pool)
                 .await
                 .expect_err("append-only"),
