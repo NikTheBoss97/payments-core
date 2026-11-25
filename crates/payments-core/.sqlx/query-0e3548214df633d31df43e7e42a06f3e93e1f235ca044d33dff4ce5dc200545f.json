@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM settlement_batch_arrivals",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "0e3548214df633d31df43e7e42a06f3e93e1f235ca044d33dff4ce5dc200545f"
+}

@@ -169,3 +169,6 @@ The owner chose the first of each.
   reversal's key to an outcome of its own subject. A discrepancy's reversal also names its
   outcome's posting link, so that only an outcome that posted is reversed, and a movement's
   reversal carries its step's kind, `settle` or `settle_late`.
+- 2026-11-25: `settlement_missing_batches` gains `(discrepancy_id, psp, currency, number)`
+  unique, the target of an arrival's key to the batch that its discrepancy missed; the
+  arrival also names the booked batch by its `(psp, currency, number)`.

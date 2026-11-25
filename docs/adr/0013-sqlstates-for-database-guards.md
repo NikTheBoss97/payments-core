@@ -133,6 +133,8 @@ constraints use one code per kind of constraint, such as `23514` for every
   posting is not its outcome's mirrored; and `LG011` refuses a step that
   settles a movement after its outcome, or closes a line after an outcome that
   posted, without its reversal (ADR-0069).
+- 2026-11-25: `LG011` refuses a missing batch's evidence step without its
+  arrival (ADR-0069, ADR-0070).
 
 ## References
 
