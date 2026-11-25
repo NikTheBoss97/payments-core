@@ -859,8 +859,9 @@ async fn a_discrepancy_never_changes(pool: PgPool) -> TestResult {
             "settlement_discrepancy_steps_append_only",
             "settlement_discrepancy_steps",
         ),
+        // CASCADE, because outcomes refer to the steps (ADR-0072).
         (
-            sqlx::query!("TRUNCATE settlement_discrepancy_steps")
+            sqlx::query!("TRUNCATE settlement_discrepancy_steps CASCADE")
                 .execute(&pool)
                 .await
                 .expect_err("append-only"),

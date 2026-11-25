@@ -63,6 +63,7 @@ fn proves_rollback(code: Option<&str>) -> bool {
                 | "LG007"
                 | "LG008"
                 | "LG009"
+                | "LG010"
                 | "LG011"
                 | "LG012"
                 | "LG013"
@@ -97,6 +98,7 @@ mod tests {
             (Some("LG007"), true),
             (Some("LG008"), true),
             (Some("LG009"), true),
+            (Some("LG010"), true),
             (Some("LG011"), true),
             (Some("LG012"), true),
             (Some("LG013"), true),
@@ -121,8 +123,8 @@ mod tests {
         #[test]
         fn every_other_code_leaves_the_outcome_unknown(code in "[0-9A-Z]{5}") {
             let expected = [
-                "LG002", "LG003", "LG004", "LG005", "LG006", "LG007", "LG008", "LG009", "LG011",
-                "LG012", "LG013",
+                "LG002", "LG003", "LG004", "LG005", "LG006", "LG007", "LG008", "LG009", "LG010",
+                "LG011", "LG012", "LG013",
             ]
             .contains(&code.as_str());
             prop_assert_eq!(proves_rollback(Some(&code)), expected);

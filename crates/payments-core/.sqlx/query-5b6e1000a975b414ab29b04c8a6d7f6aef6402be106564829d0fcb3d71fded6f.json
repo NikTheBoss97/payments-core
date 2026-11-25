@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT id FROM accounts WHERE kind = $1 AND party = 'mock' AND currency = $2",
+  "query": "SELECT id FROM accounts WHERE kind = $1 AND party = $3 AND currency = $2",
   "describe": {
     "columns": [
       {
@@ -18,6 +18,7 @@
     "parameters": {
       "Left": [
         "Text",
+        "Text",
         "Text"
       ]
     },
@@ -25,5 +26,5 @@
       false
     ]
   },
-  "hash": "ffa4704270dfc0a4ed5399a7df5dc4749e6cc1a49ed78bc5eff0492bf3c0c7cf"
+  "hash": "5b6e1000a975b414ab29b04c8a6d7f6aef6402be106564829d0fcb3d71fded6f"
 }

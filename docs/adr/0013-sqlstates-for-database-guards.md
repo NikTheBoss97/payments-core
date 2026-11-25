@@ -111,6 +111,13 @@ constraints use one code per kind of constraint, such as `23514` for every
 - 2026-11-24: the registry gains `LG013` (ADR-0072), raised at `COMMIT` by
   `settlement_fee_differences_commit_check`: a fee's difference on a line that
   no match names, whose fee is neither booked nor checked (ADR-0068).
+- 2026-11-25: the registry gains `LG010` (ADR-0072), raised at `COMMIT` by
+  `settlement_discrepancy_outcomes_commit_check`: an outcome on a discrepancy
+  whose posting is not exactly its lines, written by the same database
+  transaction in its batch's currency, or whose posting's link is missing
+  while an entry remains, or present while none does (ADR-0069). `LG011` is
+  raised as well by `settlement_discrepancy_steps_record_check`, for a step of
+  a discrepancy's chain without its record.
 
 ## References
 
