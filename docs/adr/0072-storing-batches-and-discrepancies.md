@@ -161,3 +161,6 @@ The owner chose the first of each.
   to its batch. `LG010` refuses a link where no entry remains, as `LG009` does, which a claim
   on a line whose net is zero meets. `LG011` gains a second trigger, on a discrepancy's
   chain.
+- 2026-11-25: `settlement_unmatched_lines` gains `(discrepancy_id, batch_id, line_no)`
+  unique, the target of a late match's key, which ties the late match to its line's
+  discrepancy.

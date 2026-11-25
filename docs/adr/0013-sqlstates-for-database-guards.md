@@ -121,6 +121,12 @@ constraints use one code per kind of constraint, such as `23514` for every
 - 2026-11-25: `LG010` is raised as well by
   `settlement_movement_outcomes_commit_check`, for an overdue movement's
   outcome whose posting is not its amount moved off `psp_receivable`.
+- 2026-11-25: `LG010` is raised as well by
+  `settlement_late_capture_matches_commit_check` and
+  `settlement_late_refund_matches_commit_check`, for a late match whose
+  posting is not its line's; `LG011` refuses a `settle_late` step and a line's
+  evidence step without their late match; and `LG013` counts a late match as
+  the match that a fee's difference needs (ADR-0069).
 
 ## References
 

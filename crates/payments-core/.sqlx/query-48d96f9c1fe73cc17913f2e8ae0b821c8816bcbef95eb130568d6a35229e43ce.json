@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE settlement_late_capture_matches SET gross = gross",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "48d96f9c1fe73cc17913f2e8ae0b821c8816bcbef95eb130568d6a35229e43ce"
+}

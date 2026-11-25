@@ -1,8 +1,8 @@
 // Author: Nicola Antonello
 
 //! Database tests for resolving discrepancies (ADR-0069, ADR-0072): an operator's outcome on
-//! a discrepancy whose chain is its own, and on an overdue movement, each with its posting,
-//! and the guards of I13 in PostgreSQL (ADR-0071).
+//! a discrepancy whose chain is its own, and on an overdue movement, and a line that settles
+//! late, each with its posting, and the guards of I13 in PostgreSQL (ADR-0071).
 //!
 //! Rows are written with raw SQL as the system role, `payments_app`, the way a buggy code
 //! path or a manual session could write them. Each rejected write breaks a single rule.
@@ -15,11 +15,11 @@
 mod common;
 
 use common::settlement::{
-    Accounts, Movement, MovementStep, accounts, batch_with_a_fee_off_the_terms, find, insert_batch,
-    insert_discrepancy, insert_discrepancy_step, insert_fee_difference, insert_line,
-    insert_missing_batch, insert_overdue_movement, insert_payout_difference,
-    insert_uncaused_posting, insert_unmatched_line, later_movement, overdue, post, settled_capture,
-    uncaused,
+    Accounts, Movement, MovementStep, SETTLED_POSITION, accounts, batch_with_a_fee_off_the_terms,
+    find, insert_batch, insert_discrepancy, insert_discrepancy_step, insert_fee_difference,
+    insert_line, insert_missing_batch, insert_overdue_movement, insert_payout_difference,
+    insert_uncaused_posting, insert_unmatched_line, later_movement, link_posting, overdue, post,
+    settled_capture, uncaused,
 };
 use common::{
     APPEND_ONLY, CHECK_VIOLATION, FOREIGN_KEY_VIOLATION, INSUFFICIENT_PRIVILEGE, UNIQUE_VIOLATION,
@@ -35,6 +35,8 @@ type TestResult = Result<(), Box<dyn std::error::Error>>;
 const NOT_ITS_LINES: &str = "LG010";
 /// SQLSTATE of a step without the record that it needs (ADR-0069).
 const NO_RECORD: &str = "LG011";
+/// SQLSTATE of a fee's difference on a line that matches nothing (ADR-0072).
+const NO_MATCH: &str = "LG013";
 /// A reason, as an operator gives one.
 const REASON: &str = "The PSP confirmed the charge in writing.";
 /// A time as of which a movement is judged overdue.
@@ -1086,6 +1088,1068 @@ async fn a_movement_outcome_never_changes(pool: PgPool) -> TestResult {
     // As the system role, the privileges refuse first.
     let mut tx = runtime_transaction(&pool).await?;
     let err = sqlx::query!("DELETE FROM settlement_movement_outcomes")
+        .execute(&mut *tx)
+        .await
+        .expect_err("no DELETE privilege");
+    assert_eq!(sqlstate(err), INSUFFICIENT_PRIVILEGE);
+    Ok(())
+}
+
+/// A late match of the capture line `line_no` of `batch` with `capture`, the record of the
+/// movement's `settle_late` step and of the discrepancy's `evidence` step, with its posting.
+async fn insert_late_capture_match(
+    conn: &mut PgConnection,
+    (discrepancy, batch, line_no): (Uuid, Uuid, i32),
+    capture: &Movement,
+    (step, evidence): (Uuid, Uuid),
+    posting: Uuid,
+) -> sqlx::Result<()> {
+    sqlx::query!(
+        "INSERT INTO settlement_late_capture_matches \
+             (discrepancy_id, batch_id, line_no, gross, psp, currency, payment_id, position, \
+              psp_fact_id, request_id, settled_position, step_id, evidence_step_id, \
+              ledger_transaction_id) \
+         VALUES ($1, $2, $3, $4, 'mock', $5, $6, $7, $8, $9, $10, $11, $12, $13)",
+        discrepancy,
+        batch,
+        line_no,
+        capture.amount,
+        capture.currency,
+        capture.payment,
+        capture.position,
+        capture.fact_id,
+        capture.request,
+        SETTLED_POSITION,
+        step,
+        evidence,
+        posting
+    )
+    .execute(conn)
+    .await?;
+    Ok(())
+}
+
+/// A late match of the refund line `line_no` of `batch` with `refund`, as a capture's.
+async fn insert_late_refund_match(
+    conn: &mut PgConnection,
+    (discrepancy, batch, line_no): (Uuid, Uuid, i32),
+    refund: &Movement,
+    (step, evidence): (Uuid, Uuid),
+    posting: Uuid,
+) -> sqlx::Result<()> {
+    let gross = refund
+        .amount
+        .checked_neg()
+        .expect("a refund's amount is positive");
+    sqlx::query!(
+        "INSERT INTO settlement_late_refund_matches \
+             (discrepancy_id, batch_id, line_no, gross, psp, currency, payment_id, position, \
+              psp_fact_id, request_id, step_id, evidence_step_id, ledger_transaction_id) \
+         VALUES ($1, $2, $3, $4, 'mock', $5, $6, $7, $8, $9, $10, $11, $12)",
+        discrepancy,
+        batch,
+        line_no,
+        gross,
+        refund.currency,
+        refund.payment,
+        refund.position,
+        refund.fact_id,
+        refund.request,
+        step,
+        evidence,
+        posting
+    )
+    .execute(conn)
+    .await?;
+    Ok(())
+}
+
+/// Books batch `number` in EUR with one line of `(gross, fee, net)` of `kind` that settles
+/// nothing of ours, its net in suspense, and records its discrepancy. Returns the batch and
+/// the discrepancy.
+async fn stray(
+    pool: &PgPool,
+    accounts: &Accounts,
+    number: i64,
+    (kind, (gross, fee, net)): (&str, (i64, i64, i64)),
+) -> sqlx::Result<(Uuid, Uuid)> {
+    let (batch, discrepancy) = (Uuid::now_v7(), Uuid::now_v7());
+    let mut tx = runtime_transaction(pool).await?;
+    insert_batch(&mut tx, batch, "EUR", number, net).await?;
+    insert_line(&mut tx, batch, 2, kind, (gross, fee, net)).await?;
+    let suspense = net.checked_neg().expect("a small net");
+    let posting = post(
+        &mut tx,
+        "EUR",
+        &[(accounts.payouts, net), (accounts.suspense, suspense)],
+    )
+    .await?;
+    link_posting(&mut tx, batch, posting).await?;
+    insert_discrepancy(&mut tx, discrepancy, "unmatched_line").await?;
+    find(&mut tx, discrepancy, "unmatched_line").await?;
+    insert_unmatched_line(&mut tx, discrepancy, (batch, 2, net)).await?;
+    tx.commit().await?;
+    Ok((batch, discrepancy))
+}
+
+/// The steps of a late match, in the transaction of `conn`: `movement`'s open step, unless
+/// `first` is given as its step before, and its `settle_late` step; and the `evidence` step
+/// of `discrepancy`. Returns the two steps' IDs.
+async fn settle_late(
+    conn: &mut PgConnection,
+    movement: &Movement,
+    first: Option<&MovementStep>,
+    discrepancy: Uuid,
+) -> sqlx::Result<(Uuid, Uuid)> {
+    let step = match first {
+        Some(before) => before.then("settle_late", "settled"),
+        None => {
+            let open = MovementStep::open(movement);
+            open.insert(conn).await?;
+            open.then("settle_late", "settled")
+        }
+    };
+    step.insert(conn).await?;
+    let evidence = Uuid::now_v7();
+    insert_discrepancy_step(
+        conn,
+        discrepancy,
+        (1, 0, evidence),
+        ("evidence", "open", "closed"),
+        "unmatched_line",
+    )
+    .await?;
+    Ok((step.id, evidence))
+}
+
+#[sqlx::test]
+async fn a_line_settles_late_once_its_fact_arrives(pool: PgPool) -> TestResult {
+    let euros = accounts(&pool, "EUR").await?;
+    let capture = settled_capture(&pool, "EUR", 10_000).await?;
+    let refund = later_movement(&pool, &capture, "refund", 3, 2_500).await?;
+    let (batch, line) = stray(&pool, &euros, 1, ("capture", (10_000, 165, 9_835))).await?;
+
+    // The net leaves suspense, the fee is booked and the gross comes off the receivable
+    // (ADR-0069).
+    let mut tx = runtime_transaction(&pool).await?;
+    let steps = settle_late(&mut tx, &capture, None, line).await?;
+    let posting = post(
+        &mut tx,
+        "EUR",
+        &[
+            (euros.suspense, 9_835),
+            (euros.fees, 165),
+            (euros.receivable, -10_000),
+        ],
+    )
+    .await?;
+    insert_late_capture_match(&mut tx, (line, batch, 2), &capture, steps, posting).await?;
+    commit(tx).await?;
+
+    // A refund's line, which owes the PSP, settles the other way.
+    let (batch, line) = stray(&pool, &euros, 2, ("refund", (-2_500, 0, -2_500))).await?;
+    let mut tx = runtime_transaction(&pool).await?;
+    let steps = settle_late(&mut tx, &refund, None, line).await?;
+    let posting = post(
+        &mut tx,
+        "EUR",
+        &[(euros.suspense, -2_500), (euros.receivable, 2_500)],
+    )
+    .await?;
+    insert_late_refund_match(&mut tx, (line, batch, 2), &refund, steps, posting).await?;
+    commit(tx).await?;
+
+    // An overdue movement settles late too.
+    let other = settled_capture(&pool, "EUR", 10_000).await?;
+    let overdue = found_overdue(&pool, &other).await?;
+    let (batch, line) = stray(&pool, &euros, 3, ("capture", (10_000, 165, 9_835))).await?;
+    let mut tx = runtime_transaction(&pool).await?;
+    let steps = settle_late(&mut tx, &other, Some(&overdue), line).await?;
+    let posting = post(
+        &mut tx,
+        "EUR",
+        &[
+            (euros.suspense, 9_835),
+            (euros.fees, 165),
+            (euros.receivable, -10_000),
+        ],
+    )
+    .await?;
+    insert_late_capture_match(&mut tx, (line, batch, 2), &other, steps, posting).await?;
+    commit(tx).await?;
+    Ok(())
+}
+
+#[sqlx::test]
+async fn a_late_match_posts_exactly_its_lines(pool: PgPool) -> TestResult {
+    let euros = accounts(&pool, "EUR").await?;
+    let pounds = accounts(&pool, "GBP").await?;
+    let capture = settled_capture(&pool, "EUR", 10_000).await?;
+    let (batch, line) = stray(&pool, &euros, 1, ("capture", (10_000, 165, 9_835))).await?;
+    let right = [
+        (euros.suspense, 9_835),
+        (euros.fees, 165),
+        (euros.receivable, -10_000),
+    ];
+    let mut tx = runtime_transaction(&pool).await?;
+    let earlier = post(&mut tx, "EUR", &right).await?;
+    tx.commit().await?;
+
+    // Each posting balances, so only LG010 can refuse it.
+    for (currency, entries) in [
+        // The fee left in suspense.
+        (
+            "EUR",
+            vec![(euros.suspense, 10_000), (euros.receivable, -10_000)],
+        ),
+        // The net to the payouts.
+        (
+            "EUR",
+            vec![
+                (euros.payouts, 9_835),
+                (euros.fees, 165),
+                (euros.receivable, -10_000),
+            ],
+        ),
+        // Two entries more.
+        (
+            "EUR",
+            vec![
+                (euros.suspense, 9_835),
+                (euros.fees, 165),
+                (euros.receivable, -10_000),
+                (euros.suspense, 1),
+                (euros.fees, -1),
+            ],
+        ),
+        // The right amounts, in another currency.
+        (
+            "GBP",
+            vec![
+                (pounds.suspense, 9_835),
+                (pounds.fees, 165),
+                (pounds.receivable, -10_000),
+            ],
+        ),
+    ] {
+        let mut tx = runtime_transaction(&pool).await?;
+        let steps = settle_late(&mut tx, &capture, None, line).await?;
+        let posting = post(&mut tx, currency, &entries).await?;
+        insert_late_capture_match(&mut tx, (line, batch, 2), &capture, steps, posting).await?;
+        let err = commit_refused(tx).await;
+        assert_guard(
+            err,
+            NOT_ITS_LINES,
+            "settlement_late_capture_matches_commit_check",
+            "settlement_late_capture_matches",
+        );
+    }
+
+    // The right lines, committed before the late match.
+    let mut tx = runtime_transaction(&pool).await?;
+    let steps = settle_late(&mut tx, &capture, None, line).await?;
+    insert_late_capture_match(&mut tx, (line, batch, 2), &capture, steps, earlier).await?;
+    let err = commit_refused(tx).await;
+    assert_guard(
+        err,
+        NOT_ITS_LINES,
+        "settlement_late_capture_matches_commit_check",
+        "settlement_late_capture_matches",
+    );
+    Ok(())
+}
+
+#[sqlx::test]
+async fn each_step_of_a_late_match_needs_it(pool: PgPool) -> TestResult {
+    let euros = accounts(&pool, "EUR").await?;
+    let capture = settled_capture(&pool, "EUR", 10_000).await?;
+    let (_, line) = stray(&pool, &euros, 1, ("capture", (10_000, 165, 9_835))).await?;
+
+    // The movement's step alone.
+    let mut tx = runtime_transaction(&pool).await?;
+    let open = MovementStep::open(&capture);
+    open.insert(&mut tx).await?;
+    open.then("settle_late", "settled").insert(&mut tx).await?;
+    let err = commit_refused(tx).await;
+    assert_guard(
+        err,
+        NO_RECORD,
+        "settlement_movement_steps_record_check",
+        "settlement_movement_steps",
+    );
+
+    // The discrepancy's step alone.
+    let mut tx = runtime_transaction(&pool).await?;
+    insert_discrepancy_step(
+        &mut tx,
+        line,
+        (1, 0, Uuid::now_v7()),
+        ("evidence", "open", "closed"),
+        "unmatched_line",
+    )
+    .await?;
+    let err = commit_refused(tx).await;
+    assert_guard(
+        err,
+        NO_RECORD,
+        "settlement_discrepancy_steps_record_check",
+        "settlement_discrepancy_steps",
+    );
+    Ok(())
+}
+
+#[sqlx::test]
+async fn a_late_match_agrees_with_its_line_and_its_steps(pool: PgPool) -> TestResult {
+    use common::settlement::unsettled_capture;
+
+    let euros = accounts(&pool, "EUR").await?;
+    let capture = settled_capture(&pool, "EUR", 10_000).await?;
+    let (batch, line) = stray(&pool, &euros, 1, ("capture", (10_000, 165, 9_835))).await?;
+    let (other_batch, other_line) =
+        stray(&pool, &euros, 2, ("capture", (10_000, 165, 9_835))).await?;
+    let entries = [
+        (euros.suspense, 9_835),
+        (euros.fees, 165),
+        (euros.receivable, -10_000),
+    ];
+
+    // The line of another discrepancy.
+    let mut tx = runtime_transaction(&pool).await?;
+    let steps = settle_late(&mut tx, &capture, None, line).await?;
+    let posting = post(&mut tx, "EUR", &entries).await?;
+    let err = insert_late_capture_match(&mut tx, (line, other_batch, 2), &capture, steps, posting)
+        .await
+        .expect_err("the line of another discrepancy");
+    assert_violation(
+        err,
+        FOREIGN_KEY_VIOLATION,
+        "settlement_late_capture_matches_unmatched_line_fkey",
+    );
+    tx.rollback().await?;
+
+    // The evidence of another discrepancy.
+    let mut tx = runtime_transaction(&pool).await?;
+    let (step, _) = settle_late(&mut tx, &capture, None, line).await?;
+    let other_evidence = Uuid::now_v7();
+    insert_discrepancy_step(
+        &mut tx,
+        other_line,
+        (1, 0, other_evidence),
+        ("evidence", "open", "closed"),
+        "unmatched_line",
+    )
+    .await?;
+    let posting = post(&mut tx, "EUR", &entries).await?;
+    let err = insert_late_capture_match(
+        &mut tx,
+        (line, batch, 2),
+        &capture,
+        (step, other_evidence),
+        posting,
+    )
+    .await
+    .expect_err("the evidence of another discrepancy");
+    assert_violation(
+        err,
+        FOREIGN_KEY_VIOLATION,
+        "settlement_late_capture_matches_evidence_fkey",
+    );
+    tx.rollback().await?;
+
+    // A settle step for a settle_late one.
+    let mut tx = runtime_transaction(&pool).await?;
+    let open = MovementStep::open(&capture);
+    open.insert(&mut tx).await?;
+    let settle = open.then("settle", "settled");
+    settle.insert(&mut tx).await?;
+    let evidence = Uuid::now_v7();
+    insert_discrepancy_step(
+        &mut tx,
+        line,
+        (1, 0, evidence),
+        ("evidence", "open", "closed"),
+        "unmatched_line",
+    )
+    .await?;
+    let posting = post(&mut tx, "EUR", &entries).await?;
+    let err = insert_late_capture_match(
+        &mut tx,
+        (line, batch, 2),
+        &capture,
+        (settle.id, evidence),
+        posting,
+    )
+    .await
+    .expect_err("a settle step for a settle_late one");
+    assert_violation(
+        err,
+        FOREIGN_KEY_VIOLATION,
+        "settlement_late_capture_matches_step_fkey",
+    );
+    tx.rollback().await?;
+
+    // A fact that the line does not name: a capture of another amount.
+    let smaller = settled_capture(&pool, "EUR", 9_999).await?;
+    let mut tx = runtime_transaction(&pool).await?;
+    let steps = settle_late(&mut tx, &smaller, None, line).await?;
+    let posting = post(&mut tx, "EUR", &entries).await?;
+    let err = insert_late_capture_match(&mut tx, (line, batch, 2), &smaller, steps, posting)
+        .await
+        .expect_err("a capture of another amount");
+    assert_violation(
+        err,
+        FOREIGN_KEY_VIOLATION,
+        "settlement_late_capture_matches_line_fkey",
+    );
+    tx.rollback().await?;
+
+    // The line's gross, named with a fact of another amount.
+    let mut tx = runtime_transaction(&pool).await?;
+    let steps = settle_late(&mut tx, &smaller, None, line).await?;
+    let posting = post(&mut tx, "EUR", &entries).await?;
+    let as_the_line = Movement {
+        amount: 10_000,
+        ..smaller.clone()
+    };
+    let err = insert_late_capture_match(&mut tx, (line, batch, 2), &as_the_line, steps, posting)
+        .await
+        .expect_err("an amount that is not the fact's");
+    assert_violation(
+        err,
+        FOREIGN_KEY_VIOLATION,
+        "settlement_late_capture_matches_fact_fkey",
+    );
+    tx.rollback().await?;
+
+    // Another request than the one that the fact decided.
+    let mut tx = runtime_transaction(&pool).await?;
+    let steps = settle_late(&mut tx, &capture, None, line).await?;
+    let posting = post(&mut tx, "EUR", &entries).await?;
+    let other_request = Movement {
+        request: smaller.request,
+        ..capture.clone()
+    };
+    let err = insert_late_capture_match(&mut tx, (line, batch, 2), &other_request, steps, posting)
+        .await
+        .expect_err("a request that the fact did not decide");
+    assert_violation(
+        err,
+        FOREIGN_KEY_VIOLATION,
+        "settlement_late_capture_matches_decision_fkey",
+    );
+    tx.rollback().await?;
+
+    // A settled position that holds a refund, not the payment's settlement.
+    let unsettled = unsettled_capture(&pool, "EUR", 10_000).await?;
+    later_movement(&pool, &unsettled, "refund", SETTLED_POSITION, 2_500).await?;
+    let mut tx = runtime_transaction(&pool).await?;
+    let steps = settle_late(&mut tx, &unsettled, None, line).await?;
+    let posting = post(&mut tx, "EUR", &entries).await?;
+    let err = insert_late_capture_match(&mut tx, (line, batch, 2), &unsettled, steps, posting)
+        .await
+        .expect_err("a settled position that holds no settled fact");
+    assert_violation(
+        err,
+        FOREIGN_KEY_VIOLATION,
+        "settlement_late_capture_matches_settled_fkey",
+    );
+    tx.rollback().await?;
+
+    // A payment in pounds, settled late in a batch in euros.
+    let pounds = settled_capture(&pool, "GBP", 10_000).await?;
+    let mut tx = runtime_transaction(&pool).await?;
+    let steps = settle_late(&mut tx, &pounds, None, line).await?;
+    let posting = post(&mut tx, "EUR", &entries).await?;
+    let err = insert_late_capture_match(&mut tx, (line, batch, 2), &pounds, steps, posting)
+        .await
+        .expect_err("a currency that is not the batch's");
+    assert_violation(
+        err,
+        FOREIGN_KEY_VIOLATION,
+        "settlement_late_capture_matches_currency_fkey",
+    );
+    tx.rollback().await?;
+
+    // The same payment, settled late as euros.
+    let mut tx = runtime_transaction(&pool).await?;
+    let steps = settle_late(&mut tx, &pounds, None, line).await?;
+    let posting = post(&mut tx, "EUR", &entries).await?;
+    let as_euros = Movement {
+        currency: "EUR",
+        ..pounds.clone()
+    };
+    let err = insert_late_capture_match(&mut tx, (line, batch, 2), &as_euros, steps, posting)
+        .await
+        .expect_err("a currency that is not the payment's");
+    assert_violation(
+        err,
+        FOREIGN_KEY_VIOLATION,
+        "settlement_late_capture_matches_payment_currency_fkey",
+    );
+    Ok(())
+}
+
+#[sqlx::test]
+async fn a_late_refund_match_agrees_with_its_line_and_its_steps(pool: PgPool) -> TestResult {
+    let euros = accounts(&pool, "EUR").await?;
+    let capture = settled_capture(&pool, "EUR", 10_000).await?;
+    let refund = later_movement(&pool, &capture, "refund", 3, 2_500).await?;
+    let (batch, line) = stray(&pool, &euros, 1, ("refund", (-2_500, 0, -2_500))).await?;
+    let (other_batch, other_line) =
+        stray(&pool, &euros, 2, ("refund", (-2_500, 0, -2_500))).await?;
+    let entries = [(euros.suspense, -2_500), (euros.receivable, 2_500)];
+
+    // The line of another discrepancy.
+    let mut tx = runtime_transaction(&pool).await?;
+    let steps = settle_late(&mut tx, &refund, None, line).await?;
+    let posting = post(&mut tx, "EUR", &entries).await?;
+    let err = insert_late_refund_match(&mut tx, (line, other_batch, 2), &refund, steps, posting)
+        .await
+        .expect_err("the line of another discrepancy");
+    assert_violation(
+        err,
+        FOREIGN_KEY_VIOLATION,
+        "settlement_late_refund_matches_unmatched_line_fkey",
+    );
+    tx.rollback().await?;
+
+    // A refund of another amount than the line's.
+    let other = settled_capture(&pool, "EUR", 10_000).await?;
+    let smaller = later_movement(&pool, &other, "refund", 3, 2_400).await?;
+    let mut tx = runtime_transaction(&pool).await?;
+    let steps = settle_late(&mut tx, &smaller, None, line).await?;
+    let posting = post(&mut tx, "EUR", &entries).await?;
+    let err = insert_late_refund_match(&mut tx, (line, batch, 2), &smaller, steps, posting)
+        .await
+        .expect_err("a refund of another amount");
+    assert_violation(
+        err,
+        FOREIGN_KEY_VIOLATION,
+        "settlement_late_refund_matches_line_fkey",
+    );
+    tx.rollback().await?;
+
+    // The line's gross, named with a fact of another amount.
+    let mut tx = runtime_transaction(&pool).await?;
+    let steps = settle_late(&mut tx, &smaller, None, line).await?;
+    let posting = post(&mut tx, "EUR", &entries).await?;
+    let as_the_line = Movement {
+        amount: 2_500,
+        ..smaller.clone()
+    };
+    let err = insert_late_refund_match(&mut tx, (line, batch, 2), &as_the_line, steps, posting)
+        .await
+        .expect_err("an amount that is not the fact's");
+    assert_violation(
+        err,
+        FOREIGN_KEY_VIOLATION,
+        "settlement_late_refund_matches_fact_fkey",
+    );
+    tx.rollback().await?;
+
+    // Another request than the one that the fact decided.
+    let mut tx = runtime_transaction(&pool).await?;
+    let steps = settle_late(&mut tx, &refund, None, line).await?;
+    let posting = post(&mut tx, "EUR", &entries).await?;
+    let other_request = Movement {
+        request: capture.request,
+        ..refund.clone()
+    };
+    let err = insert_late_refund_match(&mut tx, (line, batch, 2), &other_request, steps, posting)
+        .await
+        .expect_err("a request that the fact did not decide");
+    assert_violation(
+        err,
+        FOREIGN_KEY_VIOLATION,
+        "settlement_late_refund_matches_decision_fkey",
+    );
+    tx.rollback().await?;
+
+    // A refund in pounds, settled late in a batch in euros.
+    let pounds_capture = settled_capture(&pool, "GBP", 10_000).await?;
+    let pounds = later_movement(&pool, &pounds_capture, "refund", 3, 2_500).await?;
+    let mut tx = runtime_transaction(&pool).await?;
+    let steps = settle_late(&mut tx, &pounds, None, line).await?;
+    let posting = post(&mut tx, "EUR", &entries).await?;
+    let err = insert_late_refund_match(&mut tx, (line, batch, 2), &pounds, steps, posting)
+        .await
+        .expect_err("a currency that is not the batch's");
+    assert_violation(
+        err,
+        FOREIGN_KEY_VIOLATION,
+        "settlement_late_refund_matches_currency_fkey",
+    );
+    tx.rollback().await?;
+
+    // The same refund, settled late as euros.
+    let mut tx = runtime_transaction(&pool).await?;
+    let steps = settle_late(&mut tx, &pounds, None, line).await?;
+    let posting = post(&mut tx, "EUR", &entries).await?;
+    let as_euros = Movement {
+        currency: "EUR",
+        ..pounds.clone()
+    };
+    let err = insert_late_refund_match(&mut tx, (line, batch, 2), &as_euros, steps, posting)
+        .await
+        .expect_err("a currency that is not the payment's");
+    assert_violation(
+        err,
+        FOREIGN_KEY_VIOLATION,
+        "settlement_late_refund_matches_payment_currency_fkey",
+    );
+    tx.rollback().await?;
+
+    // A settle step for a settle_late one.
+    let mut tx = runtime_transaction(&pool).await?;
+    let open = MovementStep::open(&refund);
+    open.insert(&mut tx).await?;
+    let settle = open.then("settle", "settled");
+    settle.insert(&mut tx).await?;
+    let evidence = Uuid::now_v7();
+    insert_discrepancy_step(
+        &mut tx,
+        line,
+        (1, 0, evidence),
+        ("evidence", "open", "closed"),
+        "unmatched_line",
+    )
+    .await?;
+    let posting = post(&mut tx, "EUR", &entries).await?;
+    let err = insert_late_refund_match(
+        &mut tx,
+        (line, batch, 2),
+        &refund,
+        (settle.id, evidence),
+        posting,
+    )
+    .await
+    .expect_err("a settle step for a settle_late one");
+    assert_violation(
+        err,
+        FOREIGN_KEY_VIOLATION,
+        "settlement_late_refund_matches_step_fkey",
+    );
+    tx.rollback().await?;
+
+    // The evidence of another discrepancy.
+    let mut tx = runtime_transaction(&pool).await?;
+    let (step, _) = settle_late(&mut tx, &refund, None, line).await?;
+    let other_evidence = Uuid::now_v7();
+    insert_discrepancy_step(
+        &mut tx,
+        other_line,
+        (1, 0, other_evidence),
+        ("evidence", "open", "closed"),
+        "unmatched_line",
+    )
+    .await?;
+    let posting = post(&mut tx, "EUR", &entries).await?;
+    let err = insert_late_refund_match(
+        &mut tx,
+        (line, batch, 2),
+        &refund,
+        (step, other_evidence),
+        posting,
+    )
+    .await
+    .expect_err("the evidence of another discrepancy");
+    assert_violation(
+        err,
+        FOREIGN_KEY_VIOLATION,
+        "settlement_late_refund_matches_evidence_fkey",
+    );
+    tx.rollback().await?;
+
+    // The refund settles late, and another refund's line names its posting.
+    let mut tx = runtime_transaction(&pool).await?;
+    let steps = settle_late(&mut tx, &refund, None, line).await?;
+    let posting = post(&mut tx, "EUR", &entries).await?;
+    insert_late_refund_match(&mut tx, (line, batch, 2), &refund, steps, posting).await?;
+    commit(tx).await?;
+    let second = later_movement(&pool, &other, "refund", 4, 2_500).await?;
+    let mut tx = runtime_transaction(&pool).await?;
+    let steps = settle_late(&mut tx, &second, None, other_line).await?;
+    let err = insert_late_refund_match(
+        &mut tx,
+        (other_line, other_batch, 2),
+        &second,
+        steps,
+        posting,
+    )
+    .await
+    .expect_err("one posting for two lines");
+    assert_violation(
+        err,
+        UNIQUE_VIOLATION,
+        "settlement_late_refund_matches_ledger_transaction_id_key",
+    );
+    Ok(())
+}
+
+#[sqlx::test]
+async fn a_line_settles_late_once(pool: PgPool) -> TestResult {
+    let euros = accounts(&pool, "EUR").await?;
+    let capture = settled_capture(&pool, "EUR", 10_000).await?;
+    let (batch, line) = stray(&pool, &euros, 1, ("capture", (10_000, 165, 9_835))).await?;
+    let entries = [
+        (euros.suspense, 9_835),
+        (euros.fees, 165),
+        (euros.receivable, -10_000),
+    ];
+    let mut tx = runtime_transaction(&pool).await?;
+    let open = MovementStep::open(&capture);
+    open.insert(&mut tx).await?;
+    let settled = open.then("settle_late", "settled");
+    settled.insert(&mut tx).await?;
+    let evidence = Uuid::now_v7();
+    insert_discrepancy_step(
+        &mut tx,
+        line,
+        (1, 0, evidence),
+        ("evidence", "open", "closed"),
+        "unmatched_line",
+    )
+    .await?;
+    let posting = post(&mut tx, "EUR", &entries).await?;
+    insert_late_capture_match(
+        &mut tx,
+        (line, batch, 2),
+        &capture,
+        (settled.id, evidence),
+        posting,
+    )
+    .await?;
+    commit(tx).await?;
+
+    // The movement settles once, and the discrepancy closes once and takes no outcome after.
+    let mut tx = runtime_transaction(&pool).await?;
+    let err = settled
+        .then("settle_late", "settled")
+        .insert(&mut tx)
+        .await
+        .expect_err("a movement settled twice");
+    assert_violation(err, CHECK_VIOLATION, "settlement_movement_steps_edge_check");
+    tx.rollback().await?;
+    for (kind, to) in [("evidence", "closed"), ("claim", "claimed")] {
+        let mut tx = runtime_transaction(&pool).await?;
+        let err = insert_discrepancy_step(
+            &mut tx,
+            line,
+            (2, 1, Uuid::now_v7()),
+            (kind, "closed", to),
+            "unmatched_line",
+        )
+        .await
+        .expect_err("a move after the discrepancy closed");
+        assert_violation(
+            err,
+            CHECK_VIOLATION,
+            "settlement_discrepancy_steps_edge_check",
+        );
+        tx.rollback().await?;
+    }
+
+    // A second record of the line.
+    let mut tx = runtime_transaction(&pool).await?;
+    let again = post(&mut tx, "EUR", &entries).await?;
+    let err = insert_late_capture_match(
+        &mut tx,
+        (line, batch, 2),
+        &capture,
+        (settled.id, evidence),
+        again,
+    )
+    .await
+    .expect_err("a line settled late twice");
+    assert_violation(
+        err,
+        UNIQUE_VIOLATION,
+        "settlement_late_capture_matches_pkey",
+    );
+    tx.rollback().await?;
+
+    // Another payment's line, settled late by the first line's posting.
+    let other = settled_capture(&pool, "EUR", 10_000).await?;
+    let (other_batch, other_line) =
+        stray(&pool, &euros, 2, ("capture", (10_000, 165, 9_835))).await?;
+    let mut tx = runtime_transaction(&pool).await?;
+    let steps = settle_late(&mut tx, &other, None, other_line).await?;
+    let err = insert_late_capture_match(
+        &mut tx,
+        (other_line, other_batch, 2),
+        &other,
+        steps,
+        posting,
+    )
+    .await
+    .expect_err("one posting for two lines");
+    assert_violation(
+        err,
+        UNIQUE_VIOLATION,
+        "settlement_late_capture_matches_ledger_transaction_id_key",
+    );
+    tx.rollback().await?;
+
+    // A second capture of the first payment, settled late by that line: the payment's
+    // settled fact backs the first line already (ADR-0068).
+    let second = later_movement(&pool, &capture, "capture", 3, 10_000).await?;
+    let mut tx = runtime_transaction(&pool).await?;
+    let steps = settle_late(&mut tx, &second, None, other_line).await?;
+    let again = post(&mut tx, "EUR", &entries).await?;
+    let err =
+        insert_late_capture_match(&mut tx, (other_line, other_batch, 2), &second, steps, again)
+            .await
+            .expect_err("a settled fact that backs two lines");
+    assert_violation(
+        err,
+        UNIQUE_VIOLATION,
+        "settlement_late_capture_matches_settled_key",
+    );
+    Ok(())
+}
+
+#[sqlx::test]
+async fn a_fee_difference_on_a_line_settled_late_commits(pool: PgPool) -> TestResult {
+    let euros = accounts(&pool, "EUR").await?;
+    let capture = settled_capture(&pool, "EUR", 10_000).await?;
+    let (batch, line) = stray(&pool, &euros, 1, ("capture", (10_000, 170, 9_830))).await?;
+    let mut tx = runtime_transaction(&pool).await?;
+    let steps = settle_late(&mut tx, &capture, None, line).await?;
+    let posting = post(
+        &mut tx,
+        "EUR",
+        &[
+            (euros.suspense, 9_830),
+            (euros.fees, 170),
+            (euros.receivable, -10_000),
+        ],
+    )
+    .await?;
+    insert_late_capture_match(&mut tx, (line, batch, 2), &capture, steps, posting).await?;
+    // The terms give 165 (ADR-0068).
+    let fee = Uuid::now_v7();
+    insert_discrepancy(&mut tx, fee, "fee_difference").await?;
+    find(&mut tx, fee, "fee_difference").await?;
+    insert_fee_difference(&mut tx, fee, (batch, 2), (170, 165)).await?;
+    commit(tx).await?;
+
+    // On a refund line settled late, where the terms charge nothing.
+    let refund = later_movement(&pool, &capture, "refund", 3, 2_500).await?;
+    let (batch, line) = stray(&pool, &euros, 2, ("refund", (-2_500, 5, -2_505))).await?;
+    let mut tx = runtime_transaction(&pool).await?;
+    let steps = settle_late(&mut tx, &refund, None, line).await?;
+    let posting = post(
+        &mut tx,
+        "EUR",
+        &[
+            (euros.suspense, -2_505),
+            (euros.fees, 5),
+            (euros.receivable, 2_500),
+        ],
+    )
+    .await?;
+    insert_late_refund_match(&mut tx, (line, batch, 2), &refund, steps, posting).await?;
+    let fee = Uuid::now_v7();
+    insert_discrepancy(&mut tx, fee, "fee_difference").await?;
+    find(&mut tx, fee, "fee_difference").await?;
+    insert_fee_difference(&mut tx, fee, (batch, 2), (5, 0)).await?;
+    commit(tx).await?;
+    Ok(())
+}
+
+#[sqlx::test]
+async fn a_late_match_on_another_line_leaves_a_fee_difference_unmatched(
+    pool: PgPool,
+) -> TestResult {
+    let euros = accounts(&pool, "EUR").await?;
+    let capture = settled_capture(&pool, "EUR", 10_000).await?;
+
+    // Lines 2 and 3 of batch 1 settle nothing of ours when it is booked.
+    let (batch, line) = (Uuid::now_v7(), Uuid::now_v7());
+    let mut tx = runtime_transaction(&pool).await?;
+    insert_batch(&mut tx, batch, "EUR", 1, 19_665).await?;
+    insert_line(&mut tx, batch, 2, "capture", (10_000, 165, 9_835)).await?;
+    insert_line(&mut tx, batch, 3, "capture", (10_000, 170, 9_830)).await?;
+    let posting = post(
+        &mut tx,
+        "EUR",
+        &[(euros.payouts, 19_665), (euros.suspense, -19_665)],
+    )
+    .await?;
+    link_posting(&mut tx, batch, posting).await?;
+    insert_discrepancy(&mut tx, line, "unmatched_line").await?;
+    find(&mut tx, line, "unmatched_line").await?;
+    insert_unmatched_line(&mut tx, line, (batch, 2, 9_835)).await?;
+    commit(tx).await?;
+
+    // Line 2 settles late, and a fee's difference on line 3, which no match names, is
+    // neither booked nor checked (ADR-0068).
+    let mut tx = runtime_transaction(&pool).await?;
+    let steps = settle_late(&mut tx, &capture, None, line).await?;
+    let posting = post(
+        &mut tx,
+        "EUR",
+        &[
+            (euros.suspense, 9_835),
+            (euros.fees, 165),
+            (euros.receivable, -10_000),
+        ],
+    )
+    .await?;
+    insert_late_capture_match(&mut tx, (line, batch, 2), &capture, steps, posting).await?;
+    let fee = Uuid::now_v7();
+    insert_discrepancy(&mut tx, fee, "fee_difference").await?;
+    find(&mut tx, fee, "fee_difference").await?;
+    insert_fee_difference(&mut tx, fee, (batch, 3), (170, 165)).await?;
+    let err = commit_refused(tx).await;
+    assert_guard(
+        err,
+        NO_MATCH,
+        "settlement_fee_differences_commit_check",
+        "settlement_fee_differences",
+    );
+    Ok(())
+}
+
+#[sqlx::test]
+async fn a_payout_a_fee_or_a_posting_never_closes_on_evidence(pool: PgPool) -> TestResult {
+    let euros = accounts(&pool, "EUR").await?;
+    let found = found(&pool, &euros, 1).await?;
+    // From its finding, or after its acceptance.
+    for ((discrepancy, discrepancy_kind), accepted) in [
+        ((found.payout, "payout_difference"), false),
+        ((found.fee, "fee_difference"), false),
+        ((found.fee, "fee_difference"), true),
+        ((found.stray, "uncaused_posting"), false),
+        ((found.stray, "uncaused_posting"), true),
+    ] {
+        let mut tx = runtime_transaction(&pool).await?;
+        let (seq, prev_seq, from) = if accepted {
+            insert_discrepancy_step(
+                &mut tx,
+                discrepancy,
+                (1, 0, Uuid::now_v7()),
+                ("accept", "open", "accepted"),
+                discrepancy_kind,
+            )
+            .await?;
+            (2, 1, "accepted")
+        } else {
+            (1, 0, "open")
+        };
+        let err = insert_discrepancy_step(
+            &mut tx,
+            discrepancy,
+            (seq, prev_seq, Uuid::now_v7()),
+            ("evidence", from, "closed"),
+            discrepancy_kind,
+        )
+        .await
+        .expect_err("evidence for a discrepancy that no evidence closes");
+        assert_violation(
+            err,
+            CHECK_VIOLATION,
+            "settlement_discrepancy_steps_edge_check",
+        );
+        tx.rollback().await?;
+    }
+    Ok(())
+}
+
+#[sqlx::test]
+async fn a_late_match_never_changes(pool: PgPool) -> TestResult {
+    let euros = accounts(&pool, "EUR").await?;
+    let capture = settled_capture(&pool, "EUR", 10_000).await?;
+    let (batch, line) = stray(&pool, &euros, 1, ("capture", (10_000, 165, 9_835))).await?;
+    let mut tx = runtime_transaction(&pool).await?;
+    let steps = settle_late(&mut tx, &capture, None, line).await?;
+    let posting = post(
+        &mut tx,
+        "EUR",
+        &[
+            (euros.suspense, 9_835),
+            (euros.fees, 165),
+            (euros.receivable, -10_000),
+        ],
+    )
+    .await?;
+    insert_late_capture_match(&mut tx, (line, batch, 2), &capture, steps, posting).await?;
+    commit(tx).await?;
+    // A refund's as well, so that each table holds a row for its row trigger to refuse.
+    let refund = later_movement(&pool, &capture, "refund", 3, 2_500).await?;
+    let (batch, line) = stray(&pool, &euros, 2, ("refund", (-2_500, 5, -2_505))).await?;
+    let mut tx = runtime_transaction(&pool).await?;
+    let steps = settle_late(&mut tx, &refund, None, line).await?;
+    let posting = post(
+        &mut tx,
+        "EUR",
+        &[
+            (euros.suspense, -2_505),
+            (euros.fees, 5),
+            (euros.receivable, 2_500),
+        ],
+    )
+    .await?;
+    insert_late_refund_match(&mut tx, (line, batch, 2), &refund, steps, posting).await?;
+    commit(tx).await?;
+
+    // As the owner, each table's triggers refuse.
+    for (err, trigger, table) in [
+        (
+            sqlx::query!("DELETE FROM settlement_late_capture_matches")
+                .execute(&pool)
+                .await
+                .expect_err("append-only"),
+            "settlement_late_capture_matches_append_only",
+            "settlement_late_capture_matches",
+        ),
+        (
+            sqlx::query!("UPDATE settlement_late_capture_matches SET gross = gross")
+                .execute(&pool)
+                .await
+                .expect_err("append-only"),
+            "settlement_late_capture_matches_append_only",
+            "settlement_late_capture_matches",
+        ),
+        (
+            sqlx::query!("TRUNCATE settlement_late_capture_matches")
+                .execute(&pool)
+                .await
+                .expect_err("append-only"),
+            "settlement_late_capture_matches_no_truncate",
+            "settlement_late_capture_matches",
+        ),
+        (
+            sqlx::query!("DELETE FROM settlement_late_refund_matches")
+                .execute(&pool)
+                .await
+                .expect_err("append-only"),
+            "settlement_late_refund_matches_append_only",
+            "settlement_late_refund_matches",
+        ),
+        (
+            sqlx::query!("UPDATE settlement_late_refund_matches SET gross = gross")
+                .execute(&pool)
+                .await
+                .expect_err("append-only"),
+            "settlement_late_refund_matches_append_only",
+            "settlement_late_refund_matches",
+        ),
+        (
+            sqlx::query!("TRUNCATE settlement_late_refund_matches")
+                .execute(&pool)
+                .await
+                .expect_err("append-only"),
+            "settlement_late_refund_matches_no_truncate",
+            "settlement_late_refund_matches",
+        ),
+    ] {
+        assert_guard(err, APPEND_ONLY, trigger, table);
+    }
+
+    // As the system role, the privileges refuse first.
+    let mut tx = runtime_transaction(&pool).await?;
+    let err = sqlx::query!("DELETE FROM settlement_late_capture_matches")
         .execute(&mut *tx)
         .await
         .expect_err("no DELETE privilege");
