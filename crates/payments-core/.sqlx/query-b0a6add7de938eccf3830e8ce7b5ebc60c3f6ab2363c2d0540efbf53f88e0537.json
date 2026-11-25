@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE settlement_movement_reversals SET step_kind = step_kind",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "b0a6add7de938eccf3830e8ce7b5ebc60c3f6ab2363c2d0540efbf53f88e0537"
+}

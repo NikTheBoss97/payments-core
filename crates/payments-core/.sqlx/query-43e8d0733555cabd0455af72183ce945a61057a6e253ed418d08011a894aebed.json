@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO settlement_discrepancy_reversals (step_id, discrepancy_id, outcome_step_id, ledger_transaction_id) VALUES ($1, $2, $3, $4)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "43e8d0733555cabd0455af72183ce945a61057a6e253ed418d08011a894aebed"
+}

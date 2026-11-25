@@ -1,8 +1,9 @@
 // Author: Nicola Antonello
 
 //! Database tests for resolving discrepancies (ADR-0069, ADR-0072): an operator's outcome on
-//! a discrepancy whose chain is its own, and on an overdue movement, and a line that settles
-//! late, each with its posting, and the guards of I13 in PostgreSQL (ADR-0071).
+//! a discrepancy whose chain is its own, and on an overdue movement, a line that settles
+//! late, and the reversal of an outcome that its evidence follows, each with its posting,
+//! and the guards of I13 in PostgreSQL (ADR-0071).
 //!
 //! Rows are written with raw SQL as the system role, `payments_app`, the way a buggy code
 //! path or a manual session could write them. Each rejected write breaks a single rule.
@@ -16,10 +17,10 @@ mod common;
 
 use common::settlement::{
     Accounts, Movement, MovementStep, SETTLED_POSITION, accounts, batch_with_a_fee_off_the_terms,
-    find, insert_batch, insert_discrepancy, insert_discrepancy_step, insert_fee_difference,
-    insert_line, insert_missing_batch, insert_overdue_movement, insert_payout_difference,
-    insert_uncaused_posting, insert_unmatched_line, later_movement, link_posting, overdue, post,
-    settled_capture, uncaused,
+    find, insert_batch, insert_capture_match, insert_discrepancy, insert_discrepancy_step,
+    insert_fee_difference, insert_line, insert_missing_batch, insert_overdue_movement,
+    insert_payout_difference, insert_uncaused_posting, insert_unmatched_line, later_movement,
+    link_posting, overdue, post, settled_capture, uncaused,
 };
 use common::{
     APPEND_ONLY, CHECK_VIOLATION, FOREIGN_KEY_VIOLATION, INSUFFICIENT_PRIVILEGE, UNIQUE_VIOLATION,
@@ -715,8 +716,9 @@ async fn an_outcome_never_changes(pool: PgPool) -> TestResult {
             "settlement_discrepancy_outcome_postings_append_only",
             "settlement_discrepancy_outcome_postings",
         ),
+        // CASCADE, because reversals refer to the postings' links (ADR-0072).
         (
-            sqlx::query!("TRUNCATE settlement_discrepancy_outcome_postings")
+            sqlx::query!("TRUNCATE settlement_discrepancy_outcome_postings CASCADE")
                 .execute(&pool)
                 .await
                 .expect_err("append-only"),
@@ -1074,8 +1076,9 @@ async fn a_movement_outcome_never_changes(pool: PgPool) -> TestResult {
                 .expect_err("append-only"),
             "settlement_movement_outcomes_append_only",
         ),
+        // CASCADE, because reversals refer to the outcomes (ADR-0072).
         (
-            sqlx::query!("TRUNCATE settlement_movement_outcomes")
+            sqlx::query!("TRUNCATE settlement_movement_outcomes CASCADE")
                 .execute(&pool)
                 .await
                 .expect_err("append-only"),
@@ -2150,6 +2153,874 @@ async fn a_late_match_never_changes(pool: PgPool) -> TestResult {
     // As the system role, the privileges refuse first.
     let mut tx = runtime_transaction(&pool).await?;
     let err = sqlx::query!("DELETE FROM settlement_late_capture_matches")
+        .execute(&mut *tx)
+        .await
+        .expect_err("no DELETE privilege");
+    assert_eq!(sqlstate(err), INSUFFICIENT_PRIVILEGE);
+    Ok(())
+}
+
+/// The reversal of the movement outcome `outcome`, carried by `movement`'s step `step` of
+/// `step_kind`, with its posting.
+async fn insert_movement_reversal(
+    conn: &mut PgConnection,
+    (step, step_kind): (Uuid, &str),
+    movement: &Movement,
+    outcome: Uuid,
+    posting: Uuid,
+) -> sqlx::Result<()> {
+    sqlx::query!(
+        "INSERT INTO settlement_movement_reversals \
+             (step_id, payment_id, position, step_kind, outcome_step_id, ledger_transaction_id) \
+         VALUES ($1, $2, $3, $4, $5, $6)",
+        step,
+        movement.payment,
+        movement.position,
+        step_kind,
+        outcome,
+        posting
+    )
+    .execute(conn)
+    .await?;
+    Ok(())
+}
+
+/// The reversal of the outcome `outcome` of `discrepancy`, carried by its evidence step
+/// `step`, with its posting.
+async fn insert_discrepancy_reversal(
+    conn: &mut PgConnection,
+    (step, discrepancy): (Uuid, Uuid),
+    outcome: Uuid,
+    posting: Uuid,
+) -> sqlx::Result<()> {
+    sqlx::query!(
+        "INSERT INTO settlement_discrepancy_reversals \
+             (step_id, discrepancy_id, outcome_step_id, ledger_transaction_id) \
+         VALUES ($1, $2, $3, $4)",
+        step,
+        discrepancy,
+        outcome,
+        posting
+    )
+    .execute(conn)
+    .await?;
+    Ok(())
+}
+
+/// Finds `movement` overdue and records an operator's outcome of `kind` on it, with
+/// `entries` as its posting in EUR, and commits. Returns the outcome's step.
+async fn decided_overdue(
+    pool: &PgPool,
+    movement: &Movement,
+    (kind, to): (&'static str, &'static str),
+    entries: &[(Uuid, i64)],
+) -> sqlx::Result<MovementStep> {
+    let outcome = found_overdue(pool, movement).await?.then(kind, to);
+    let mut tx = runtime_transaction(pool).await?;
+    outcome.insert(&mut tx).await?;
+    let posting = post(&mut tx, "EUR", entries).await?;
+    insert_movement_outcome(&mut tx, &outcome, (kind, REASON), posting).await?;
+    tx.commit().await?;
+    Ok(outcome)
+}
+
+/// Books batch `number` in EUR whose one line, of 10,000 with a fee of 165, settles
+/// `capture` through `step`, in the transaction of `conn`, with its posting.
+async fn book_on_time(
+    conn: &mut PgConnection,
+    accounts: &Accounts,
+    number: i64,
+    (capture, step): (&Movement, &MovementStep),
+) -> sqlx::Result<()> {
+    let batch = Uuid::now_v7();
+    insert_batch(conn, batch, "EUR", number, 9_835).await?;
+    insert_line(conn, batch, 2, "capture", (10_000, 165, 9_835)).await?;
+    step.insert(conn).await?;
+    insert_capture_match(conn, batch, 2, capture, SETTLED_POSITION, step.id).await?;
+    let posting = post(
+        conn,
+        "EUR",
+        &[
+            (accounts.payouts, 9_835),
+            (accounts.fees, 165),
+            (accounts.receivable, -10_000),
+        ],
+    )
+    .await?;
+    link_posting(conn, batch, posting).await?;
+    Ok(())
+}
+
+/// Books batch `number` in EUR with a capture line of 10,000 with a fee of 165 that settles
+/// nothing of ours, records an operator's outcome of `kind` on it, which moves its net to
+/// `account`, with its posting, and commits. Returns the batch, the line's discrepancy and
+/// the outcome's step.
+async fn decided_line(
+    pool: &PgPool,
+    accounts: &Accounts,
+    number: i64,
+    (kind, to, account): (&'static str, &'static str, Uuid),
+) -> sqlx::Result<(Uuid, Uuid, Uuid)> {
+    let (batch, line) = stray(pool, accounts, number, ("capture", (10_000, 165, 9_835))).await?;
+    let mut tx = runtime_transaction(pool).await?;
+    let step = outcome(&mut tx, (line, "unmatched_line"), (kind, to), REASON).await?;
+    posts(
+        &mut tx,
+        (step, kind),
+        "EUR",
+        &[(accounts.suspense, 9_835), (account, -9_835)],
+    )
+    .await?;
+    tx.commit().await?;
+    Ok((batch, line, step))
+}
+
+/// Closes `line` of `batch`, which its outcome left `from`, by its late match with `capture`
+/// and `entries` as the match's posting, in the transaction of `conn`: the movement's `open`
+/// and `settle_late` steps, the line's `evidence` step and the late match. Returns the
+/// evidence step.
+async fn close_late(
+    conn: &mut PgConnection,
+    (line, batch): (Uuid, Uuid),
+    (capture, from): (&Movement, &str),
+    entries: &[(Uuid, i64)],
+) -> sqlx::Result<Uuid> {
+    let open = MovementStep::open(capture);
+    open.insert(conn).await?;
+    let late = open.then("settle_late", "settled");
+    late.insert(conn).await?;
+    let evidence = Uuid::now_v7();
+    insert_discrepancy_step(
+        conn,
+        line,
+        (2, 1, evidence),
+        ("evidence", from, "closed"),
+        "unmatched_line",
+    )
+    .await?;
+    let posting = post(conn, "EUR", entries).await?;
+    insert_late_capture_match(
+        conn,
+        (line, batch, 2),
+        capture,
+        (late.id, evidence),
+        posting,
+    )
+    .await?;
+    Ok(evidence)
+}
+
+#[sqlx::test]
+async fn an_outcome_that_evidence_follows_is_reversed(pool: PgPool) -> TestResult {
+    let euros = accounts(&pool, "EUR").await?;
+
+    // A claimed movement settles on time in a later batch, and the claim is reversed.
+    let capture = settled_capture(&pool, "EUR", 10_000).await?;
+    let claim = decided_overdue(
+        &pool,
+        &capture,
+        ("claim", "claimed"),
+        &[(euros.receivable, -10_000), (euros.claims, 10_000)],
+    )
+    .await?;
+    let settle = claim.then("settle", "settled");
+    let mut tx = runtime_transaction(&pool).await?;
+    book_on_time(&mut tx, &euros, 1, (&capture, &settle)).await?;
+    let reversal = post(
+        &mut tx,
+        "EUR",
+        &[(euros.receivable, 10_000), (euros.claims, -10_000)],
+    )
+    .await?;
+    insert_movement_reversal(&mut tx, (settle.id, "settle"), &capture, claim.id, reversal).await?;
+    commit(tx).await?;
+
+    // A movement written off settles late, and the write-off is reversed.
+    let other = settled_capture(&pool, "EUR", 10_000).await?;
+    let write_off = decided_overdue(
+        &pool,
+        &other,
+        ("write_off", "written_off"),
+        &[(euros.receivable, -10_000), (euros.writeoffs, 10_000)],
+    )
+    .await?;
+    let (batch, line) = stray(&pool, &euros, 2, ("capture", (10_000, 165, 9_835))).await?;
+    let mut tx = runtime_transaction(&pool).await?;
+    let (step, evidence) = settle_late(&mut tx, &other, Some(&write_off), line).await?;
+    let posting = post(
+        &mut tx,
+        "EUR",
+        &[
+            (euros.suspense, 9_835),
+            (euros.fees, 165),
+            (euros.receivable, -10_000),
+        ],
+    )
+    .await?;
+    insert_late_capture_match(&mut tx, (line, batch, 2), &other, (step, evidence), posting).await?;
+    let reversal = post(
+        &mut tx,
+        "EUR",
+        &[(euros.receivable, 10_000), (euros.writeoffs, -10_000)],
+    )
+    .await?;
+    insert_movement_reversal(
+        &mut tx,
+        (step, "settle_late"),
+        &other,
+        write_off.id,
+        reversal,
+    )
+    .await?;
+    commit(tx).await?;
+
+    // A claimed line settles late, and the line's claim is reversed.
+    let late_entries = [
+        (euros.suspense, 9_835),
+        (euros.fees, 165),
+        (euros.receivable, -10_000),
+    ];
+    let third = settled_capture(&pool, "EUR", 10_000).await?;
+    let (batch, line, claimed) =
+        decided_line(&pool, &euros, 3, ("claim", "claimed", euros.claims)).await?;
+    let mut tx = runtime_transaction(&pool).await?;
+    let evidence = close_late(&mut tx, (line, batch), (&third, "claimed"), &late_entries).await?;
+    let reversal = post(
+        &mut tx,
+        "EUR",
+        &[(euros.suspense, -9_835), (euros.claims, 9_835)],
+    )
+    .await?;
+    insert_discrepancy_reversal(&mut tx, (evidence, line), claimed, reversal).await?;
+    commit(tx).await?;
+
+    // A line written off settles late, and the line's write-off is reversed.
+    let fourth = settled_capture(&pool, "EUR", 10_000).await?;
+    let (batch, line, written_off) = decided_line(
+        &pool,
+        &euros,
+        4,
+        ("write_off", "written_off", euros.writeoffs),
+    )
+    .await?;
+    let mut tx = runtime_transaction(&pool).await?;
+    let evidence = close_late(
+        &mut tx,
+        (line, batch),
+        (&fourth, "written_off"),
+        &late_entries,
+    )
+    .await?;
+    let reversal = post(
+        &mut tx,
+        "EUR",
+        &[(euros.suspense, -9_835), (euros.writeoffs, 9_835)],
+    )
+    .await?;
+    insert_discrepancy_reversal(&mut tx, (evidence, line), written_off, reversal).await?;
+    commit(tx).await?;
+
+    // A claimed movement settles late, and the claim is reversed.
+    let fifth = settled_capture(&pool, "EUR", 10_000).await?;
+    let fifth_claim = decided_overdue(
+        &pool,
+        &fifth,
+        ("claim", "claimed"),
+        &[(euros.receivable, -10_000), (euros.claims, 10_000)],
+    )
+    .await?;
+    let (batch, line) = stray(&pool, &euros, 5, ("capture", (10_000, 165, 9_835))).await?;
+    let mut tx = runtime_transaction(&pool).await?;
+    let (step, evidence) = settle_late(&mut tx, &fifth, Some(&fifth_claim), line).await?;
+    let posting = post(&mut tx, "EUR", &late_entries).await?;
+    insert_late_capture_match(&mut tx, (line, batch, 2), &fifth, (step, evidence), posting).await?;
+    let reversal = post(
+        &mut tx,
+        "EUR",
+        &[(euros.receivable, 10_000), (euros.claims, -10_000)],
+    )
+    .await?;
+    insert_movement_reversal(
+        &mut tx,
+        (step, "settle_late"),
+        &fifth,
+        fifth_claim.id,
+        reversal,
+    )
+    .await?;
+    commit(tx).await?;
+
+    // A movement written off settles on time in a later batch, and the write-off is reversed.
+    let sixth = settled_capture(&pool, "EUR", 10_000).await?;
+    let sixth_write_off = decided_overdue(
+        &pool,
+        &sixth,
+        ("write_off", "written_off"),
+        &[(euros.receivable, -10_000), (euros.writeoffs, 10_000)],
+    )
+    .await?;
+    let sixth_settle = sixth_write_off.then("settle", "settled");
+    let mut tx = runtime_transaction(&pool).await?;
+    book_on_time(&mut tx, &euros, 6, (&sixth, &sixth_settle)).await?;
+    let reversal = post(
+        &mut tx,
+        "EUR",
+        &[(euros.receivable, 10_000), (euros.writeoffs, -10_000)],
+    )
+    .await?;
+    insert_movement_reversal(
+        &mut tx,
+        (sixth_settle.id, "settle"),
+        &sixth,
+        sixth_write_off.id,
+        reversal,
+    )
+    .await?;
+    commit(tx).await?;
+    Ok(())
+}
+
+#[sqlx::test]
+async fn a_reversal_is_exactly_its_outcomes_mirror(pool: PgPool) -> TestResult {
+    let euros = accounts(&pool, "EUR").await?;
+    let pounds = accounts(&pool, "GBP").await?;
+    let capture = settled_capture(&pool, "EUR", 10_000).await?;
+    let claim = decided_overdue(
+        &pool,
+        &capture,
+        ("claim", "claimed"),
+        &[(euros.receivable, -10_000), (euros.claims, 10_000)],
+    )
+    .await?;
+    let settle = claim.then("settle", "settled");
+    let mut tx = runtime_transaction(&pool).await?;
+    let earlier = post(
+        &mut tx,
+        "EUR",
+        &[(euros.receivable, 10_000), (euros.claims, -10_000)],
+    )
+    .await?;
+    tx.commit().await?;
+
+    // Each posting balances, so only LG010 can refuse it.
+    for (currency, entries) in [
+        // The outcome's lines again, not mirrored.
+        (
+            "EUR",
+            vec![(euros.receivable, -10_000), (euros.claims, 10_000)],
+        ),
+        // One too little.
+        (
+            "EUR",
+            vec![(euros.receivable, 9_999), (euros.claims, -9_999)],
+        ),
+        // Two entries more.
+        (
+            "EUR",
+            vec![
+                (euros.receivable, 10_000),
+                (euros.claims, -10_000),
+                (euros.receivable, 1),
+                (euros.claims, -1),
+            ],
+        ),
+        // The right amounts, in another currency.
+        (
+            "GBP",
+            vec![(pounds.receivable, 10_000), (pounds.claims, -10_000)],
+        ),
+    ] {
+        let mut tx = runtime_transaction(&pool).await?;
+        book_on_time(&mut tx, &euros, 1, (&capture, &settle)).await?;
+        let reversal = post(&mut tx, currency, &entries).await?;
+        insert_movement_reversal(&mut tx, (settle.id, "settle"), &capture, claim.id, reversal)
+            .await?;
+        let err = commit_refused(tx).await;
+        assert_guard(
+            err,
+            NOT_ITS_LINES,
+            "settlement_movement_reversals_commit_check",
+            "settlement_movement_reversals",
+        );
+    }
+
+    // The right mirror, committed before.
+    let mut tx = runtime_transaction(&pool).await?;
+    book_on_time(&mut tx, &euros, 1, (&capture, &settle)).await?;
+    insert_movement_reversal(&mut tx, (settle.id, "settle"), &capture, claim.id, earlier).await?;
+    let err = commit_refused(tx).await;
+    assert_guard(
+        err,
+        NOT_ITS_LINES,
+        "settlement_movement_reversals_commit_check",
+        "settlement_movement_reversals",
+    );
+    Ok(())
+}
+
+#[sqlx::test]
+async fn a_step_after_a_posted_outcome_needs_its_reversal(pool: PgPool) -> TestResult {
+    let euros = accounts(&pool, "EUR").await?;
+
+    // A claimed movement settled without its claim reversed.
+    let capture = settled_capture(&pool, "EUR", 10_000).await?;
+    let claim = decided_overdue(
+        &pool,
+        &capture,
+        ("claim", "claimed"),
+        &[(euros.receivable, -10_000), (euros.claims, 10_000)],
+    )
+    .await?;
+    let mut tx = runtime_transaction(&pool).await?;
+    book_on_time(
+        &mut tx,
+        &euros,
+        1,
+        (&capture, &claim.then("settle", "settled")),
+    )
+    .await?;
+    let err = commit_refused(tx).await;
+    assert_guard(
+        err,
+        NO_RECORD,
+        "settlement_movement_steps_record_check",
+        "settlement_movement_steps",
+    );
+
+    // A claimed line closed by its late match without its claim reversed.
+    let late_entries = [
+        (euros.suspense, 9_835),
+        (euros.fees, 165),
+        (euros.receivable, -10_000),
+    ];
+    let other = settled_capture(&pool, "EUR", 10_000).await?;
+    let (batch, line, _) =
+        decided_line(&pool, &euros, 2, ("claim", "claimed", euros.claims)).await?;
+    let mut tx = runtime_transaction(&pool).await?;
+    close_late(&mut tx, (line, batch), (&other, "claimed"), &late_entries).await?;
+    let err = commit_refused(tx).await;
+    assert_guard(
+        err,
+        NO_RECORD,
+        "settlement_discrepancy_steps_record_check",
+        "settlement_discrepancy_steps",
+    );
+
+    // A movement written off and settled late without its write-off reversed.
+    let third = settled_capture(&pool, "EUR", 10_000).await?;
+    let write_off = decided_overdue(
+        &pool,
+        &third,
+        ("write_off", "written_off"),
+        &[(euros.receivable, -10_000), (euros.writeoffs, 10_000)],
+    )
+    .await?;
+    let (batch, line) = stray(&pool, &euros, 3, ("capture", (10_000, 165, 9_835))).await?;
+    let mut tx = runtime_transaction(&pool).await?;
+    let steps = settle_late(&mut tx, &third, Some(&write_off), line).await?;
+    let posting = post(&mut tx, "EUR", &late_entries).await?;
+    insert_late_capture_match(&mut tx, (line, batch, 2), &third, steps, posting).await?;
+    let err = commit_refused(tx).await;
+    assert_guard(
+        err,
+        NO_RECORD,
+        "settlement_movement_steps_record_check",
+        "settlement_movement_steps",
+    );
+
+    // After a claim that moved nothing, so posted nothing, a line closes with nothing to
+    // reverse.
+    let small = settled_capture(&pool, "EUR", 25).await?;
+    let (batch, line) = (Uuid::now_v7(), Uuid::now_v7());
+    let mut tx = runtime_transaction(&pool).await?;
+    insert_batch(&mut tx, batch, "EUR", 4, 0).await?;
+    insert_line(&mut tx, batch, 2, "capture", (25, 25, 0)).await?;
+    insert_discrepancy(&mut tx, line, "unmatched_line").await?;
+    find(&mut tx, line, "unmatched_line").await?;
+    insert_unmatched_line(&mut tx, line, (batch, 2, 0)).await?;
+    outcome(
+        &mut tx,
+        (line, "unmatched_line"),
+        ("claim", "claimed"),
+        REASON,
+    )
+    .await?;
+    commit(tx).await?;
+    let mut tx = runtime_transaction(&pool).await?;
+    close_late(
+        &mut tx,
+        (line, batch),
+        (&small, "claimed"),
+        &[(euros.fees, 25), (euros.receivable, -25)],
+    )
+    .await?;
+    commit(tx).await?;
+    Ok(())
+}
+
+#[sqlx::test]
+async fn a_reversal_names_an_outcome_of_its_own_that_posted(pool: PgPool) -> TestResult {
+    let euros = accounts(&pool, "EUR").await?;
+    let capture = settled_capture(&pool, "EUR", 10_000).await?;
+    let other = settled_capture(&pool, "EUR", 10_000).await?;
+    let entries = [(euros.receivable, -10_000), (euros.claims, 10_000)];
+    let claim = decided_overdue(&pool, &capture, ("claim", "claimed"), &entries).await?;
+    let other_claim = decided_overdue(&pool, &other, ("claim", "claimed"), &entries).await?;
+    let settle = claim.then("settle", "settled");
+    let mirror = [(euros.receivable, 10_000), (euros.claims, -10_000)];
+
+    // Another movement's outcome.
+    let mut tx = runtime_transaction(&pool).await?;
+    book_on_time(&mut tx, &euros, 1, (&capture, &settle)).await?;
+    let reversal = post(&mut tx, "EUR", &mirror).await?;
+    let err = insert_movement_reversal(
+        &mut tx,
+        (settle.id, "settle"),
+        &capture,
+        other_claim.id,
+        reversal,
+    )
+    .await
+    .expect_err("another movement's outcome");
+    assert_violation(
+        err,
+        FOREIGN_KEY_VIOLATION,
+        "settlement_movement_reversals_outcome_fkey",
+    );
+    tx.rollback().await?;
+
+    // Carried by a step that settles nothing.
+    let mut tx = runtime_transaction(&pool).await?;
+    book_on_time(&mut tx, &euros, 1, (&capture, &settle)).await?;
+    let reversal = post(&mut tx, "EUR", &mirror).await?;
+    let err = insert_movement_reversal(&mut tx, (settle.id, "claim"), &capture, claim.id, reversal)
+        .await
+        .expect_err("a step that settles nothing");
+    assert_violation(
+        err,
+        CHECK_VIOLATION,
+        "settlement_movement_reversals_step_kind_check",
+    );
+    tx.rollback().await?;
+
+    // Named with a kind that is not its step's.
+    let mut tx = runtime_transaction(&pool).await?;
+    book_on_time(&mut tx, &euros, 1, (&capture, &settle)).await?;
+    let reversal = post(&mut tx, "EUR", &mirror).await?;
+    let err = insert_movement_reversal(
+        &mut tx,
+        (settle.id, "settle_late"),
+        &capture,
+        claim.id,
+        reversal,
+    )
+    .await
+    .expect_err("a kind that is not its step's");
+    assert_violation(
+        err,
+        FOREIGN_KEY_VIOLATION,
+        "settlement_movement_reversals_step_fkey",
+    );
+    tx.rollback().await?;
+
+    // Carried by another movement's step.
+    let mut tx = runtime_transaction(&pool).await?;
+    book_on_time(&mut tx, &euros, 1, (&capture, &settle)).await?;
+    let reversal = post(&mut tx, "EUR", &mirror).await?;
+    let err = insert_movement_reversal(
+        &mut tx,
+        (settle.id, "settle"),
+        &other,
+        other_claim.id,
+        reversal,
+    )
+    .await
+    .expect_err("another movement's step");
+    assert_violation(
+        err,
+        FOREIGN_KEY_VIOLATION,
+        "settlement_movement_reversals_step_fkey",
+    );
+    tx.rollback().await?;
+
+    // A line's claim that moved nothing, so posted nothing to reverse.
+    let (batch, line) = (Uuid::now_v7(), Uuid::now_v7());
+    let mut tx = runtime_transaction(&pool).await?;
+    insert_batch(&mut tx, batch, "EUR", 2, 0).await?;
+    insert_line(&mut tx, batch, 2, "capture", (25, 25, 0)).await?;
+    insert_discrepancy(&mut tx, line, "unmatched_line").await?;
+    find(&mut tx, line, "unmatched_line").await?;
+    insert_unmatched_line(&mut tx, line, (batch, 2, 0)).await?;
+    commit(tx).await?;
+    let mut tx = runtime_transaction(&pool).await?;
+    let claimed = outcome(
+        &mut tx,
+        (line, "unmatched_line"),
+        ("claim", "claimed"),
+        REASON,
+    )
+    .await?;
+    commit(tx).await?;
+    let mut tx = runtime_transaction(&pool).await?;
+    let evidence = Uuid::now_v7();
+    insert_discrepancy_step(
+        &mut tx,
+        line,
+        (2, 1, evidence),
+        ("evidence", "claimed", "closed"),
+        "unmatched_line",
+    )
+    .await?;
+    let reversal = post(&mut tx, "EUR", &[(euros.suspense, 1), (euros.claims, -1)]).await?;
+    let err = insert_discrepancy_reversal(&mut tx, (evidence, line), claimed, reversal)
+        .await
+        .expect_err("a claim that posted nothing");
+    assert_violation(
+        err,
+        FOREIGN_KEY_VIOLATION,
+        "settlement_discrepancy_reversals_posting_fkey",
+    );
+    tx.rollback().await?;
+
+    // Two lines claimed, each with its posting, and the first closed by its late match.
+    let late_entries = [
+        (euros.suspense, 9_835),
+        (euros.fees, 165),
+        (euros.receivable, -10_000),
+    ];
+    let line_mirror = [(euros.suspense, -9_835), (euros.claims, 9_835)];
+    let (first_batch, first, first_claim) =
+        decided_line(&pool, &euros, 3, ("claim", "claimed", euros.claims)).await?;
+    let (_, _, second_claim) =
+        decided_line(&pool, &euros, 4, ("claim", "claimed", euros.claims)).await?;
+    let third = settled_capture(&pool, "EUR", 10_000).await?;
+
+    // Carried by the claim's step instead of the evidence.
+    let mut tx = runtime_transaction(&pool).await?;
+    close_late(
+        &mut tx,
+        (first, first_batch),
+        (&third, "claimed"),
+        &late_entries,
+    )
+    .await?;
+    let reversal = post(&mut tx, "EUR", &line_mirror).await?;
+    let err = insert_discrepancy_reversal(&mut tx, (first_claim, first), first_claim, reversal)
+        .await
+        .expect_err("a step that is not evidence");
+    assert_violation(
+        err,
+        FOREIGN_KEY_VIOLATION,
+        "settlement_discrepancy_reversals_step_fkey",
+    );
+    tx.rollback().await?;
+
+    // Another line's claim.
+    let mut tx = runtime_transaction(&pool).await?;
+    let evidence = close_late(
+        &mut tx,
+        (first, first_batch),
+        (&third, "claimed"),
+        &late_entries,
+    )
+    .await?;
+    let reversal = post(&mut tx, "EUR", &line_mirror).await?;
+    let err = insert_discrepancy_reversal(&mut tx, (evidence, first), second_claim, reversal)
+        .await
+        .expect_err("another discrepancy's outcome");
+    assert_violation(
+        err,
+        FOREIGN_KEY_VIOLATION,
+        "settlement_discrepancy_reversals_outcome_fkey",
+    );
+    Ok(())
+}
+
+#[sqlx::test]
+async fn each_reversal_has_a_posting_of_its_own(pool: PgPool) -> TestResult {
+    let euros = accounts(&pool, "EUR").await?;
+
+    // Two claimed movements of one amount settle in turn, and the second's reversal names the
+    // first's posting, which mirrors its claim as well.
+    let entries = [(euros.receivable, -10_000), (euros.claims, 10_000)];
+    let mirror = [(euros.receivable, 10_000), (euros.claims, -10_000)];
+    let capture = settled_capture(&pool, "EUR", 10_000).await?;
+    let other = settled_capture(&pool, "EUR", 10_000).await?;
+    let claim = decided_overdue(&pool, &capture, ("claim", "claimed"), &entries).await?;
+    let other_claim = decided_overdue(&pool, &other, ("claim", "claimed"), &entries).await?;
+    let settle = claim.then("settle", "settled");
+    let mut tx = runtime_transaction(&pool).await?;
+    book_on_time(&mut tx, &euros, 1, (&capture, &settle)).await?;
+    let reversal = post(&mut tx, "EUR", &mirror).await?;
+    insert_movement_reversal(&mut tx, (settle.id, "settle"), &capture, claim.id, reversal).await?;
+    commit(tx).await?;
+    let other_settle = other_claim.then("settle", "settled");
+    let mut tx = runtime_transaction(&pool).await?;
+    book_on_time(&mut tx, &euros, 2, (&other, &other_settle)).await?;
+    let err = insert_movement_reversal(
+        &mut tx,
+        (other_settle.id, "settle"),
+        &other,
+        other_claim.id,
+        reversal,
+    )
+    .await
+    .expect_err("one posting for two reversals");
+    assert_violation(
+        err,
+        UNIQUE_VIOLATION,
+        "settlement_movement_reversals_ledger_transaction_id_key",
+    );
+    tx.rollback().await?;
+
+    // Two claimed lines of one net close in turn, likewise.
+    let late_entries = [
+        (euros.suspense, 9_835),
+        (euros.fees, 165),
+        (euros.receivable, -10_000),
+    ];
+    let line_mirror = [(euros.suspense, -9_835), (euros.claims, 9_835)];
+    let (first_batch, first, first_claim) =
+        decided_line(&pool, &euros, 3, ("claim", "claimed", euros.claims)).await?;
+    let (second_batch, second, second_claim) =
+        decided_line(&pool, &euros, 4, ("claim", "claimed", euros.claims)).await?;
+    let third = settled_capture(&pool, "EUR", 10_000).await?;
+    let fourth = settled_capture(&pool, "EUR", 10_000).await?;
+    let mut tx = runtime_transaction(&pool).await?;
+    let evidence = close_late(
+        &mut tx,
+        (first, first_batch),
+        (&third, "claimed"),
+        &late_entries,
+    )
+    .await?;
+    let reversal = post(&mut tx, "EUR", &line_mirror).await?;
+    insert_discrepancy_reversal(&mut tx, (evidence, first), first_claim, reversal).await?;
+    commit(tx).await?;
+    let mut tx = runtime_transaction(&pool).await?;
+    let evidence = close_late(
+        &mut tx,
+        (second, second_batch),
+        (&fourth, "claimed"),
+        &late_entries,
+    )
+    .await?;
+    let err = insert_discrepancy_reversal(&mut tx, (evidence, second), second_claim, reversal)
+        .await
+        .expect_err("one posting for two reversals");
+    assert_violation(
+        err,
+        UNIQUE_VIOLATION,
+        "settlement_discrepancy_reversals_ledger_transaction_id_key",
+    );
+    Ok(())
+}
+
+#[sqlx::test]
+async fn a_reversal_never_changes(pool: PgPool) -> TestResult {
+    let euros = accounts(&pool, "EUR").await?;
+    let capture = settled_capture(&pool, "EUR", 10_000).await?;
+    let claim = decided_overdue(
+        &pool,
+        &capture,
+        ("claim", "claimed"),
+        &[(euros.receivable, -10_000), (euros.claims, 10_000)],
+    )
+    .await?;
+    let settle = claim.then("settle", "settled");
+    let mut tx = runtime_transaction(&pool).await?;
+    book_on_time(&mut tx, &euros, 1, (&capture, &settle)).await?;
+    let reversal = post(
+        &mut tx,
+        "EUR",
+        &[(euros.receivable, 10_000), (euros.claims, -10_000)],
+    )
+    .await?;
+    insert_movement_reversal(&mut tx, (settle.id, "settle"), &capture, claim.id, reversal).await?;
+    commit(tx).await?;
+    // A line's claim reversed as well, so that each table holds a row for its row trigger to
+    // refuse.
+    let other = settled_capture(&pool, "EUR", 10_000).await?;
+    let (batch, line, claimed) =
+        decided_line(&pool, &euros, 2, ("claim", "claimed", euros.claims)).await?;
+    let mut tx = runtime_transaction(&pool).await?;
+    let evidence = close_late(
+        &mut tx,
+        (line, batch),
+        (&other, "claimed"),
+        &[
+            (euros.suspense, 9_835),
+            (euros.fees, 165),
+            (euros.receivable, -10_000),
+        ],
+    )
+    .await?;
+    let reversal = post(
+        &mut tx,
+        "EUR",
+        &[(euros.suspense, -9_835), (euros.claims, 9_835)],
+    )
+    .await?;
+    insert_discrepancy_reversal(&mut tx, (evidence, line), claimed, reversal).await?;
+    commit(tx).await?;
+
+    // As the owner, each table's triggers refuse.
+    for (err, trigger, table) in [
+        (
+            sqlx::query!("DELETE FROM settlement_movement_reversals")
+                .execute(&pool)
+                .await
+                .expect_err("append-only"),
+            "settlement_movement_reversals_append_only",
+            "settlement_movement_reversals",
+        ),
+        (
+            sqlx::query!("UPDATE settlement_movement_reversals SET step_kind = step_kind")
+                .execute(&pool)
+                .await
+                .expect_err("append-only"),
+            "settlement_movement_reversals_append_only",
+            "settlement_movement_reversals",
+        ),
+        (
+            sqlx::query!("TRUNCATE settlement_movement_reversals")
+                .execute(&pool)
+                .await
+                .expect_err("append-only"),
+            "settlement_movement_reversals_no_truncate",
+            "settlement_movement_reversals",
+        ),
+        (
+            sqlx::query!("DELETE FROM settlement_discrepancy_reversals")
+                .execute(&pool)
+                .await
+                .expect_err("append-only"),
+            "settlement_discrepancy_reversals_append_only",
+            "settlement_discrepancy_reversals",
+        ),
+        (
+            sqlx::query!("UPDATE settlement_discrepancy_reversals SET step_id = step_id")
+                .execute(&pool)
+                .await
+                .expect_err("append-only"),
+            "settlement_discrepancy_reversals_append_only",
+            "settlement_discrepancy_reversals",
+        ),
+        (
+            sqlx::query!("TRUNCATE settlement_discrepancy_reversals")
+                .execute(&pool)
+                .await
+                .expect_err("append-only"),
+            "settlement_discrepancy_reversals_no_truncate",
+            "settlement_discrepancy_reversals",
+        ),
+    ] {
+        assert_guard(err, APPEND_ONLY, trigger, table);
+    }
+
+    // As the system role, the privileges refuse first.
+    let mut tx = runtime_transaction(&pool).await?;
+    let err = sqlx::query!("DELETE FROM settlement_movement_reversals")
         .execute(&mut *tx)
         .await
         .expect_err("no DELETE privilege");

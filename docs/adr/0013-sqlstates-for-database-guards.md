@@ -127,6 +127,12 @@ constraints use one code per kind of constraint, such as `23514` for every
   posting is not its line's; `LG011` refuses a `settle_late` step and a line's
   evidence step without their late match; and `LG013` counts a late match as
   the match that a fee's difference needs (ADR-0069).
+- 2026-11-25: `LG010` is raised as well by
+  `settlement_movement_reversals_commit_check` and
+  `settlement_discrepancy_reversals_commit_check`, for a reversal whose
+  posting is not its outcome's mirrored; and `LG011` refuses a step that
+  settles a movement after its outcome, or closes a line after an outcome that
+  posted, without its reversal (ADR-0069).
 
 ## References
 

@@ -164,3 +164,8 @@ The owner chose the first of each.
 - 2026-11-25: `settlement_unmatched_lines` gains `(discrepancy_id, batch_id, line_no)`
   unique, the target of a late match's key, which ties the late match to its line's
   discrepancy.
+- 2026-11-25: `settlement_movement_outcomes` gains `(step_id, payment_id, position)` unique
+  and `settlement_discrepancy_outcomes` `(step_id, discrepancy_id)` unique, the targets of a
+  reversal's key to an outcome of its own subject. A discrepancy's reversal also names its
+  outcome's posting link, so that only an outcome that posted is reversed, and a movement's
+  reversal carries its step's kind, `settle` or `settle_late`.
