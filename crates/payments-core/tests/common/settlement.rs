@@ -450,3 +450,254 @@ pub async fn link_posting(conn: &mut PgConnection, batch: Uuid, posting: Uuid) -
     .await?;
     Ok(())
 }
+
+/// A discrepancy of `kind`, as the system role writes it.
+pub async fn insert_discrepancy(conn: &mut PgConnection, id: Uuid, kind: &str) -> sqlx::Result<()> {
+    sqlx::query!(
+        "INSERT INTO settlement_discrepancies (id, kind) VALUES ($1, $2)",
+        id,
+        kind
+    )
+    .execute(conn)
+    .await?;
+    Ok(())
+}
+
+/// A step of a discrepancy's chain.
+pub async fn insert_discrepancy_step(
+    conn: &mut PgConnection,
+    discrepancy: Uuid,
+    (seq, prev_seq, id): (i32, i32, Uuid),
+    (kind, from, to): (&str, &str, &str),
+    discrepancy_kind: &str,
+) -> sqlx::Result<()> {
+    sqlx::query!(
+        "INSERT INTO settlement_discrepancy_steps \
+             (discrepancy_id, seq, prev_seq, id, kind, from_state, to_state, discrepancy_kind) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+        discrepancy,
+        seq,
+        prev_seq,
+        id,
+        kind,
+        from,
+        to,
+        discrepancy_kind
+    )
+    .execute(conn)
+    .await?;
+    Ok(())
+}
+
+/// The first step of a discrepancy of `kind`.
+pub async fn find(conn: &mut PgConnection, discrepancy: Uuid, kind: &str) -> sqlx::Result<()> {
+    insert_discrepancy_step(
+        conn,
+        discrepancy,
+        (0, 0, Uuid::now_v7()),
+        ("find", "open", "open"),
+        kind,
+    )
+    .await
+}
+
+/// The subject of a discrepancy about a line that settles nothing of ours.
+pub async fn insert_unmatched_line(
+    conn: &mut PgConnection,
+    discrepancy: Uuid,
+    (batch, line_no, net): (Uuid, i32, i64),
+) -> sqlx::Result<()> {
+    sqlx::query!(
+        "INSERT INTO settlement_unmatched_lines (discrepancy_id, batch_id, line_no, net) \
+         VALUES ($1, $2, $3, $4)",
+        discrepancy,
+        batch,
+        line_no,
+        net
+    )
+    .execute(conn)
+    .await?;
+    Ok(())
+}
+
+/// The subject of a discrepancy about a payout that differs from its nets.
+pub async fn insert_payout_difference(
+    conn: &mut PgConnection,
+    discrepancy: Uuid,
+    batch: Uuid,
+    amount: i64,
+) -> sqlx::Result<()> {
+    sqlx::query!(
+        "INSERT INTO settlement_payout_differences (discrepancy_id, batch_id, amount) \
+         VALUES ($1, $2, $3)",
+        discrepancy,
+        batch,
+        amount
+    )
+    .execute(conn)
+    .await?;
+    Ok(())
+}
+
+/// The subject of a discrepancy about a fee off the agreed terms.
+pub async fn insert_fee_difference(
+    conn: &mut PgConnection,
+    discrepancy: Uuid,
+    (batch, line_no): (Uuid, i32),
+    (charged, agreed): (i64, i64),
+) -> sqlx::Result<()> {
+    sqlx::query!(
+        "INSERT INTO settlement_fee_differences \
+             (discrepancy_id, batch_id, line_no, charged, agreed) \
+         VALUES ($1, $2, $3, $4, $5)",
+        discrepancy,
+        batch,
+        line_no,
+        charged,
+        agreed
+    )
+    .execute(conn)
+    .await?;
+    Ok(())
+}
+
+/// The subject of a discrepancy about a missing batch.
+pub async fn insert_missing_batch(
+    conn: &mut PgConnection,
+    discrepancy: Uuid,
+    (psp, currency, number): (&str, &str, i64),
+    cause: &str,
+) -> sqlx::Result<()> {
+    sqlx::query!(
+        "INSERT INTO settlement_missing_batches \
+             (discrepancy_id, psp, currency, number, cause) \
+         VALUES ($1, $2, $3, $4, $5)",
+        discrepancy,
+        psp,
+        currency,
+        number,
+        cause
+    )
+    .execute(conn)
+    .await?;
+    Ok(())
+}
+
+/// The subject of an overdue movement's discrepancy, the record of its overdue `step`.
+pub async fn insert_overdue_movement(
+    conn: &mut PgConnection,
+    discrepancy: Uuid,
+    step: &MovementStep,
+    as_of: &str,
+) -> sqlx::Result<()> {
+    sqlx::query!(
+        "INSERT INTO settlement_overdue_movements \
+             (discrepancy_id, payment_id, position, step_id, as_of) \
+         VALUES ($1, $2, $3, $4, $5::text::timestamptz)",
+        discrepancy,
+        step.payment,
+        step.position,
+        step.id,
+        as_of
+    )
+    .execute(conn)
+    .await?;
+    Ok(())
+}
+
+/// The subject of a discrepancy about a posting that nothing causes.
+pub async fn insert_uncaused_posting(
+    conn: &mut PgConnection,
+    discrepancy: Uuid,
+    posting: Uuid,
+) -> sqlx::Result<()> {
+    sqlx::query!(
+        "INSERT INTO settlement_uncaused_postings (discrepancy_id, ledger_transaction_id) \
+         VALUES ($1, $2)",
+        discrepancy,
+        posting
+    )
+    .execute(conn)
+    .await?;
+    Ok(())
+}
+
+/// Writes batch `number` in EUR with one line of 500, a fee of 32 and a net of 468 that
+/// settles nothing of ours, and its posting. Returns the batch.
+pub async fn batch_with_a_stray_line(
+    conn: &mut PgConnection,
+    accounts: &Accounts,
+    number: i64,
+) -> sqlx::Result<Uuid> {
+    let batch = Uuid::now_v7();
+    insert_batch(conn, batch, "EUR", number, 468).await?;
+    insert_line(conn, batch, 2, "capture", (500, 32, 468)).await?;
+    let posting = post(
+        conn,
+        "EUR",
+        &[(accounts.payouts, 468), (accounts.suspense, -468)],
+    )
+    .await?;
+    link_posting(conn, batch, posting).await?;
+    Ok(batch)
+}
+
+/// Writes batch `number` in EUR with a payout of `payout` and its posting: line 2 of 500, a
+/// fee of 32 and a net of 468, which settles nothing of ours, and line 3 settling `paid`, a
+/// capture of 10,000, with a fee of 170 where the terms give 165 and a net of 9,830. The
+/// payout less 9,830 goes to suspense. Returns the batch.
+pub async fn batch_with_a_fee_off_the_terms(
+    conn: &mut PgConnection,
+    accounts: &Accounts,
+    (number, payout): (i64, i64),
+    paid: &Movement,
+) -> sqlx::Result<Uuid> {
+    let batch = Uuid::now_v7();
+    insert_batch(conn, batch, "EUR", number, payout).await?;
+    insert_line(conn, batch, 2, "capture", (500, 32, 468)).await?;
+    insert_line(conn, batch, 3, "capture", (10_000, 170, 9_830)).await?;
+    let open = MovementStep::open(paid);
+    let settle = open.then("settle", "settled");
+    open.insert(conn).await?;
+    settle.insert(conn).await?;
+    insert_capture_match(conn, batch, 3, paid, SETTLED_POSITION, settle.id).await?;
+    let suspense = payout.checked_sub(9_830).expect("small amounts");
+    let posting = post(
+        conn,
+        "EUR",
+        &[
+            (accounts.payouts, payout),
+            (accounts.fees, 170),
+            (accounts.receivable, -10_000),
+            (
+                accounts.suspense,
+                suspense.checked_neg().expect("small amounts"),
+            ),
+        ],
+    )
+    .await?;
+    link_posting(conn, batch, posting).await?;
+    Ok(batch)
+}
+
+/// A committed posting that nothing causes.
+pub async fn uncaused(pool: &PgPool, accounts: &Accounts) -> sqlx::Result<Uuid> {
+    let mut tx = runtime_transaction(pool).await?;
+    let posting = post(
+        &mut tx,
+        "EUR",
+        &[(accounts.payouts, 1), (accounts.suspense, -1)],
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(posting)
+}
+
+/// The open and overdue steps of `movement`'s chain. Returns the overdue step.
+pub async fn overdue(conn: &mut PgConnection, movement: &Movement) -> sqlx::Result<MovementStep> {
+    let open = MovementStep::open(movement);
+    let overdue = open.then("overdue", "overdue");
+    open.insert(conn).await?;
+    overdue.insert(conn).await?;
+    Ok(overdue)
+}
