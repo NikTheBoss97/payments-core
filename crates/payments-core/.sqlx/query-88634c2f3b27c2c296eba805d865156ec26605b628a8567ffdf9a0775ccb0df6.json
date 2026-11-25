@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "TRUNCATE settlement_movement_outcomes",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "88634c2f3b27c2c296eba805d865156ec26605b628a8567ffdf9a0775ccb0df6"
+}

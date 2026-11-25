@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE settlement_movement_outcomes SET reason = reason",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "cd58b12312b505dbb5c6f275ff7913aeb0ecca68ed8bcdeb0aa2c3d5774a813a"
+}

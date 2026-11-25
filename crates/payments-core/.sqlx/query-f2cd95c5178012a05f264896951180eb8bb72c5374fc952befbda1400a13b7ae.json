@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM settlement_movement_outcomes",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "f2cd95c5178012a05f264896951180eb8bb72c5374fc952befbda1400a13b7ae"
+}
