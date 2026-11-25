@@ -809,8 +809,9 @@ async fn a_discrepancy_never_changes(pool: PgPool) -> TestResult {
             "settlement_missing_batches_append_only",
             "settlement_missing_batches",
         ),
+        // CASCADE, because arrivals refer to the missing batches (ADR-0072).
         (
-            sqlx::query!("TRUNCATE settlement_missing_batches")
+            sqlx::query!("TRUNCATE settlement_missing_batches CASCADE")
                 .execute(&pool)
                 .await
                 .expect_err("append-only"),

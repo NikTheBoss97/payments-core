@@ -2,8 +2,8 @@
 
 //! Database tests for resolving discrepancies (ADR-0069, ADR-0072): an operator's outcome on
 //! a discrepancy whose chain is its own, and on an overdue movement, a line that settles
-//! late, and the reversal of an outcome that its evidence follows, each with its posting,
-//! and the guards of I13 in PostgreSQL (ADR-0071).
+//! late, the reversal of an outcome that its evidence follows, each with its posting, and a
+//! missing batch that arrives, with the guards of I13 in PostgreSQL (ADR-0071).
 //!
 //! Rows are written with raw SQL as the system role, `payments_app`, the way a buggy code
 //! path or a manual session could write them. Each rejected write breaks a single rule.
@@ -3021,6 +3021,284 @@ async fn a_reversal_never_changes(pool: PgPool) -> TestResult {
     // As the system role, the privileges refuse first.
     let mut tx = runtime_transaction(&pool).await?;
     let err = sqlx::query!("DELETE FROM settlement_movement_reversals")
+        .execute(&mut *tx)
+        .await
+        .expect_err("no DELETE privilege");
+    assert_eq!(sqlstate(err), INSUFFICIENT_PRIVILEGE);
+    Ok(())
+}
+
+/// The arrival of batch `number` of the mock in EUR, the record of `discrepancy`'s
+/// evidence step `step`.
+async fn insert_arrival(
+    conn: &mut PgConnection,
+    (step, discrepancy): (Uuid, Uuid),
+    number: i64,
+) -> sqlx::Result<()> {
+    sqlx::query!(
+        "INSERT INTO settlement_batch_arrivals (step_id, discrepancy_id, psp, currency, number) \
+         VALUES ($1, $2, 'mock', 'EUR', $3)",
+        step,
+        discrepancy,
+        number
+    )
+    .execute(conn)
+    .await?;
+    Ok(())
+}
+
+/// Records batch `number` of the mock in EUR as missing, found and committed. Returns its
+/// discrepancy.
+async fn missing(pool: &PgPool, number: i64) -> sqlx::Result<Uuid> {
+    let discrepancy = Uuid::now_v7();
+    let mut tx = runtime_transaction(pool).await?;
+    insert_discrepancy(&mut tx, discrepancy, "missing_batch").await?;
+    find(&mut tx, discrepancy, "missing_batch").await?;
+    insert_missing_batch(&mut tx, discrepancy, ("mock", "EUR", number), "not_listed").await?;
+    tx.commit().await?;
+    Ok(discrepancy)
+}
+
+/// Books batch `number` of the mock in EUR, with no line and no payout, so no posting, and
+/// commits.
+async fn book_empty(pool: &PgPool, number: i64) -> sqlx::Result<()> {
+    let mut tx = runtime_transaction(pool).await?;
+    insert_batch(&mut tx, Uuid::now_v7(), "EUR", number, 0).await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+#[sqlx::test]
+async fn a_missing_batch_closes_when_it_arrives(pool: PgPool) -> TestResult {
+    // In the transaction that books it.
+    let first = missing(&pool, 5).await?;
+    let mut tx = runtime_transaction(&pool).await?;
+    insert_batch(&mut tx, Uuid::now_v7(), "EUR", 5, 0).await?;
+    let evidence = Uuid::now_v7();
+    insert_discrepancy_step(
+        &mut tx,
+        first,
+        (1, 0, evidence),
+        ("evidence", "open", "closed"),
+        "missing_batch",
+    )
+    .await?;
+    insert_arrival(&mut tx, (evidence, first), 5).await?;
+    commit(tx).await?;
+
+    // At a later pass, after an operator accepted it: the acceptance posted nothing, so
+    // nothing is reversed.
+    let second = missing(&pool, 6).await?;
+    let mut tx = runtime_transaction(&pool).await?;
+    outcome(
+        &mut tx,
+        (second, "missing_batch"),
+        ("accept", "accepted"),
+        REASON,
+    )
+    .await?;
+    commit(tx).await?;
+    book_empty(&pool, 6).await?;
+    let mut tx = runtime_transaction(&pool).await?;
+    let evidence = Uuid::now_v7();
+    insert_discrepancy_step(
+        &mut tx,
+        second,
+        (2, 1, evidence),
+        ("evidence", "accepted", "closed"),
+        "missing_batch",
+    )
+    .await?;
+    insert_arrival(&mut tx, (evidence, second), 6).await?;
+    commit(tx).await?;
+    Ok(())
+}
+
+#[sqlx::test]
+async fn an_arrival_names_the_batch_that_was_missing(pool: PgPool) -> TestResult {
+    let discrepancy = missing(&pool, 5).await?;
+    book_empty(&pool, 6).await?;
+
+    // A batch that was not the missing one.
+    let mut tx = runtime_transaction(&pool).await?;
+    let evidence = Uuid::now_v7();
+    insert_discrepancy_step(
+        &mut tx,
+        discrepancy,
+        (1, 0, evidence),
+        ("evidence", "open", "closed"),
+        "missing_batch",
+    )
+    .await?;
+    let err = insert_arrival(&mut tx, (evidence, discrepancy), 6)
+        .await
+        .expect_err("another batch");
+    assert_violation(
+        err,
+        FOREIGN_KEY_VIOLATION,
+        "settlement_batch_arrivals_missing_fkey",
+    );
+    tx.rollback().await?;
+
+    // The missing batch, not booked yet.
+    let mut tx = runtime_transaction(&pool).await?;
+    let evidence = Uuid::now_v7();
+    insert_discrepancy_step(
+        &mut tx,
+        discrepancy,
+        (1, 0, evidence),
+        ("evidence", "open", "closed"),
+        "missing_batch",
+    )
+    .await?;
+    let err = insert_arrival(&mut tx, (evidence, discrepancy), 5)
+        .await
+        .expect_err("a batch that has not arrived");
+    assert_violation(
+        err,
+        FOREIGN_KEY_VIOLATION,
+        "settlement_batch_arrivals_batch_fkey",
+    );
+    tx.rollback().await?;
+
+    // The evidence step of another missing batch.
+    let other = missing(&pool, 7).await?;
+    book_empty(&pool, 5).await?;
+    let mut tx = runtime_transaction(&pool).await?;
+    let evidence = Uuid::now_v7();
+    insert_discrepancy_step(
+        &mut tx,
+        other,
+        (1, 0, evidence),
+        ("evidence", "open", "closed"),
+        "missing_batch",
+    )
+    .await?;
+    let err = insert_arrival(&mut tx, (evidence, discrepancy), 5)
+        .await
+        .expect_err("another discrepancy's evidence");
+    assert_violation(
+        err,
+        FOREIGN_KEY_VIOLATION,
+        "settlement_batch_arrivals_step_fkey",
+    );
+    Ok(())
+}
+
+#[sqlx::test]
+async fn a_missing_batchs_evidence_needs_its_arrival(pool: PgPool) -> TestResult {
+    let discrepancy = missing(&pool, 5).await?;
+    let mut tx = runtime_transaction(&pool).await?;
+    insert_batch(&mut tx, Uuid::now_v7(), "EUR", 5, 0).await?;
+    insert_discrepancy_step(
+        &mut tx,
+        discrepancy,
+        (1, 0, Uuid::now_v7()),
+        ("evidence", "open", "closed"),
+        "missing_batch",
+    )
+    .await?;
+    let err = commit_refused(tx).await;
+    assert_guard(
+        err,
+        NO_RECORD,
+        "settlement_discrepancy_steps_record_check",
+        "settlement_discrepancy_steps",
+    );
+    Ok(())
+}
+
+#[sqlx::test]
+async fn a_missing_batch_closes_once(pool: PgPool) -> TestResult {
+    let discrepancy = missing(&pool, 5).await?;
+    book_empty(&pool, 5).await?;
+    let evidence = Uuid::now_v7();
+    let mut tx = runtime_transaction(&pool).await?;
+    insert_discrepancy_step(
+        &mut tx,
+        discrepancy,
+        (1, 0, evidence),
+        ("evidence", "open", "closed"),
+        "missing_batch",
+    )
+    .await?;
+    insert_arrival(&mut tx, (evidence, discrepancy), 5).await?;
+    commit(tx).await?;
+
+    // The discrepancy closes once, and takes no outcome after.
+    for (kind, to) in [("evidence", "closed"), ("accept", "accepted")] {
+        let mut tx = runtime_transaction(&pool).await?;
+        let err = insert_discrepancy_step(
+            &mut tx,
+            discrepancy,
+            (2, 1, Uuid::now_v7()),
+            (kind, "closed", to),
+            "missing_batch",
+        )
+        .await
+        .expect_err("a move after the discrepancy closed");
+        assert_violation(
+            err,
+            CHECK_VIOLATION,
+            "settlement_discrepancy_steps_edge_check",
+        );
+        tx.rollback().await?;
+    }
+    let mut tx = runtime_transaction(&pool).await?;
+    let err = insert_arrival(&mut tx, (evidence, discrepancy), 5)
+        .await
+        .expect_err("a second record of one step");
+    assert_violation(err, UNIQUE_VIOLATION, "settlement_batch_arrivals_pkey");
+    Ok(())
+}
+
+#[sqlx::test]
+async fn an_arrival_never_changes(pool: PgPool) -> TestResult {
+    let discrepancy = missing(&pool, 5).await?;
+    book_empty(&pool, 5).await?;
+    let evidence = Uuid::now_v7();
+    let mut tx = runtime_transaction(&pool).await?;
+    insert_discrepancy_step(
+        &mut tx,
+        discrepancy,
+        (1, 0, evidence),
+        ("evidence", "open", "closed"),
+        "missing_batch",
+    )
+    .await?;
+    insert_arrival(&mut tx, (evidence, discrepancy), 5).await?;
+    commit(tx).await?;
+
+    // As the owner, the table's triggers refuse.
+    for (err, trigger) in [
+        (
+            sqlx::query!("DELETE FROM settlement_batch_arrivals")
+                .execute(&pool)
+                .await
+                .expect_err("append-only"),
+            "settlement_batch_arrivals_append_only",
+        ),
+        (
+            sqlx::query!("UPDATE settlement_batch_arrivals SET number = number")
+                .execute(&pool)
+                .await
+                .expect_err("append-only"),
+            "settlement_batch_arrivals_append_only",
+        ),
+        (
+            sqlx::query!("TRUNCATE settlement_batch_arrivals")
+                .execute(&pool)
+                .await
+                .expect_err("append-only"),
+            "settlement_batch_arrivals_no_truncate",
+        ),
+    ] {
+        assert_guard(err, APPEND_ONLY, trigger, "settlement_batch_arrivals");
+    }
+
+    // As the system role, the privileges refuse first.
+    let mut tx = runtime_transaction(&pool).await?;
+    let err = sqlx::query!("DELETE FROM settlement_batch_arrivals")
         .execute(&mut *tx)
         .await
         .expect_err("no DELETE privilege");

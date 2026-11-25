@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE settlement_batch_arrivals SET number = number",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "cae4a91baa12f9941c18d934fbd54d854bf065cce0040b3338443f1f5c9755c4"
+}

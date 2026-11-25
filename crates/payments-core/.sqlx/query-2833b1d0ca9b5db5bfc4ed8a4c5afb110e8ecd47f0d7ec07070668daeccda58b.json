@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "TRUNCATE settlement_missing_batches CASCADE",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "2833b1d0ca9b5db5bfc4ed8a4c5afb110e8ecd47f0d7ec07070668daeccda58b"
+}
