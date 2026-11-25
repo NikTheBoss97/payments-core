@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM settlement_discrepancy_reversals",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "e79bbd9b3fa3c557cc303fe1ed87a9f4c1baac10e2ee2b6388640c0b8e5dda05"
+}

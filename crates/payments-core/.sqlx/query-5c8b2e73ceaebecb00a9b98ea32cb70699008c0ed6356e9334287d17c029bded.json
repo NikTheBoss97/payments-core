@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE settlement_discrepancy_reversals SET step_id = step_id",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "5c8b2e73ceaebecb00a9b98ea32cb70699008c0ed6356e9334287d17c029bded"
+}
